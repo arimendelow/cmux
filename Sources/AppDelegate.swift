@@ -15008,7 +15008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                event: event,
                actions: [],
                shortcuts: configuredCmuxShortcutActions.compactMap(\.shortcut)
-                    + configuredPluginShortcutBindings()
+                    + configuredPluginShortcutBindings(for: event)
            ) {
             return true
         }
