@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Tooltip } from "@base-ui-components/react/tooltip";
 import { CmdkMenu, type CmdkGroup } from "./components/CmdkMenu";
 import { StatusRow } from "./components/StatusRow";
-import { ActivityIndicatorBlock, Blocks, ToolBlock, TurnActions, type ToolBlockVariant } from "./components/Transcript";
+import { ActivityIndicatorBlock, Blocks, ElicitationBlock, PermissionBlock, PlanBlock, ToolBlock, TurnActions, type ToolBlockVariant } from "./components/Transcript";
 import { BarsIcon, PinwheelSpinner, ProviderIcon } from "./components/icons";
 import { HintTooltip } from "./components/Tooltips";
 import { useOverlayScrollbars } from "./hooks/useOverlayScrollbars";
@@ -197,6 +197,7 @@ export function GalleryApp() {
     ["picker", "Unified picker"],
     ["menus", "Menus"],
     ["commands", "Command menus"],
+    ["workbench-interactions", "Workbench interactions"],
     ["tooltips", "Tooltips"],
     ["turn-summary", "Turn summary"],
     ["transcript", "Transcript"],
@@ -273,6 +274,61 @@ export function GalleryApp() {
             <div><div className="gallery-label">Codex skills</div><CmdkMenu groups={pickerGroups("$")} inline className="mention-menu gallery-inline-menu" /></div>
             <div><div className="gallery-label">File references</div><CmdkMenu groups={pickerGroups("@")} inline className="mention-menu gallery-inline-menu" /></div>
             <div><div className="gallery-label">Empty state</div><CmdkMenu groups={[{ id: "empty", label: "No commands", items: [] }]} inline className="mention-menu gallery-inline-menu" /></div>
+          </div>
+        </Section>
+
+        <Section id="workbench-interactions" title="Workbench interactions">
+          <div className="gallery-stack">
+            <div>
+              <div className="gallery-label">Structured plan</div>
+              <PlanBlock block={{
+                kind: "plan",
+                entries: [
+                  { content: "Inspect the greeting", status: "completed" },
+                  { content: "Update the message", status: "in_progress" },
+                  { content: "Run the check", status: "pending" },
+                ],
+              }} />
+            </div>
+            <div>
+              <div className="gallery-label">Permission request</div>
+              <PermissionBlock block={{
+                kind: "permission",
+                requestId: "gallery-permission",
+                title: "Run greeting check",
+                options: [
+                  { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+                  { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+                ],
+                status: "pending",
+              }} onRespond={() => {}} />
+            </div>
+            <div>
+              <div className="gallery-label">Structured question</div>
+              <ElicitationBlock block={{
+                kind: "elicitation",
+                requestId: "gallery-elicitation",
+                message: "How should I update the greeting?",
+                fields: [
+                  {
+                    name: "strategy",
+                    type: "string",
+                    title: "Strategy",
+                    required: true,
+                    options: ["conservative", "balanced"],
+                    defaultValue: "balanced",
+                  },
+                  {
+                    name: "includeCheck",
+                    type: "boolean",
+                    title: "Run the check",
+                    required: false,
+                    defaultValue: true,
+                  },
+                ],
+                status: "pending",
+              }} onRespond={() => {}} />
+            </div>
           </div>
         </Section>
 
