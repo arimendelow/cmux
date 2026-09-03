@@ -206,6 +206,11 @@ async function ensureAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> 
   return promise;
 }
 
+function isUnavailableSessionLoad(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error);
+  return /method not found|session.*(?:not found|does not exist|unknown|invalid|expired)/i.test(message);
+}
+
 async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   const spawnModel = effectiveSpawnModel(def, sess.startOptions);
   const cmd = commandForSession(def, sess.startOptions);
@@ -295,20 +300,43 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
       ? sess.internal.acpResumeSessionId
       : "";
-    const sessionState = resumeSessionId
-      ? await request("session/load", { sessionId: resumeSessionId, cwd: sess.cwd, mcpServers: [] })
-      : await request("session/new", { cwd: sess.cwd, mcpServers: [] });
-    st.acpSessionId = resumeSessionId || sessionState.sessionId;
+    let resumed = false;
+    let respawned = false;
+    let sessionState: any;
+    if (resumeSessionId) {
+      try {
+        sessionState = await request("session/load", { sessionId: resumeSessionId, cwd: sess.cwd, mcpServers: [] });
+        resumed = true;
+      } catch (error) {
+        if (!isUnavailableSessionLoad(error)) throw error;
+        delete sess.internal.acpResumeSessionId;
+        delete sess.internal.persistedProviderSessionId;
+        await sess.invalidatePersistedSession?.();
+        sessionState = await request("session/new", { cwd: sess.cwd, mcpServers: [] });
+        respawned = true;
+      }
+
+    } else {
+      sessionState = await request("session/new", { cwd: sess.cwd, mcpServers: [] });
+    }
+    st.acpSessionId = resumed ? resumeSessionId : sessionState.sessionId;
     sess.internal.acpResumeSessionId = st.acpSessionId;
     ingestAcpOptions(st, sessionState ?? {}, def, spawnModel);
     sess.internal.acp = st;
-    if (resumeSessionId) {
+    if (resumed) {
       const hostName = sess.internal.productId === "ouro-workbench-v1" ? "Workbench" : "Agent Chat";
       sess.emit({
         kind: "recovery",
         mode: "resumed",
         title: "Conversation resumed",
         message: `Loaded the existing provider session after ${hostName} restarted.`,
+      });
+    } else if (respawned) {
+      sess.emit({
+        kind: "recovery",
+        mode: "respawned",
+        title: "Started a fresh conversation",
+        message: "The previous provider session could not be loaded.",
       });
     }
     sess.emit({ kind: "meta", providerSessionId: st.acpSessionId });
@@ -369,11 +397,14 @@ async function setAcpOption(sess: SessionCtx, st: AcpState, def: ProviderDef, id
     sess.startOptions.model = value;
     updateLocalOption(st, id, value);
     emitAcpState(sess, st);
-    sess.emit({ kind: "status", text: "model changed, conversation restarted" });
     const proc = st.proc;
     if ((sess.internal.acp as AcpState | undefined) === st) sess.internal.acp = undefined;
+    delete sess.internal.acpResumeSessionId;
+    delete sess.internal.persistedProviderSessionId;
+    await sess.invalidatePersistedSession?.();
     proc.kill();
     await ensureAcp(sess, def);
+    sess.emit({ kind: "status", text: "model changed, conversation restarted" });
     return;
   }
   emitAcpState(sess, st);

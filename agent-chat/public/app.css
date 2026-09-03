@@ -404,6 +404,11 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
 }
 .recovery-banner strong { color: color-mix(in srgb, var(--green) 74%, var(--text)); font-weight: 600; }
 .recovery-banner span { color: var(--text-dim); }
+.recovery-banner[data-recovery-mode="respawned"] {
+  background: color-mix(in srgb, var(--amber) 8%, var(--bg));
+  border-color: color-mix(in srgb, var(--amber) 26%, var(--border));
+}
+.recovery-banner[data-recovery-mode="respawned"] strong { color: color-mix(in srgb, var(--amber) 78%, var(--text)); }
 .startup-banner {
   background: color-mix(in srgb, var(--accent) 7%, var(--bg));
   border-color: color-mix(in srgb, var(--accent) 22%, var(--border));

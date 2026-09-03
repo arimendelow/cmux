@@ -12,7 +12,7 @@ export type AgentEvent =
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
-  | { kind: "recovery"; mode: "resumed"; title: string; message: string }
+  | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string }
@@ -109,7 +109,7 @@ export interface WorkbenchExperience {
   hubAuthorityLabel: string;
   hubUrl: string;
 }
-export interface RecoveryState { mode: "resumed"; title: string; message: string; }
+export interface RecoveryState { mode: "resumed" | "respawned"; title: string; message: string; }
 export interface ConnectionState { state: "starting"; title: string; message?: string; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; createdAt?: number; capabilities?: ProviderCapabilities; }
 export type CtrlJMode = "newline" | "menu";

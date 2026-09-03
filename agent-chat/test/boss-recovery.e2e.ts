@@ -120,6 +120,87 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
   }
 });
 
+test("Workbench replaces a stale Boss provider session and rewrites its record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workbench-boss-respawn-"));
+  const sessions = join(root, "sessions");
+  const stateFile = join(root, "server.json");
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  await writeFakeAgency(bin, "--fail-load");
+  await writePersistedSession(sessions, {
+    id: "boss-respawned",
+    provider: "agency-worker",
+    providerSessionId: "missing-provider-session",
+    cwd: root,
+    title: "Boss",
+    autoApprove: false,
+    startOptions: {},
+    createdAt: 1_725_000_000_000,
+  });
+  const process = Bun.spawn(["bun", "server.ts"], {
+    cwd: join(import.meta.dir, ".."),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...globalThis.process.env,
+      PATH: `${bin}:${globalThis.process.env.PATH ?? ""}`,
+      BUN_BIN: Bun.which("bun") ?? "bun",
+      FAKE_ACP_SCRIPT: join(import.meta.dir, "fake-acp.ts"),
+      CMUX_AGENT_CHAT_PORT: "0",
+      CMUX_AGENT_CHAT_STATE_FILE: stateFile,
+      CMUX_AGENT_CHAT_SESSION_DIR: sessions,
+      CMUX_AGENT_CHAT_TOKEN: "respawn-token",
+      CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / respawn-fixture",
+      CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
+      CMUX_AGENT_UI_CWD: root,
+      CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
+    },
+  });
+  let socket: WebSocket | null = null;
+
+  try {
+    const port = await waitForPort(stateFile);
+    socket = new WebSocket(`ws://127.0.0.1:${port}/respawn-token/ws`);
+    const messages: any[] = [];
+    socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
+    await new Promise<void>((resolve, reject) => {
+      socket!.onopen = () => resolve();
+      socket!.onerror = () => reject(new Error("WebSocket failed to open"));
+    });
+    await waitForMessage(messages, (message) => message.kind === "hello");
+    const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
+    const recovered = pickInitialBossSession(
+      listed.sessions,
+      messages.find((message) => message.kind === "hello").experience as WorkbenchExperience,
+    );
+    socket.send(JSON.stringify({ op: "subscribe", sessionId: recovered!.id }));
+    const recovery = await waitForMessage(
+      messages,
+      (message) => message.kind === "event"
+        && message.evt?.kind === "recovery"
+        && message.evt.mode === "respawned",
+    );
+    expect(recovery.evt.title).toBe("Started a fresh conversation");
+    const recordPath = join(sessions, "boss-respawned.json");
+    let rewritten: any = null;
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      try {
+        rewritten = JSON.parse(await readFile(recordPath, "utf8"));
+        if (rewritten.providerSessionId === "fake-default") break;
+      } catch {}
+      await Bun.sleep(20);
+    }
+    expect(rewritten?.providerSessionId).toBe("fake-default");
+  } finally {
+    socket?.close();
+    process.kill();
+    await process.exited;
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10_000);
+
 test("Workbench can cancel Boss startup before the session id reaches the browser", async () => {
   const root = await mkdtemp(join(tmpdir(), "workbench-boss-cancel-"));
   const sessions = join(root, "sessions");

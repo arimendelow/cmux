@@ -490,6 +490,15 @@ function createSession(
       for (const ws of sess.sockets) ws.send(payload);
       broadcastSessions();
     },
+    async invalidatePersistedSession() {
+      delete sess.internal.persistedProviderSessionId;
+      if (!SESSION_DIR) return;
+      try {
+        await deletePersistedSession(SESSION_DIR, sess.id);
+      } catch (error) {
+        console.error(`[agent-chat] invalidate persisted session ${sess.id} failed`, error);
+      }
+    },
   };
   sessions.set(id, sess);
   broadcastSessions();
@@ -797,15 +806,36 @@ export function resolveAllowedRootsForTest(raw: string, home?: string): string[]
 
 let canonicalAllowedRootsPromise: Promise<string[]> | null = null;
 
-async function canonicalAllowedRoots(): Promise<string[]> {
-  if (!canonicalAllowedRootsPromise) {
-    canonicalAllowedRootsPromise = Promise.all(ALLOWED_ROOT_PATHS.map(async (root) => {
+async function canonicalizeAllowedRoots(paths: string[], logMissing = true): Promise<string[]> {
+  const roots = (await Promise.all(paths.map(async (root) => {
+    try {
       const rootStat = await stat(root);
-      if (!rootStat.isDirectory()) throw new Error(`configured allowed root is not a directory: ${root}`);
+      if (!rootStat.isDirectory()) {
+        if (logMissing) console.warn(`[agent-chat] configured allowed root is not a directory: ${root}`);
+        return null;
+      }
       return realpath(root);
-    }));
+    } catch (error) {
+      if (logMissing) console.warn(`[agent-chat] configured allowed root is unavailable: ${root}`, error);
+      return null;
+    }
+  }))).filter((root): root is string => Boolean(root));
+  if (paths.length && !roots.length) throw new Error("no configured allowed roots are available");
+  return [...new Set(roots)];
+}
+
+export async function canonicalizeAllowedRootsForTest(paths: string[]): Promise<string[]> {
+  return canonicalizeAllowedRoots(paths, false);
+}
+
+async function canonicalAllowedRoots(): Promise<string[]> {
+  if (!canonicalAllowedRootsPromise) canonicalAllowedRootsPromise = canonicalizeAllowedRoots(ALLOWED_ROOT_PATHS);
+  try {
+    return await canonicalAllowedRootsPromise;
+  } catch (error) {
+    canonicalAllowedRootsPromise = null;
+    throw error;
   }
-  return canonicalAllowedRootsPromise;
 }
 
 function pathIsWithin(root: string, candidate: string): boolean {
@@ -2049,6 +2079,12 @@ async function startServer() {
       }
       return Response.json(themeForClient(currentTheme));
     }
+    if (url.pathname === "/api/shutdown" && req.method === "POST") {
+      if (!AUTH_TOKEN) return new Response("not found", { status: 404 });
+      if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
+      setTimeout(shutdown, 10);
+      return Response.json({ ok: true });
+    }
     // REST for the CLI: create a session (optionally with a first prompt) and
     // get back its id/url; list sessions.
     if (url.pathname === "/api/sessions" && req.method === "POST") {
@@ -2422,13 +2458,12 @@ function subscribe(ws: Bun.ServerWebSocket<WsData>, sess: Session) {
   sess.sockets.add(ws);
 }
 
-process.on("SIGINT", () => {
+function shutdown() {
   for (const sess of sessions.values()) sess.adapter.dispose(sess);
   process.exit(0);
-});
-process.on("SIGTERM", () => {
-  for (const sess of sessions.values()) sess.adapter.dispose(sess);
-  process.exit(0);
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 if (import.meta.main) await startServer();

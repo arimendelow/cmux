@@ -9,7 +9,7 @@ export type AgentEvent =
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
-  | { kind: "recovery"; mode: "resumed"; title: string; message: string }
+  | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string } // streaming assistant text
@@ -104,6 +104,7 @@ export interface SessionCtx {
   internal: Record<string, unknown>;
   emit(evt: AgentEvent): void;
   setStatus(status: SessionStatus): void;
+  invalidatePersistedSession?(): Promise<void>;
 }
 
 export interface Adapter {
