@@ -121,7 +121,6 @@ extension AppDelegate {
               context.cmuxConfigStore?.agentChat.startCommand != nil else {
             return
         }
-        let initialWorkspaceId = tabManager.selectedWorkspace?.id
         DispatchQueue.main.async { [weak self, weak tabManager] in
             guard let self,
                   let tabManager,
@@ -134,16 +133,7 @@ extension AppDelegate {
             _ = self.executeConfiguredCmuxAction(
                 action,
                 context: context,
-                preferredWindow: self.mainWindow(for: windowId),
-                onExecuted: {
-                    guard let initialWorkspaceId,
-                          tabManager.tabs.count > 1,
-                          let initialWorkspace = tabManager.tabs.first(where: { $0.id == initialWorkspaceId }),
-                          tabManager.selectedWorkspace?.id != initialWorkspaceId else {
-                        return
-                    }
-                    tabManager.closeWorkspace(initialWorkspace, recordHistory: false)
-                }
+                preferredWindow: self.mainWindow(for: windowId)
             )
         }
     }
