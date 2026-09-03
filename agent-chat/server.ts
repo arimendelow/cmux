@@ -15,6 +15,12 @@ import { claudeAdapter } from "./adapters/claude";
 import { codexAdapter } from "./adapters/codex";
 import { piAdapter } from "./adapters/pi";
 import { makeAcpAdapter } from "./adapters/acp";
+import {
+  deletePersistedSession,
+  readPersistedSessions,
+  writePersistedSession,
+  type PersistedAgentChatSession,
+} from "./session-persistence";
 import { pickAccentColor, resolveGhosttyTheme, resolveGhosttyThemeAsync, type GhosttyTheme } from "./theme";
 import { agentModelCatalog, type AgentModelProviderCatalog } from "./catalog";
 import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
@@ -34,6 +40,7 @@ const AUTH_TOKEN = argValue("--token") ?? process.env.CMUX_AGENT_CHAT_TOKEN ?? "
 if (AUTH_TOKEN.includes("/")) throw new Error("CMUX_AGENT_CHAT_TOKEN must be a single path segment");
 const AUTH_PREFIX = AUTH_TOKEN ? `/${encodeURIComponent(AUTH_TOKEN)}` : "";
 const STATE_FILE = process.env.CMUX_AGENT_CHAT_STATE_FILE ?? "";
+const SESSION_DIR = process.env.CMUX_AGENT_CHAT_SESSION_DIR ?? "";
 
 // The sidecar binds loopback only, but browsers can still reach loopback from
 // arbitrary web origins (CSRF against the WS control plane) and DNS rebinding
@@ -371,10 +378,11 @@ function createSession(
   autoApprove: boolean,
   title: string,
   startOptions: Record<string, OptionValue> = {},
+  restored?: { id: string; createdAt: number; providerSessionId: string },
 ): Session {
   const adapter = adapters.get(provider);
   if (!adapter) throw new Error(`unknown provider: ${provider}`);
-  const id = crypto.randomUUID().slice(0, 8);
+  const id = restored?.id ?? crypto.randomUUID().slice(0, 8);
   const sess: Session = {
     id,
     provider,
@@ -385,10 +393,10 @@ function createSession(
     seedOptions: optionCatalog.get(provider)?.options,
     status: "idle",
     events: [],
-    internal: {},
+    internal: restored ? { acpResumeSessionId: restored.providerSessionId } : {},
     adapter,
     sockets: new Set(),
-    createdAt: Date.now(),
+    createdAt: restored?.createdAt ?? Date.now(),
     emit(evt: AgentEvent) {
       if (evt.kind === "done") {
         emitDoneAfterFiles(sess, evt);
@@ -429,6 +437,61 @@ function emitSessionEvent(sess: Session, evt: AgentEvent) {
 
 function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
   if (evt.kind === "files-changed") recordFileDiffAllowlist(sess, evt.files);
+  if (evt.kind === "meta" && evt.providerSessionId) {
+    sess.internal.persistedProviderSessionId = evt.providerSessionId;
+    persistSession(sess).catch((error) => {
+      console.error(`[agent-chat] persist session ${sess.id} failed`, error);
+    });
+  }
+}
+
+function persistedSession(sess: Session): PersistedAgentChatSession | null {
+  const providerSessionId = typeof sess.internal.persistedProviderSessionId === "string"
+    ? sess.internal.persistedProviderSessionId
+    : typeof sess.internal.acpResumeSessionId === "string"
+      ? sess.internal.acpResumeSessionId
+      : "";
+  if (!providerSessionId) return null;
+  return {
+    id: sess.id,
+    provider: sess.provider,
+    providerSessionId,
+    cwd: sess.cwd,
+    title: sess.title,
+    autoApprove: sess.autoApprove,
+    startOptions: sess.startOptions,
+    createdAt: sess.createdAt,
+  };
+}
+
+async function persistSession(sess: Session) {
+  if (!SESSION_DIR) return;
+  const record = persistedSession(sess);
+  if (record) await writePersistedSession(SESSION_DIR, record);
+}
+
+async function restorePersistedSessions() {
+  if (!SESSION_DIR) return;
+  const result = await readPersistedSessions(SESSION_DIR);
+  for (const error of result.errors) console.error(`[agent-chat] persisted session ignored: ${error}`);
+  for (const record of result.records) {
+    try {
+      createSession(
+        record.provider,
+        record.cwd,
+        record.autoApprove,
+        record.title,
+        record.startOptions,
+        {
+          id: record.id,
+          createdAt: record.createdAt,
+          providerSessionId: record.providerSessionId,
+        },
+      );
+    } catch (error) {
+      console.error(`[agent-chat] persisted session ${record.id} ignored`, error);
+    }
+  }
 }
 
 function eventGenerations(sess: Session): number[] {
@@ -1795,7 +1858,8 @@ function assetResponse(req: Request, asset: StaticAsset): Response {
   });
 }
 
-function startServer() {
+async function startServer() {
+  await restorePersistedSessions();
   const server = Bun.serve<WsData>({
     port: PORT,
     hostname: "127.0.0.1",
@@ -2153,6 +2217,11 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       sess.adapter.dispose(sess);
       sessions.delete(sess.id);
       broadcastSessions();
+      if (SESSION_DIR) {
+        deletePersistedSession(SESSION_DIR, sess.id).catch((err) => {
+          console.error(`[agent-chat] delete persisted session ${sess.id} failed`, err);
+        });
+      }
       break;
     }
   }
@@ -2169,5 +2238,9 @@ process.on("SIGINT", () => {
   for (const sess of sessions.values()) sess.adapter.dispose(sess);
   process.exit(0);
 });
+process.on("SIGTERM", () => {
+  for (const sess of sessions.values()) sess.adapter.dispose(sess);
+  process.exit(0);
+});
 
-if (import.meta.main) startServer();
+if (import.meta.main) await startServer();
