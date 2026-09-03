@@ -51,6 +51,57 @@ struct AgentChatActionInFlightGate {
             state.sidecarStateFileStore
         }
     }
+
+    static func stopOwnedServer() async -> Bool {
+        guard let session = ownedServerSession() else { return true }
+        var request = URLRequest(url: session.shutdownURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 1.5
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 1.5
+        configuration.timeoutIntervalForResource = 2
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        do {
+            let (_, response) = try await urlSession.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return false
+            }
+        } catch {
+            let isReachable = await serverIsReachable(session.healthURL, session: urlSession)
+            guard !isReachable else {
+                return false
+            }
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while clock.now < deadline {
+            let isReachable = await serverIsReachable(session.healthURL, session: urlSession)
+            if !isReachable {
+                clearOwnedServerSession(matching: session)
+                await sidecarStateFileStore()?.removeStateFile()
+                return true
+            }
+            try? await clock.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    private static func serverIsReachable(_ url: URL, session: URLSession) async -> Bool {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 0.25
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            return false
+        }
+    }
 }
 
 struct AgentChatServerAvailability: Sendable {
@@ -172,7 +223,10 @@ extension AppDelegate {
         let beforeIds = Set(tabManager.tabs.map(\.id))
         let workspaceName = OuroWorkbenchProduct.agentChatSurfaceTitle()
         if OuroWorkbenchProduct.isCurrentBundle,
-           let existing = tabManager.tabs.first(where: { $0.title == workspaceName }) {
+           let existing = tabManager.tabs.first(where: { $0.customTitle == workspaceName }),
+           let browserPanel = existing.focusedPanelId.flatMap({ existing.panels[$0] as? BrowserPanel })
+                ?? existing.panels.values.compactMap({ $0 as? BrowserPanel }).first {
+            browserPanel.navigateSmart(url.absoluteString)
             tabManager.selectWorkspace(existing)
             return existing
         }

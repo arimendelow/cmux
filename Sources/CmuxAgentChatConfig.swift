@@ -190,6 +190,13 @@ struct AgentChatOwnedServerSession: Sendable, Hashable {
             .appendingPathComponent("theme")
     }
 
+    var shutdownURL: URL {
+        baseURL
+            .appendingPathComponent(token, isDirectory: true)
+            .appendingPathComponent("api", isDirectory: true)
+            .appendingPathComponent("shutdown")
+    }
+
     static func browserURL(port: Int, token: String) -> URL {
         URL(string: "http://127.0.0.1:\(port)/\(token)/")!
     }

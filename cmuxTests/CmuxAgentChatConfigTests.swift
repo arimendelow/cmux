@@ -383,6 +383,7 @@ struct CmuxAgentChatConfigTests {
         )
 
         #expect(AgentChatThemeSync.themeURL(for: agentChat).absoluteString == "http://127.0.0.1:43123/theme-token/api/theme")
+        #expect(session.shutdownURL.absoluteString == "http://127.0.0.1:43123/theme-token/api/shutdown")
     }
 
     @MainActor

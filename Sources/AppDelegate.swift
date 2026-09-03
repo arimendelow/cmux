@@ -1928,7 +1928,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func deferTerminateForOwnedCleanup(reason: String) -> Bool {
         let markedForKill = remoteTmuxController.windowsMarkedForKillOnClose()
         let simulatorCleanupTasks = SimulatorPanel.beginApplicationTerminationCleanup()
-        guard !markedForKill.isEmpty || !simulatorCleanupTasks.isEmpty else { return false }
+        let shouldStopAgentChat = AgentChatActionInFlightGate.ownedServerSession() != nil
+        guard !markedForKill.isEmpty || !simulatorCleanupTasks.isEmpty || shouldStopAgentChat else { return false }
         if !isAwaitingTerminateCleanup {
             isAwaitingTerminateCleanup = true
             StartupBreadcrumbLog.append(
@@ -1936,6 +1937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 fields: [
                     "windows": String(markedForKill.count),
                     "simulatorPanels": String(simulatorCleanupTasks.count),
+                    "agentChat": shouldStopAgentChat ? "1" : "0",
                     "reason": reason,
                 ]
             )
@@ -1948,6 +1950,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 for cleanupTask in simulatorCleanupTasks {
                     await cleanupTask.value
                     guard !Task.isCancelled else { return }
+                }
+                if shouldStopAgentChat {
+                    let stopped = await AgentChatActionInFlightGate.stopOwnedServer()
+                    StartupBreadcrumbLog.append(
+                        "appDelegate.shouldTerminate.agentChat",
+                        fields: ["stopped": stopped ? "1" : "0"]
+                    )
                 }
                 let simulatorCleanupSucceeded = await TerminalController.shared
                     .simulatorCameraCleanupOwnershipScope
