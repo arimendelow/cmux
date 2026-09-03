@@ -330,6 +330,7 @@ export function useSession(): SessionState {
   const [lastError, setLastError] = useState("");
   const [forkPending, setForkPending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const providersRef = useRef<Provider[]>([]);
   const sessionIdRef = useRef<string | null>(routedSessionId);
   const pendingFileDiffKeysRef = useRef<Record<string, string[]>>({});
   const pendingStartRef = useRef<{
@@ -377,8 +378,8 @@ export function useSession(): SessionState {
     clearPendingStartTimeout();
     pendingStartTimeoutRef.current = window.setTimeout(() => {
       failPendingStart("Failed to start agent: request timed out");
-    }, providerStartTimeoutMs(providers, provider));
-  }, [clearPendingStartTimeout, failPendingStart, providers]);
+    }, providerStartTimeoutMs(providersRef.current, provider));
+  }, [clearPendingStartTimeout, failPendingStart]);
 
   const sendRaw = useCallback((obj: unknown) => {
     const ws = wsRef.current;
@@ -407,6 +408,7 @@ export function useSession(): SessionState {
         switch (msg.kind) {
           case "hello": {
             const h = msg as Hello & { kind: string; capabilities?: Record<string, ProviderCapabilities> };
+            providersRef.current = h.providers;
             setProviders(h.providers);
             setCapabilities(h.capabilities ?? {});
             setDefaultCwd(h.defaultCwd);

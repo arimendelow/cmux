@@ -124,8 +124,8 @@ export function Chat() {
   return (
     <section id="chat-view">
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
+      {recovery ? <RecoveryBanner recovery={recovery} /> : null}
       <div id="messages" ref={scrollRef} onScroll={onScroll}>
-        {recovery ? <RecoveryBanner recovery={recovery} /> : null}
         <Blocks
           blocks={blocks}
           status={session?.status}
