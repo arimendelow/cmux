@@ -3,7 +3,7 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, restoreComposerDraft } = await import("../src/session");
+const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, providerStartTimeoutMs, restoreComposerDraft } = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -41,6 +41,12 @@ if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
 }
 if (providerSessionTitle(providers, "missing") !== "Agent") {
   throw new Error("unknown provider title should be neutral");
+}
+if (providerStartTimeoutMs([{ id: "agency-worker", label: "Agency worker", startupTimeoutMs: 90_000 }], "agency-worker") !== 90_000) {
+  throw new Error("provider startup timeout should reach the browser client");
+}
+if (providerStartTimeoutMs(providers, "missing") !== 30_000) {
+  throw new Error("unknown providers should keep the default startup timeout");
 }
 
 const permissionRequested = foldEvent([], {
