@@ -34,6 +34,12 @@ test("ACP ignores safe metadata updates and reports each unknown update once", a
     expect(events.filter(
       (event) => event.kind === "status" && event.text === "Unsupported ACP session update: mystery_update",
     )).toHaveLength(1);
+    const unsupported = events.filter(
+      (event): event is Extract<AgentEvent, { kind: "status" }> =>
+        event.kind === "status" && event.text.startsWith("Unsupported ACP session update:"),
+    );
+    expect(unsupported).toHaveLength(16);
+    expect(unsupported.every((event) => event.text.length <= 120)).toBe(true);
     expect(JSON.stringify(events)).not.toContain("sensitive title");
     expect(JSON.stringify(events)).not.toContain("123456");
   } finally {

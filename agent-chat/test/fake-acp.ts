@@ -72,6 +72,9 @@ for await (const line of rl) {
         { sessionUpdate: "usage_update", inputTokens: 123456 },
         { sessionUpdate: "mystery_update", secret: "do not surface" },
         { sessionUpdate: "mystery_update", secret: "still do not surface" },
+        ...Array.from({ length: 20 }, (_, index) => ({
+          sessionUpdate: `unique_${index}_${"x".repeat(200)}`,
+        })),
       ]) {
         send({ jsonrpc: "2.0", method: "session/update", params: { update } });
       }
