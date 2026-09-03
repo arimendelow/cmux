@@ -11,6 +11,7 @@ export type AgentEvent =
   | { kind: "elicitation-resolved"; requestId: string; action: ElicitationAction }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
+  | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed"; title: string; message: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
@@ -106,8 +107,10 @@ export interface WorkbenchExperience {
   defaultProvider: string;
   localAuthorityLabel: string;
   hubAuthorityLabel: string;
+  hubUrl: string;
 }
 export interface RecoveryState { mode: "resumed"; title: string; message: string; }
+export interface ConnectionState { state: "starting"; title: string; message?: string; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; createdAt?: number; capabilities?: ProviderCapabilities; }
 export type CtrlJMode = "newline" | "menu";
 
@@ -188,6 +191,7 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
           : block
       );
     case "recovery":
+    case "connection":
       return blocks;
     default:
       return blocks;
@@ -210,6 +214,7 @@ export interface SessionState {
   defaultCwd: string;
   defaultProvider: string;
   experience: WorkbenchExperience | null;
+  connection: ConnectionState | null;
   recovery: RecoveryState | null;
   ctrlJ: CtrlJMode;
   phase: "composer" | "chat";
@@ -281,8 +286,14 @@ export function consumeOptimisticUserEcho(queue: string[], text: string): boolea
   return true;
 }
 
-export function providerSessionTitle(providers: Provider[], provider: string): string {
-  return providers.find((candidate) => candidate.id === provider)?.label ?? "Agent";
+export function providerSessionTitle(
+  providers: Provider[],
+  provider: string,
+  experience: WorkbenchExperience | null = null,
+): string {
+  const definition = providers.find((candidate) => candidate.id === provider);
+  if (definition?.role === "boss" && experience) return experience.surfaceName;
+  return definition?.label ?? "Agent";
 }
 
 export function providerStartTimeoutMs(providers: Provider[], provider: string): number {
@@ -314,6 +325,7 @@ export function useSession(): SessionState {
   const [defaultCwd, setDefaultCwd] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("");
   const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
+  const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
   const [phase, setPhase] = useState<"composer" | "chat">(routedSessionId ? "chat" : "composer");
@@ -435,6 +447,7 @@ export function useSession(): SessionState {
             } else {
               setSession(msg.session);
               setBlocks([]);
+              setConnection(null);
               optimisticUsersRef.current = [];
             }
             setOptions([]);
@@ -450,6 +463,7 @@ export function useSession(): SessionState {
             document.title = msg.session.title || "cmux agent";
             setSession(msg.session);
             setBlocks((msg.events as AgentEvent[]).reduce(foldEvent, [] as Block[]));
+            setConnection(latestConnection(msg.events as AgentEvent[]));
             setRecovery(latestRecovery(msg.events as AgentEvent[]));
             optimisticUsersRef.current = [];
             setOptions(latestOptions(msg.events as AgentEvent[]));
@@ -466,6 +480,7 @@ export function useSession(): SessionState {
             setOptions([]);
             setActions({});
             setCommands([]);
+            setConnection(null);
             setRecovery(null);
             pendingFileDiffKeysRef.current = {};
             setFileDiffs({});
@@ -482,6 +497,7 @@ export function useSession(): SessionState {
             history.replaceState(null, "", appPath("/s/" + recovered.id));
             setSession(recovered);
             setBlocks([]);
+            setConnection(null);
             setRecovery(null);
             setPhase("chat");
             sendRaw({ op: "subscribe", sessionId: recovered.id });
@@ -495,6 +511,12 @@ export function useSession(): SessionState {
           case "event":
             if (msg.sessionId === sessionIdRef.current) {
               const evt = msg.evt as AgentEvent;
+              if (evt.kind === "connection") {
+                setConnection(evt.state === "starting"
+                  ? { state: "starting", title: evt.title, message: evt.message }
+                  : null);
+                break;
+              }
               if (evt.kind === "recovery") {
                 setRecovery({ mode: evt.mode, title: evt.title, message: evt.message });
                 break;
@@ -580,7 +602,7 @@ export function useSession(): SessionState {
     optimisticUsersRef.current = [opts.prompt];
     sessionIdRef.current = null;
     history.replaceState(null, "", appPath("/"));
-    const title = providerSessionTitle(providers, opts.provider);
+    const title = providerSessionTitle(providers, opts.provider, experience);
     document.title = title;
     setLastError("");
     setSession({
@@ -594,12 +616,17 @@ export function useSession(): SessionState {
     setOptions([]);
     setActions({});
     setCommands([]);
+    setConnection({
+      state: "starting",
+      title: `Starting ${title}`,
+      message: "Connecting to the local ACP session.",
+    });
     setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
     setPhase("chat");
     return true;
-  }, [armPendingStartTimeout, providers, sendRaw]);
+  }, [armPendingStartTimeout, experience, providers, sendRaw]);
   const compose = useCallback(() => {
     clearPendingStartTimeout();
     pendingStartRef.current = null;
@@ -611,6 +638,7 @@ export function useSession(): SessionState {
     setOptions([]);
     setActions({});
     setCommands([]);
+    setConnection(null);
     setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
@@ -687,6 +715,7 @@ export function useSession(): SessionState {
     defaultCwd,
     defaultProvider,
     experience,
+    connection,
     recovery,
     ctrlJ,
     phase,
@@ -742,6 +771,18 @@ function latestRecovery(events: AgentEvent[]): RecoveryState | null {
     const event = events[i];
     if (event.kind === "recovery") {
       return { mode: event.mode, title: event.title, message: event.message };
+    }
+  }
+  return null;
+}
+
+function latestConnection(events: AgentEvent[]): ConnectionState | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === "connection") {
+      return event.state === "starting"
+        ? { state: "starting", title: event.title, message: event.message }
+        : null;
     }
   }
   return null;

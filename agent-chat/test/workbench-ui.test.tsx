@@ -12,6 +12,7 @@ test("Workbench header makes local and Hub authority explicit", () => {
         defaultProvider: "agency-worker",
         localAuthorityLabel: "Controlled here",
         hubAuthorityLabel: "Controlled in Agency Hub",
+        hubUrl: "https://aka.ms/agency/hub",
       }}
     />,
   );
@@ -22,4 +23,6 @@ test("Workbench header makes local and Hub authority explicit", () => {
   expect(html).toContain("Controlled here");
   expect(html).toContain("Remote sessions");
   expect(html).toContain("Controlled in Agency Hub");
+  expect(html).toContain("href=\"https://aka.ms/agency/hub\"");
+  expect(html).toContain("Open Hub");
 });

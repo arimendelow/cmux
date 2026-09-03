@@ -8,6 +8,7 @@ export type AgentEvent =
   | { kind: "elicitation-resolved"; requestId: string; action: ElicitationAction }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
+  | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed"; title: string; message: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }

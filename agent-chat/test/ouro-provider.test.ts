@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForTest, workbenchExperienceForTest } from "../server";
+import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForTest, startErrorMessageForTest, workbenchExperienceForTest } from "../server";
 
 test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", () => {
   const providers = providerDefinitionsForTest();
@@ -45,12 +45,18 @@ test("Workbench v1 advertises its boss-first authority contract", () => {
     defaultProvider: "agency-worker",
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
+    hubUrl: "https://aka.ms/agency/hub",
   });
   expect(workbenchExperienceForTest("", "Desk / demo-task")).toBeUndefined();
   expect(providerDefinitionsForProductForTest("ouro-workbench-v1").map((provider) => provider.id)).toEqual([
     "agency-worker",
     "copilot",
   ]);
+  expect(startErrorMessageForTest(
+    "agency-worker",
+    new Error("working directory is outside configured roots"),
+    "ouro-workbench-v1",
+  )).toBe("Failed to start Boss: working directory is outside the configured roots");
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {

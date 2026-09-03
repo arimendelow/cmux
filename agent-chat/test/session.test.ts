@@ -51,6 +51,7 @@ const recoveredBoss = pickInitialBossSession([
   defaultProvider: "agency-worker",
   localAuthorityLabel: "Controlled here",
   hubAuthorityLabel: "Controlled in Agency Hub",
+  hubUrl: "https://aka.ms/agency/hub",
 });
 if (recoveredBoss?.id !== "boss-older") {
   throw new Error(`Workbench root should resume its newest Boss, got ${JSON.stringify(recoveredBoss)}`);
@@ -60,6 +61,16 @@ if (pickInitialBossSession([], null) !== null) {
 }
 if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
   throw new Error("session title should use the provider label");
+}
+if (providerSessionTitle(providers, "agency-worker", {
+  productName: "Ouro Workbench v1",
+  surfaceName: "Boss",
+  defaultProvider: "agency-worker",
+  localAuthorityLabel: "Controlled here",
+  hubAuthorityLabel: "Controlled in Agency Hub",
+  hubUrl: "https://aka.ms/agency/hub",
+}) !== "Boss") {
+  throw new Error("the Workbench boss should use the product surface title");
 }
 if (providerSessionTitle(providers, "missing") !== "Agent") {
   throw new Error("unknown provider title should be neutral");

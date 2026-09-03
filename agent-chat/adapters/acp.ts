@@ -174,7 +174,20 @@ async function ensureAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> 
   const starting = sess.internal.acpStarting as Promise<AcpState> | undefined;
   if (starting) return starting;
 
-  const promise = startAcp(sess, def).finally(() => {
+  const displayName = def.role === "boss" ? "Boss" : def.label;
+  sess.emit({
+    kind: "connection",
+    state: "starting",
+    title: `Starting ${displayName}`,
+    message: "Connecting to the local ACP session.",
+  });
+  const promise = startAcp(sess, def).then((state) => {
+    sess.emit({ kind: "connection", state: "ready", title: `${displayName} connected` });
+    return state;
+  }).catch((error) => {
+    sess.emit({ kind: "connection", state: "failed", title: `${displayName} connection failed` });
+    throw error;
+  }).finally(() => {
     if (sess.internal.acpStarting === promise) sess.internal.acpStarting = undefined;
     sess.internal.acpStartingProc = undefined;
   });

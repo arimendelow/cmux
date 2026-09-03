@@ -16,9 +16,12 @@ export function WorkbenchHeader({
       </div>
       <div className="workbench-authority" aria-label="Session control authority">
         <span className="authority-local">{experience.localAuthorityLabel}</span>
-        <span className="authority-hub">
-          <span>Remote sessions:</span>
-          <strong>{experience.hubAuthorityLabel}</strong>
+        <span className="authority-remote">
+          <span className="authority-hub">
+            <span>Remote sessions:</span>
+            <strong>{experience.hubAuthorityLabel}</strong>
+          </span>
+          <a className="authority-hub-link" href={experience.hubUrl} target="_blank" rel="noreferrer">Open Hub</a>
         </span>
       </div>
     </header>

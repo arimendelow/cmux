@@ -56,7 +56,7 @@ function useStickToBottom(scrollRef: RefObject<HTMLDivElement | null>, stickRef:
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
   const [text, setText] = useState("");
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -124,7 +124,14 @@ export function Chat() {
   return (
     <section id="chat-view">
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
-      {recovery ? <RecoveryBanner recovery={recovery} /> : null}
+      {connection ? (
+        <div className="recovery-banner-wrap">
+          <div className="recovery-banner startup-banner" role="status">
+            <strong>{connection.title}</strong>
+            {connection.message ? <span>{connection.message}</span> : null}
+          </div>
+        </div>
+      ) : recovery ? <RecoveryBanner recovery={recovery} /> : null}
       <div id="messages" ref={scrollRef} onScroll={onScroll}>
         <Blocks
           blocks={blocks}

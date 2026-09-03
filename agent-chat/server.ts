@@ -150,6 +150,7 @@ export interface WorkbenchExperience {
   defaultProvider: string;
   localAuthorityLabel: string;
   hubAuthorityLabel: string;
+  hubUrl: string;
 }
 
 function workbenchExperience(productId: string, contextLabel: string): WorkbenchExperience | undefined {
@@ -161,6 +162,7 @@ function workbenchExperience(productId: string, contextLabel: string): Workbench
     defaultProvider: "agency-worker",
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
+    hubUrl: "https://aka.ms/agency/hub",
   };
 }
 
@@ -2150,14 +2152,30 @@ function safeReason(err: unknown): string {
   return "unexpected error";
 }
 
-function safeErrorMessage(op: string, err: unknown, context: { provider?: string } = {}): string {
+function providerDisplayLabel(provider: string | undefined, experience = WORKBENCH_EXPERIENCE): string {
+  if (!provider) return "agent";
+  const definition = PROVIDERS.find((candidate) => candidate.id === provider);
+  if (definition?.role === "boss" && experience) return experience.surfaceName;
+  return definition?.label ?? provider;
+}
+
+function safeErrorMessage(
+  op: string,
+  err: unknown,
+  context: { provider?: string } = {},
+  experience = WORKBENCH_EXPERIENCE,
+): string {
   const reason = safeReason(err);
-  if (op === "start") return `Failed to start ${context.provider ?? "agent"}: ${reason}`;
+  if (op === "start") return `Failed to start ${providerDisplayLabel(context.provider, experience)}: ${reason}`;
   if (op === "fork") return `Failed to fork chat: ${reason}`;
   if (op === "get-file-diff") return `Failed to load diff: ${reason}`;
   if (op === "send") return `Failed to send message: ${reason}`;
   if (op === "set-option") return `Failed to update option: ${reason}`;
   return `Request failed: ${reason}`;
+}
+
+export function startErrorMessageForTest(provider: string, err: unknown, productId = ""): string {
+  return safeErrorMessage("start", err, { provider }, workbenchExperience(productId, ""));
 }
 
 function sendWsErrorDetails(

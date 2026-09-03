@@ -116,6 +116,12 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   display: flex; gap: 5px; color: var(--text-faint); font: calc(var(--font-size-base) - 3px) var(--font-sans);
 }
 .authority-hub strong { color: var(--text-dim); font-weight: 500; }
+.authority-remote { display: flex; align-items: center; gap: 8px; }
+.authority-hub-link {
+  color: var(--accent); font: 600 calc(var(--font-size-base) - 3px) var(--font-sans);
+  text-decoration: none;
+}
+.authority-hub-link:hover { text-decoration: underline; }
 .workbench-header.compact {
   width: min(808px, 100%); align-items: center; margin: 0 auto; padding: 12px 28px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -130,6 +136,7 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   .workbench-authority { align-items: flex-start; }
   .workbench-header.compact { padding-inline: 18px; }
   .workbench-header.compact .workbench-authority { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .authority-remote { flex-wrap: wrap; row-gap: 2px; }
 }
 #composer-card {
   position: relative; width: min(660px, 100%);
@@ -397,6 +404,11 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
 }
 .recovery-banner strong { color: color-mix(in srgb, var(--green) 74%, var(--text)); font-weight: 600; }
 .recovery-banner span { color: var(--text-dim); }
+.startup-banner {
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+.startup-banner strong { color: color-mix(in srgb, var(--accent) 72%, var(--text)); }
 .turn-virtual-row { overflow-anchor: none; }
 .turn-group { min-width: 0; }
 .msg { max-width: 760px; margin: 0 auto; padding: 0 24px 16px; }

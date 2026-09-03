@@ -290,6 +290,7 @@ export function GalleryApp() {
                 defaultProvider: "agency-worker",
                 localAuthorityLabel: "Controlled here",
                 hubAuthorityLabel: "Controlled in Agency Hub",
+                hubUrl: "https://aka.ms/agency/hub",
               }} />
             </div>
             <div>
