@@ -11,6 +11,17 @@ import Testing
 @Suite(.serialized)
 struct CmuxAgentChatConfigTests {
 
+    @Test func ouroWorkbenchOwnsTheBossEntrypoint() {
+        let bundleIdentifier = "com.ourostack.workbench.v1.debug"
+        #expect(OuroWorkbenchProduct.isWorkbenchBundleIdentifier(bundleIdentifier))
+        #expect(!OuroWorkbenchProduct.isWorkbenchBundleIdentifier("com.manaflow.cmux"))
+        #expect(OuroWorkbenchProduct.agentChatUIEnabled(bundleIdentifier: bundleIdentifier, upstreamValue: false))
+        #expect(!OuroWorkbenchProduct.agentChatUIEnabled(bundleIdentifier: "com.manaflow.cmux", upstreamValue: false))
+        #expect(OuroWorkbenchProduct.agentChatActionTitle(bundleIdentifier: bundleIdentifier) == "Open Boss")
+        #expect(OuroWorkbenchProduct.agentChatSurfaceTitle(bundleIdentifier: bundleIdentifier) == "Boss")
+        #expect(OuroWorkbenchProduct.agentChatSubtitle(bundleIdentifier: bundleIdentifier) == "Workbench boss")
+    }
+
     @MainActor
     private func withAgentChatUIFlag<T>(_ enabled: Bool, _ body: () throws -> T) throws -> T {
         let flags = CmuxFeatureFlags.shared

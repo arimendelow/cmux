@@ -25,9 +25,9 @@ extension ContentView {
         guard CmuxFeatureFlags.shared.isAgentChatUIEnabled else { return [] }
         return [CommandPaletteCommandContribution(
             commandId: "palette.newAgentChat",
-            title: { _ in String(localized: "command.newAgentChat.title", defaultValue: "New agent chat") },
-            subtitle: { _ in String(localized: "command.newAgentChat.subtitle", defaultValue: "Agent Chat") },
-            keywords: ["create", "new", "agent", "chat", "browser", "codex", "claude"],
+            title: { _ in OuroWorkbenchProduct.agentChatActionTitle() },
+            subtitle: { _ in OuroWorkbenchProduct.agentChatSubtitle() },
+            keywords: ["create", "new", "agent", "chat", "boss", "copilot", "agency"],
             when: { !$0.bool(CommandPaletteContextKeys.browserDisabled) }
         )]
     }

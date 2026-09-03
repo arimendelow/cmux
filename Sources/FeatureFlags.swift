@@ -3,6 +3,42 @@ import Observation
 import PostHog
 import os
 
+enum OuroWorkbenchProduct {
+    private static let bundleIdentifierPrefix = "com.ourostack.workbench"
+
+    static func isWorkbenchBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return bundleIdentifier == bundleIdentifierPrefix
+            || bundleIdentifier.hasPrefix(bundleIdentifierPrefix + ".")
+    }
+
+    static var isCurrentBundle: Bool {
+        isWorkbenchBundleIdentifier(Bundle.main.bundleIdentifier)
+    }
+
+    static func agentChatUIEnabled(
+        bundleIdentifier: String?,
+        upstreamValue: Bool
+    ) -> Bool {
+        isWorkbenchBundleIdentifier(bundleIdentifier) || upstreamValue
+    }
+
+    static func agentChatActionTitle(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> String {
+        if isWorkbenchBundleIdentifier(bundleIdentifier) { return "Open Boss" }
+        return String(localized: "command.newAgentChat.title", defaultValue: "New agent chat")
+    }
+
+    static func agentChatSurfaceTitle(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> String {
+        if isWorkbenchBundleIdentifier(bundleIdentifier) { return "Boss" }
+        return String(localized: "workspace.agentChat.defaultTitle", defaultValue: "Agent Chat")
+    }
+
+    static func agentChatSubtitle(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> String {
+        if isWorkbenchBundleIdentifier(bundleIdentifier) { return "Workbench boss" }
+        return String(localized: "command.newAgentChat.subtitle", defaultValue: "Agent Chat")
+    }
+}
+
 struct CmuxFeatureFlagDefinition: Identifiable, Equatable, Sendable {
     var id: String { key }
 
@@ -262,7 +298,16 @@ final class CmuxFeatureFlags {
     }
 
     var isAgentChatUIEnabled: Bool {
-        effectiveValue(for: Self.allFlags[4])
+        Self.agentChatUIEnabledForCurrentBundle(
+            upstreamValue: effectiveValue(for: Self.allFlags[4])
+        )
+    }
+
+    private static func agentChatUIEnabledForCurrentBundle(upstreamValue: Bool) -> Bool {
+        OuroWorkbenchProduct.agentChatUIEnabled(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            upstreamValue: upstreamValue
+        )
     }
 
     var isSidebarAccountButtonEnabled: Bool {

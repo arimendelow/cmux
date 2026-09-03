@@ -49,7 +49,7 @@ enum CmuxSurfaceTabBarBuiltInAction: String, Codable, Sendable, CaseIterable, Ha
         case .newWorkspace:
             return (String(localized: "command.newWorkspace.title", defaultValue: "New Workspace"), ["create", "new", "workspace"])
         case .newAgentChat:
-            return (String(localized: "command.newAgentChat.title", defaultValue: "New agent chat"), ["create", "new", "agent", "chat", "browser", "codex", "claude"])
+            return (OuroWorkbenchProduct.agentChatActionTitle(), ["create", "new", "agent", "chat", "boss", "copilot", "agency"])
         case .cloudVM:
             return (String(localized: "command.cloudVM.title", defaultValue: "Open Base"), ["base", "cloud", "vm", "virtual", "machine", "remote"])
         case .mobileConnect:

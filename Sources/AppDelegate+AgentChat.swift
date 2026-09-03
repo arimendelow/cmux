@@ -170,10 +170,12 @@ extension AppDelegate {
         url: URL
     ) -> Workspace? {
         let beforeIds = Set(tabManager.tabs.map(\.id))
-        let workspaceName = String(
-            localized: "workspace.agentChat.defaultTitle",
-            defaultValue: "Agent Chat"
-        )
+        let workspaceName = OuroWorkbenchProduct.agentChatSurfaceTitle()
+        if OuroWorkbenchProduct.isCurrentBundle,
+           let existing = tabManager.tabs.first(where: { $0.title == workspaceName }) {
+            tabManager.selectWorkspace(existing)
+            return existing
+        }
         let workspaceDefinition = CmuxWorkspaceDefinition(
             name: workspaceName,
             layout: .pane(CmuxPaneDefinition(surfaces: [
@@ -359,7 +361,7 @@ extension AppDelegate {
                 configSourcePath: sourcePath,
                 globalConfigPath: globalConfigPath,
                 displayCommand: command,
-                displayTitle: String(localized: "command.newAgentChat.title", defaultValue: "New agent chat"),
+                displayTitle: OuroWorkbenchProduct.agentChatActionTitle(),
                 presentingWindow: preferredWindow,
                 onAuthorized: {
                     continuation.resume(returning: true)
