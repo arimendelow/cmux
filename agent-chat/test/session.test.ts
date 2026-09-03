@@ -3,7 +3,7 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, restoreComposerDraft } = await import("../src/session");
+const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, restoreComposerDraft } = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -30,6 +30,17 @@ if (!consumeOptimisticUserEcho(optimistic, "same") || queueLength() !== 0) {
 }
 if (consumeOptimisticUserEcho(optimistic, "same")) {
   throw new Error("non-optimistic repeated user message should not be suppressed");
+}
+
+const providers = [
+  { id: "copilot", label: "GitHub Copilot" },
+  { id: "agency-worker", label: "Agency worker" },
+];
+if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
+  throw new Error("session title should use the provider label");
+}
+if (providerSessionTitle(providers, "missing") !== "Agent") {
+  throw new Error("unknown provider title should be neutral");
 }
 
 console.log("session store assertions passed");

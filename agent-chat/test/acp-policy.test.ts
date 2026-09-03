@@ -51,3 +51,16 @@ test("ACP honors a provider startup timeout", async () => {
     adapter.dispose(context);
   }
 });
+
+test("ACP can defer disposable catalog probes", async () => {
+  const adapter = makeAcpAdapter({
+    id: "deferred-acp",
+    label: "Deferred ACP",
+    adapter: "acp",
+    cmd: ["/missing/deferred-acp"],
+    probeCatalogs: false,
+  });
+
+  expect(await adapter.listOptions?.("/tmp")).toEqual(adapter.capabilities?.options);
+  expect(await adapter.listCommands?.("/tmp")).toEqual([{ trigger: "/", commands: [] }]);
+});

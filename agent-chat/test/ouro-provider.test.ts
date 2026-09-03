@@ -1,0 +1,47 @@
+import { expect, test } from "bun:test";
+import { providerDefinitionsForTest, resolveSessionStartForTest } from "../server";
+
+test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", () => {
+  const providers = providerDefinitionsForTest();
+  const copilot = providers.find((provider) => provider.id === "copilot");
+  const worker = providers.find((provider) => provider.id === "agency-worker");
+
+  expect(copilot?.label).toBe("GitHub Copilot");
+  expect(copilot?.cmd).toEqual([
+    "agency",
+    "copilot",
+    "--no-config-plugins",
+    "--no-default-mcps",
+    "--no-aec",
+    "--acp",
+    "--stdio",
+  ]);
+  expect(worker?.label).toBe("Agency worker");
+  expect(worker?.cmd).toEqual([
+    "agency",
+    "copilot",
+    "--no-config-plugins",
+    "--no-default-mcps",
+    "--no-aec",
+    "--plugin",
+    "github:shared-internal-tools/ms-desk:plugins/ms-desk",
+    "-a",
+    "ms-desk:worker",
+    "--acp",
+    "--stdio",
+  ]);
+  expect(worker?.startupTimeoutMs).toBe(90_000);
+  expect(worker?.probeCatalogs).toBe(false);
+  expect(worker?.defaultAutoApprove).toBe(false);
+});
+
+test("session start defaults are safe and do not retain prompt text", () => {
+  expect(resolveSessionStartForTest("agency-worker", "secret customer prompt", undefined)).toEqual({
+    title: "Agency worker",
+    autoApprove: false,
+  });
+  expect(resolveSessionStartForTest("agency-worker", "secret customer prompt", true)).toEqual({
+    title: "Agency worker",
+    autoApprove: true,
+  });
+});
