@@ -4,6 +4,7 @@ import { useCtx } from "../context";
 import { readStoredProviderOptions, updateStoredProviderOption } from "../options-store";
 import { ArrowUp } from "./icons";
 import { StatusRow } from "./StatusRow";
+import { WorkbenchHeader } from "./WorkbenchHeader";
 import { isCtrlJ, insertNewlineAtCaret, useCommandMenu } from "./CommandMenu";
 import { sanitizeStartOptions, withLocalValues } from "./options";
 import { ShortcutOverlay, useKeymap } from "../hooks/useKeymap";
@@ -28,6 +29,8 @@ export function Composer() {
     providers,
     capabilities,
     defaultCwd,
+    defaultProvider,
+    experience,
     providerOptions,
     providerCommands,
     filesByCwd,
@@ -41,7 +44,7 @@ export function Composer() {
     clearError,
     start,
   } = useCtx();
-  const [provider, setProvider] = useState(() => localStorage.getItem("agentui.provider") || "claude");
+  const [provider, setProvider] = useState(() => localStorage.getItem("agentui.provider") || "");
   const [cwd, setCwd] = useState(() => localStorage.getItem("agentui.cwd") || "");
   const [committedCwd, setCommittedCwd] = useState(() => localStorage.getItem("agentui.cwd") || "");
   const [prompt, setPrompt] = useState(() => {
@@ -63,7 +66,7 @@ export function Composer() {
   const commandMenu = useCommandMenu(prompt, setPrompt, commandGroups, taRef, ctrlJ);
 
   useDefaultCwd(defaultCwd, cwd, setCwd, committedCwd, setCommittedCwd);
-  useProviderFallback(providers, provider, setProvider);
+  useProviderFallback(providers, provider, defaultProvider, setProvider);
   useProviderCatalogs(ready, connectionEpoch, providers, provider, committedCwd, requestProviderOptions, requestProviderCommands);
   useFileCatalog(ready, connectionEpoch, committedCwd, requestFiles);
   useCwdValidation(ready, connectionEpoch, committedCwd, defaultCwd, cwdChecks, checkCwd, setCwd, setCommittedCwd);
@@ -124,6 +127,7 @@ export function Composer() {
 
   return (
     <section id="composer-view">
+      {experience ? <WorkbenchHeader experience={experience} /> : null}
       <div id="composer-card">
         <div className="input-wrap">
           <textarea

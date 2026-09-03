@@ -126,6 +126,8 @@ export interface Adapter {
 export interface ProviderDef {
   id: string;
   label: string;
+  description?: string;
+  role?: "boss";
   adapter: string; // key into the adapter registry
   // Extra spawn config consumed by the adapter.
   cmd?: string[];

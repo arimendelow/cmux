@@ -87,7 +87,25 @@ export type Block =
   | { kind: "elicitation"; requestId: string; message: string; fields: ElicitationField[]; status: "pending" | "resolved"; action?: ElicitationAction }
   | { kind: "permission"; requestId: string; title: string; options: PermissionOption[]; status: "pending" | "resolved"; optionId?: string };
 
-export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; startupTimeoutMs?: number; }
+export interface Provider {
+  id: string;
+  label: string;
+  description?: string;
+  role?: "boss";
+  iconUrl?: string;
+  iconDarkUrl?: string;
+  installed?: boolean;
+  installCommand?: string;
+  startupTimeoutMs?: number;
+}
+export interface WorkbenchExperience {
+  productName: string;
+  surfaceName: string;
+  contextLabel?: string;
+  defaultProvider: string;
+  localAuthorityLabel: string;
+  hubAuthorityLabel: string;
+}
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; capabilities?: ProviderCapabilities; }
 export type CtrlJMode = "newline" | "menu";
 
@@ -172,7 +190,13 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
   }
 }
 
-interface Hello { providers: Provider[]; defaultCwd: string; keys?: { ctrlJ?: CtrlJMode }; }
+interface Hello {
+  providers: Provider[];
+  defaultCwd: string;
+  defaultProvider?: string;
+  experience?: WorkbenchExperience;
+  keys?: { ctrlJ?: CtrlJMode };
+}
 
 export interface SessionState {
   ready: boolean;
@@ -180,6 +204,8 @@ export interface SessionState {
   providers: Provider[];
   capabilities: Record<string, ProviderCapabilities>;
   defaultCwd: string;
+  defaultProvider: string;
+  experience: WorkbenchExperience | null;
   ctrlJ: CtrlJMode;
   phase: "composer" | "chat";
   session: SessionSummary | null;
@@ -258,12 +284,21 @@ export function providerStartTimeoutMs(providers: Provider[], provider: string):
   return providers.find((candidate) => candidate.id === provider)?.startupTimeoutMs ?? PENDING_START_TIMEOUT_MS;
 }
 
+export function resolveProviderSelection(providers: Provider[], current: string, preferred = ""): string {
+  const installed = providers.filter((provider) => provider.installed !== false);
+  if (installed.some((provider) => provider.id === current)) return current;
+  if (installed.some((provider) => provider.id === preferred)) return preferred;
+  return installed[0]?.id ?? current;
+}
+
 export function useSession(): SessionState {
   const [ready, setReady] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [capabilities, setCapabilities] = useState<Record<string, ProviderCapabilities>>({});
   const [defaultCwd, setDefaultCwd] = useState("");
+  const [defaultProvider, setDefaultProvider] = useState("");
+  const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
   const [phase, setPhase] = useState<"composer" | "chat">(routedSessionId ? "chat" : "composer");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -357,6 +392,8 @@ export function useSession(): SessionState {
             setProviders(h.providers);
             setCapabilities(h.capabilities ?? {});
             setDefaultCwd(h.defaultCwd);
+            setDefaultProvider(h.defaultProvider ?? "");
+            setExperience(h.experience ?? null);
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
@@ -603,6 +640,8 @@ export function useSession(): SessionState {
     providers,
     capabilities,
     defaultCwd,
+    defaultProvider,
+    experience,
     ctrlJ,
     phase,
     session,

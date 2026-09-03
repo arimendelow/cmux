@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import type { CommandGroup, Provider, SessionOption } from "../session";
+import { useEffect, useLayoutEffect } from "react";
+import { resolveProviderSelection, type CommandGroup, type Provider, type SessionOption } from "../session";
 
 export function useDefaultCwd(
   defaultCwd: string,
@@ -15,11 +15,16 @@ export function useDefaultCwd(
   }, [committedCwd, cwd, defaultCwd, setCommittedCwd, setCwd]);
 }
 
-export function useProviderFallback(providers: Provider[], provider: string, setProvider: (v: string) => void) {
-  useEffect(() => {
-    const installed = providers.filter((p) => p.installed !== false);
-    if (installed.length && !installed.some((p) => p.id === provider)) setProvider(installed[0].id);
-  }, [providers, provider, setProvider]);
+export function useProviderFallback(
+  providers: Provider[],
+  provider: string,
+  preferredProvider: string,
+  setProvider: (v: string) => void,
+) {
+  useLayoutEffect(() => {
+    const resolved = resolveProviderSelection(providers, provider, preferredProvider);
+    if (resolved !== provider) setProvider(resolved);
+  }, [preferredProvider, provider, providers, setProvider]);
 }
 
 export function useProviderCatalogs(
@@ -84,7 +89,7 @@ export function useCwdValidation(
   }, [checkCwd, connectionEpoch, cwd, ready]);
   useEffect(() => {
     const checked = cwdChecks[cwd];
-    if (!checked || checked.ok || !defaultCwd) return;
+    if (!checked || checked.ok || !defaultCwd || !checked.message?.includes("does not exist")) return;
     setCwd(defaultCwd);
     setCommittedCwd(defaultCwd);
     localStorage.setItem("agentui.cwd", defaultCwd);

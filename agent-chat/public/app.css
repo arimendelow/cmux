@@ -91,6 +91,46 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 24px; gap: 12px;
 }
+.workbench-header {
+  width: min(660px, 100%); display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
+  padding: 0 4px 4px;
+}
+.workbench-identity { display: flex; flex-direction: column; min-width: 0; }
+.workbench-product {
+  color: var(--text-faint); font: 600 calc(var(--font-size-base) - 3px) var(--font-sans);
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.workbench-surface { color: var(--text); font: 600 26px/1.2 var(--font-sans); }
+.workbench-context {
+  margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim); font: calc(var(--font-size-base) - 2px) var(--font-mono);
+}
+.workbench-authority { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; }
+.authority-local {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  color: color-mix(in srgb, var(--green) 88%, var(--text)); background: color-mix(in srgb, var(--green) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--green) 34%, transparent); font: 600 calc(var(--font-size-base) - 3px) var(--font-sans);
+}
+.authority-local::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.authority-hub {
+  display: flex; gap: 5px; color: var(--text-faint); font: calc(var(--font-size-base) - 3px) var(--font-sans);
+}
+.authority-hub strong { color: var(--text-dim); font-weight: 500; }
+.workbench-header.compact {
+  width: min(808px, 100%); align-items: center; margin: 0 auto; padding: 12px 28px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.workbench-header.compact .workbench-product { display: none; }
+.workbench-header.compact .workbench-surface { font-size: 16px; }
+.workbench-header.compact .workbench-context { margin-top: 1px; }
+.workbench-header.compact .workbench-authority { flex-direction: row; align-items: center; gap: 10px; }
+.workbench-header.compact .authority-hub { white-space: nowrap; }
+@media (max-width: 560px) {
+  .workbench-header { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .workbench-authority { align-items: flex-start; }
+  .workbench-header.compact { padding-inline: 18px; }
+  .workbench-header.compact .workbench-authority { align-items: flex-start; flex-direction: column; gap: 4px; }
+}
 #composer-card {
   position: relative; width: min(660px, 100%);
   background: var(--bg-input); border: 0; border-radius: 16px;

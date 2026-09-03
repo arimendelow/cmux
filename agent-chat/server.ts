@@ -24,9 +24,9 @@ import {
 import { pickAccentColor, resolveGhosttyTheme, resolveGhosttyThemeAsync, type GhosttyTheme } from "./theme";
 import { agentModelCatalog, type AgentModelProviderCatalog } from "./catalog";
 import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
-import { mkdir, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename as pathBasename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename as pathBasename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 function argValue(name: string): string | undefined {
   const eq = Bun.argv.find((arg) => arg.startsWith(`${name}=`));
@@ -41,6 +41,8 @@ if (AUTH_TOKEN.includes("/")) throw new Error("CMUX_AGENT_CHAT_TOKEN must be a s
 const AUTH_PREFIX = AUTH_TOKEN ? `/${encodeURIComponent(AUTH_TOKEN)}` : "";
 const STATE_FILE = process.env.CMUX_AGENT_CHAT_STATE_FILE ?? "";
 const SESSION_DIR = process.env.CMUX_AGENT_CHAT_SESSION_DIR ?? "";
+const PRODUCT_ID = process.env.CMUX_AGENT_CHAT_PRODUCT ?? "";
+const ALLOWED_ROOT_PATHS = resolveAllowedRoots(process.env.CMUX_AGENT_CHAT_ALLOWED_ROOTS ?? "");
 
 // The sidecar binds loopback only, but browsers can still reach loopback from
 // arbitrary web origins (CSRF against the WS control plane) and DNS rebinding
@@ -141,6 +143,43 @@ const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
 ];
 
+export interface WorkbenchExperience {
+  productName: string;
+  surfaceName: string;
+  contextLabel?: string;
+  defaultProvider: string;
+  localAuthorityLabel: string;
+  hubAuthorityLabel: string;
+}
+
+function workbenchExperience(productId: string, contextLabel: string): WorkbenchExperience | undefined {
+  if (productId !== "ouro-workbench-v1") return undefined;
+  return {
+    productName: "Ouro Workbench v1",
+    surfaceName: "Boss",
+    ...(contextLabel ? { contextLabel } : {}),
+    defaultProvider: "agency-worker",
+    localAuthorityLabel: "Controlled here",
+    hubAuthorityLabel: "Controlled in Agency Hub",
+  };
+}
+
+export function workbenchExperienceForTest(productId: string, contextLabel = ""): WorkbenchExperience | undefined {
+  return workbenchExperience(productId, contextLabel);
+}
+
+const WORKBENCH_EXPERIENCE = workbenchExperience(
+  PRODUCT_ID,
+  process.env.CMUX_AGENT_CHAT_CONTEXT_LABEL?.trim() ?? "",
+);
+
+if (WORKBENCH_EXPERIENCE && !AUTH_TOKEN) {
+  throw new Error("Ouro Workbench requires a launch token");
+}
+if (WORKBENCH_EXPERIENCE && !ALLOWED_ROOT_PATHS.length) {
+  throw new Error("Ouro Workbench requires CMUX_AGENT_CHAT_ALLOWED_ROOTS");
+}
+
 function geminiCatalogModels(): { value: string; label: string; description?: string }[] {
   const remote = agentModelCatalog.provider("gemini");
   if (remote) return remote.models.map((model) => ({ value: model.id, label: model.label, description: model.description }));
@@ -161,17 +200,10 @@ const AGENCY_COPILOT_BASE_COMMAND = [
 
 const PROVIDERS: ProviderDef[] = [
   {
-    id: "copilot",
-    label: "GitHub Copilot",
-    adapter: "acp",
-    cmd: [...AGENCY_COPILOT_BASE_COMMAND, "--acp", "--stdio"],
-    defaultAutoApprove: false,
-    probeCatalogs: false,
-    startupTimeoutMs: 90_000,
-  },
-  {
     id: "agency-worker",
     label: "Agency worker",
+    description: "Desk-aware Workbench boss",
+    role: "boss",
     adapter: "acp",
     cmd: [
       ...AGENCY_COPILOT_BASE_COMMAND,
@@ -182,6 +214,15 @@ const PROVIDERS: ProviderDef[] = [
       "--acp",
       "--stdio",
     ],
+    defaultAutoApprove: false,
+    probeCatalogs: false,
+    startupTimeoutMs: 90_000,
+  },
+  {
+    id: "copilot",
+    label: "GitHub Copilot",
+    adapter: "acp",
+    cmd: [...AGENCY_COPILOT_BASE_COMMAND, "--acp", "--stdio"],
     defaultAutoApprove: false,
     probeCatalogs: false,
     startupTimeoutMs: 90_000,
@@ -209,6 +250,13 @@ for (const def of PROVIDERS) {
   else if (def.adapter === "pi") adapters.set(def.id, piAdapter);
   else if (def.adapter === "acp") adapters.set(def.id, makeAcpAdapter(def));
 }
+
+const DEFAULT_PROVIDER = (() => {
+  const requested = process.env.CMUX_AGENT_CHAT_DEFAULT_PROVIDER?.trim()
+    || WORKBENCH_EXPERIENCE?.defaultProvider
+    || "claude";
+  return PROVIDERS.some((provider) => provider.id === requested) ? requested : "claude";
+})();
 
 interface Session extends SessionCtx {
   adapter: Adapter;
@@ -292,6 +340,8 @@ function providerInfo(p: ProviderDef) {
   return {
     id: p.id,
     label: p.label,
+    description: p.description,
+    role: p.role,
     // Bun.which ignores runtime process.env.PATH mutations (it reads the
     // process's original environ), so pass the prepended PATH explicitly or
     // every provider reads as uninstalled under launchd's minimal PATH.
@@ -311,7 +361,9 @@ function providerDefinition(provider: string): ProviderDef {
 function resolveSessionStart(provider: string, requestedAutoApprove: unknown): { title: string; autoApprove: boolean } {
   const definition = providerDefinition(provider);
   return {
-    title: definition.label,
+    title: definition.role === "boss" && WORKBENCH_EXPERIENCE
+      ? WORKBENCH_EXPERIENCE.surfaceName
+      : definition.label,
     autoApprove: typeof requestedAutoApprove === "boolean"
       ? requestedAutoApprove
       : definition.defaultAutoApprove ?? true,
@@ -350,7 +402,7 @@ function syncCatalogProviderDefs() {
 
 async function applyAgentModelCatalog() {
   syncCatalogProviderDefs();
-  const cwd = process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD;
+  const cwd = await assertCwd(process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD);
   const providers = ["claude", "codex", "gemini"];
   const options = new Map<string, SessionOption[]>();
   await Promise.all(providers.map(async (provider) => {
@@ -476,9 +528,10 @@ async function restorePersistedSessions() {
   for (const error of result.errors) console.error(`[agent-chat] persisted session ignored: ${error}`);
   for (const record of result.records) {
     try {
+      const cwd = await assertCwd(record.cwd);
       createSession(
         record.provider,
-        record.cwd,
+        cwd,
         record.autoApprove,
         record.title,
         record.startOptions,
@@ -683,8 +736,8 @@ function refreshSession(sess: Session) {
 
 async function forkSession(source: Session): Promise<Session> {
   if (!source.adapter.forkSession) throw new Error(`${source.provider} does not support fork`);
-  await assertCwd(source.cwd);
-  const fork = createSession(source.provider, source.cwd, source.autoApprove, source.title, { ...source.startOptions });
+  const cwd = await assertCwd(source.cwd);
+  const fork = createSession(source.provider, cwd, source.autoApprove, source.title, { ...source.startOptions });
   fork.events = source.events.slice();
   rebuildFileDiffAllowlist(fork);
   try {
@@ -699,19 +752,77 @@ async function forkSession(source: Session): Promise<Session> {
   }
 }
 
-async function checkCwd(cwd: string): Promise<{ ok: boolean; message?: string }> {
+function expandHome(path: string, home = homedir()): string {
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return join(home, path.slice(2));
+  return path;
+}
+
+function resolveAllowedRoots(raw: string, home = homedir()): string[] {
+  const roots = raw.split(delimiter).map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    const expanded = expandHome(entry, home);
+    if (!isAbsolute(expanded)) throw new Error(`allowed root must be absolute: ${entry}`);
+    return resolve(expanded);
+  });
+  return [...new Set(roots)];
+}
+
+export function resolveAllowedRootsForTest(raw: string, home?: string): string[] {
+  return resolveAllowedRoots(raw, home);
+}
+
+let canonicalAllowedRootsPromise: Promise<string[]> | null = null;
+
+async function canonicalAllowedRoots(): Promise<string[]> {
+  if (!canonicalAllowedRootsPromise) {
+    canonicalAllowedRootsPromise = Promise.all(ALLOWED_ROOT_PATHS.map(async (root) => {
+      const rootStat = await stat(root);
+      if (!rootStat.isDirectory()) throw new Error(`configured allowed root is not a directory: ${root}`);
+      return realpath(root);
+    }));
+  }
+  return canonicalAllowedRootsPromise;
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+async function validateWorkingDirectory(
+  cwd: string,
+  allowedRoots: string[],
+): Promise<{ ok: boolean; message?: string; canonicalPath?: string }> {
   try {
     const s = await stat(cwd);
-    if (s.isDirectory()) return { ok: true };
+    if (!s.isDirectory()) return { ok: false, message: `working directory does not exist: ${cwd}` };
+    const canonicalPath = await realpath(cwd);
+    if (allowedRoots.length && !allowedRoots.some((root) => pathIsWithin(root, canonicalPath))) {
+      return { ok: false, message: `working directory is outside configured roots: ${cwd}` };
+    }
+    return { ok: true, canonicalPath };
   } catch {
     // Fall through to the stable user-facing message.
   }
   return { ok: false, message: `working directory does not exist: ${cwd}` };
 }
 
-async function assertCwd(cwd: string) {
+export async function validateWorkingDirectoryForTest(
+  cwd: string,
+  allowedRoots: string[],
+): Promise<{ ok: boolean; message?: string; canonicalPath?: string }> {
+  const canonicalRoots = await Promise.all(allowedRoots.map((root) => realpath(root)));
+  return validateWorkingDirectory(cwd, canonicalRoots);
+}
+
+async function checkCwd(cwd: string): Promise<{ ok: boolean; message?: string; canonicalPath?: string }> {
+  return validateWorkingDirectory(cwd, await canonicalAllowedRoots());
+}
+
+async function assertCwd(cwd: string): Promise<string> {
   const res = await checkCwd(cwd);
   if (!res.ok) throw new Error(res.message);
+  return res.canonicalPath ?? cwd;
 }
 
 function parseOptions(raw: unknown): Record<string, OptionValue> {
@@ -1859,6 +1970,7 @@ function assetResponse(req: Request, asset: StaticAsset): Response {
 }
 
 async function startServer() {
+  const defaultCwd = await assertCwd(process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD);
   await restorePersistedSessions();
   const server = Bun.serve<WsData>({
     port: PORT,
@@ -1918,13 +2030,13 @@ async function startServer() {
     if (url.pathname === "/api/sessions" && req.method === "POST") {
       if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
       const body = await req.json().catch(() => ({}));
-      const provider = String(body.provider ?? "claude");
+      const provider = String(body.provider ?? DEFAULT_PROVIDER);
       const prompt = String(body.prompt ?? "").trim();
-      const cwd = String(body.cwd || DEFAULT_CWD);
+      const requestedCwd = String(body.cwd || defaultCwd);
       let sess: Session;
       try {
         const start = resolveSessionStart(provider, body.autoApprove);
-        await assertCwd(cwd);
+        const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
         sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
       } catch (err) {
@@ -1946,7 +2058,9 @@ async function startServer() {
         kind: "hello",
         providers: PROVIDERS.map(providerInfo),
         capabilities: capabilitiesMap(),
-        defaultCwd: process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD,
+        defaultCwd,
+        defaultProvider: DEFAULT_PROVIDER,
+        experience: WORKBENCH_EXPERIENCE,
         keys: keyConfig,
       }));
       ws.send(JSON.stringify({
@@ -1983,7 +2097,7 @@ async function startServer() {
   );
 
   for (const p of PROVIDERS) {
-    refreshCatalog(p.id, process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD).catch((err) => {
+    refreshCatalog(p.id, defaultCwd).catch((err) => {
       console.warn(`catalog warm failed for ${p.id}: ${String(err)}`);
     });
   }
@@ -2006,6 +2120,7 @@ function sendWsError(ws: Bun.ServerWebSocket<WsData>, op: string, err: unknown) 
 
 function safeReason(err: unknown): string {
   const text = String(err instanceof Error ? err.message : err).toLowerCase();
+  if (text.includes("outside configured roots")) return "working directory is outside the configured roots";
   if (text.includes("working directory") || text.includes("enoent")) return "working directory is unavailable";
   if (text.includes("unknown provider")) return "unknown provider";
   if (text.includes("no session")) return "no session is available";
@@ -2045,13 +2160,16 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const prompt = String(msg.prompt ?? "").trim();
       if (!prompt) return;
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
-      const cwd = String(msg.cwd || DEFAULT_CWD);
+      const requestedCwd = String(msg.cwd || DEFAULT_CWD);
       const provider = String(msg.provider);
       const start = resolveSessionStart(provider, msg.autoApprove);
       const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
       pruneStartRequests();
       const existing = requestId ? startRequests.get(requestId) : undefined;
-      const startPromise = existing?.promise ?? Promise.resolve(assertCwd(cwd).then(() => sanitizeStartOptions(provider, cwd, rawOptions))).then((options) => {
+      const startPromise = existing?.promise ?? Promise.resolve(assertCwd(requestedCwd).then(async (cwd) => ({
+        cwd,
+        options: await sanitizeStartOptions(provider, cwd, rawOptions),
+      }))).then(({ cwd, options }) => {
         const sess = createSession(provider, cwd, start.autoApprove, start.title, options);
         refreshSession(sess);
         sendPrompt(sess, prompt);
@@ -2174,7 +2292,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         return;
       }
       const cwd = String(msg.cwd || DEFAULT_CWD);
-      Promise.resolve(catalogOptions(provider, cwd))
+      Promise.resolve(assertCwd(cwd).then((safeCwd) => catalogOptions(provider, safeCwd)))
         .then((options) => ws.send(JSON.stringify({ kind: "options-list", provider, options })))
         .catch((err) => sendWsError(ws, "list-options", err));
       break;
@@ -2187,14 +2305,14 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         return;
       }
       const cwd = String(msg.cwd || DEFAULT_CWD);
-      Promise.resolve(cachedCommands(provider, cwd))
+      Promise.resolve(assertCwd(cwd).then((safeCwd) => cachedCommands(provider, safeCwd)))
         .then((groups) => ws.send(JSON.stringify({ kind: "commands-list", provider, groups })))
         .catch((err) => sendWsError(ws, "list-commands", err));
       break;
     }
     case "list-files": {
       const cwd = String(msg.cwd || DEFAULT_CWD);
-      Promise.resolve(cachedFiles(cwd))
+      Promise.resolve(assertCwd(cwd).then((safeCwd) => cachedFiles(safeCwd)))
         .then((files) => ws.send(JSON.stringify({ kind: "files-list", cwd, files })))
         .catch((err) => sendWsError(ws, "list-files", err));
       break;

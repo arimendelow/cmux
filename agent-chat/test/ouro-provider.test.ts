@@ -38,15 +38,15 @@ test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", ()
 });
 
 test("Workbench v1 advertises its boss-first authority contract", () => {
-  expect(workbenchExperienceForTest("ouro-workbench-v1", "Desk · demo-task")).toEqual({
+  expect(workbenchExperienceForTest("ouro-workbench-v1", "Desk / demo-task")).toEqual({
     productName: "Ouro Workbench v1",
     surfaceName: "Boss",
-    contextLabel: "Desk · demo-task",
+    contextLabel: "Desk / demo-task",
     defaultProvider: "agency-worker",
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
   });
-  expect(workbenchExperienceForTest("", "Desk · demo-task")).toBeUndefined();
+  expect(workbenchExperienceForTest("", "Desk / demo-task")).toBeUndefined();
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {

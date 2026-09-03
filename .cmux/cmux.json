@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/manaflow-ai/cmux/v0.64.22/web/data/cmux.schema.json",
   "agentChat": {
-    "startCommand": "BUN_BIN=\"$(command -v bun)\" CMUX_AGENT_MODELS_URL=http://127.0.0.1:1 CMUX_AGENT_CHAT_SESSION_DIR=\"$HOME/Library/Application Support/Ouro Workbench v1/Agent Chat/Sessions\" ./agent-chat/cmux-chat --no-open"
+    "startCommand": "BUN_BIN=\"$(command -v bun)\" CMUX_AGENT_MODELS_URL=http://127.0.0.1:1 CMUX_AGENT_CHAT_PRODUCT=ouro-workbench-v1 CMUX_AGENT_CHAT_CONTEXT_LABEL=\"Desk / v1-copilot-vertical-slice\" CMUX_AGENT_CHAT_DEFAULT_PROVIDER=agency-worker CMUX_AGENT_UI_CWD=\"$PWD\" CMUX_AGENT_CHAT_ALLOWED_ROOTS=\"$HOME/code:$HOME/ms-desk:$PWD\" CMUX_AGENT_CHAT_SESSION_DIR=\"$HOME/Library/Application Support/Ouro Workbench v1/Agent Chat/Sessions\" ./agent-chat/cmux-chat --no-open"
   }
 }

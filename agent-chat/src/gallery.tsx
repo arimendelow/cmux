@@ -3,6 +3,7 @@ import { Tooltip } from "@base-ui-components/react/tooltip";
 import { CmdkMenu, type CmdkGroup } from "./components/CmdkMenu";
 import { StatusRow } from "./components/StatusRow";
 import { ActivityIndicatorBlock, Blocks, ElicitationBlock, PermissionBlock, PlanBlock, ToolBlock, TurnActions, type ToolBlockVariant } from "./components/Transcript";
+import { WorkbenchHeader } from "./components/WorkbenchHeader";
 import { BarsIcon, PinwheelSpinner, ProviderIcon } from "./components/icons";
 import { HintTooltip } from "./components/Tooltips";
 import { useOverlayScrollbars } from "./hooks/useOverlayScrollbars";
@@ -279,6 +280,17 @@ export function GalleryApp() {
 
         <Section id="workbench-interactions" title="Workbench interactions">
           <div className="gallery-stack">
+            <div>
+              <div className="gallery-label">Boss identity and authority</div>
+              <WorkbenchHeader experience={{
+                productName: "Ouro Workbench v1",
+                surfaceName: "Boss",
+                contextLabel: "Desk / demo-task",
+                defaultProvider: "agency-worker",
+                localAuthorityLabel: "Controlled here",
+                hubAuthorityLabel: "Controlled in Agency Hub",
+              }} />
+            </div>
             <div>
               <div className="gallery-label">Structured plan</div>
               <PlanBlock block={{
