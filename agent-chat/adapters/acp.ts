@@ -241,11 +241,17 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
     });
-    const created = await request("session/new", { cwd: sess.cwd, mcpServers: [] });
-    st.acpSessionId = created.sessionId;
-    ingestAcpOptions(st, created, def, spawnModel);
+    const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
+      ? sess.internal.acpResumeSessionId
+      : "";
+    const sessionState = resumeSessionId
+      ? await request("session/load", { sessionId: resumeSessionId, cwd: sess.cwd, mcpServers: [] })
+      : await request("session/new", { cwd: sess.cwd, mcpServers: [] });
+    st.acpSessionId = resumeSessionId || sessionState.sessionId;
+    sess.internal.acpResumeSessionId = st.acpSessionId;
+    ingestAcpOptions(st, sessionState ?? {}, def, spawnModel);
     sess.internal.acp = st;
-    sess.emit({ kind: "meta", providerSessionId: created.sessionId });
+    sess.emit({ kind: "meta", providerSessionId: st.acpSessionId });
     emitAcpState(sess, st);
     return st;
   } catch (err) {
@@ -456,6 +462,9 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
     const u = msg.params?.update;
     if (!u) return;
     switch (u.sessionUpdate) {
+      case "user_message_chunk":
+        if (u.content?.text) sess.emit({ kind: "user", text: u.content.text });
+        break;
       case "agent_message_chunk":
         if (u.content?.text) sess.emit({ kind: "delta", text: u.content.text });
         break;
