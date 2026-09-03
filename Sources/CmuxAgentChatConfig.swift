@@ -142,7 +142,8 @@ struct CmuxAgentChatConfiguration: Sendable, Hashable {
         local: CmuxAgentChatConfigDefinition?,
         global: CmuxAgentChatConfigDefinition?,
         localSourcePath: String?,
-        globalSourcePath: String?
+        globalSourcePath: String?,
+        productDefaultStartCommand: String? = OuroWorkbenchProduct.currentAgentChatStartCommand
     ) -> CmuxAgentChatConfiguration {
         let definition: CmuxAgentChatConfigDefinition?
         let source: CmuxAgentChatConfigurationSource
@@ -159,7 +160,7 @@ struct CmuxAgentChatConfiguration: Sendable, Hashable {
         let rawURL = definition?.url ?? Self.defaultURLString
         return CmuxAgentChatConfiguration(
             url: URL(string: rawURL) ?? Self.default.url,
-            startCommand: definition?.startCommand,
+            startCommand: definition?.startCommand ?? (definition == nil ? productDefaultStartCommand : nil),
             source: source,
             hasExplicitURL: definition?.url != nil
         )

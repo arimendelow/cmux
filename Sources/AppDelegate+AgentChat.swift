@@ -253,6 +253,7 @@ extension AppDelegate {
             let browserPanel = existing.focusedPanelId.flatMap({ existing.panels[$0] as? BrowserPanel })
                 ?? existing.panels.values.compactMap({ $0 as? BrowserPanel }).first
             if let browserPanel {
+                browserPanel.setOmnibarVisible(false)
                 browserPanel.navigateSmart(url.absoluteString)
             } else if let paneId = existing.bonsplitController.focusedPaneId
                 ?? existing.bonsplitController.allPaneIds.first {
@@ -295,7 +296,13 @@ extension AppDelegate {
         ) else {
             return nil
         }
-        return tabManager.tabs.first { !beforeIds.contains($0.id) } ?? tabManager.selectedWorkspace
+        let workspace = tabManager.tabs.first { !beforeIds.contains($0.id) } ?? tabManager.selectedWorkspace
+        if let workspace {
+            let browserPanel = workspace.focusedPanelId.flatMap({ workspace.panels[$0] as? BrowserPanel })
+                ?? workspace.panels.values.compactMap({ $0 as? BrowserPanel }).first
+            browserPanel?.setOmnibarVisible(false)
+        }
+        return workspace
     }
 
 
@@ -413,7 +420,7 @@ extension AppDelegate {
                 "CMUX_AGENT_CHAT_PORT": "0",
                 "CMUX_AGENT_CHAT_STATE_FILE": stateFileURL.path,
                 "CMUX_AGENT_CHAT_LAUNCH_ID": launchId,
-            ]
+            ].merging(OuroWorkbenchProduct.agentChatEnvironment()) { owned, _ in owned }
         ) else {
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }

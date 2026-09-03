@@ -37,6 +37,59 @@ enum OuroWorkbenchProduct {
         if isWorkbenchBundleIdentifier(bundleIdentifier) { return "Workbench boss" }
         return String(localized: "command.newAgentChat.subtitle", defaultValue: "Agent Chat")
     }
+
+    static func repositoryRoot(sourceFilePath: String) -> URL {
+        URL(fileURLWithPath: sourceFilePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    static var developerSourceRoot: URL {
+        repositoryRoot(sourceFilePath: #filePath)
+    }
+
+    static func agentChatStartCommand(
+        bundleIdentifier: String?,
+        sourceFilePath: String
+    ) -> String? {
+        guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return nil }
+        let script = repositoryRoot(sourceFilePath: sourceFilePath)
+            .appendingPathComponent("agent-chat/cmux-chat")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else { return nil }
+        return "BUN_BIN=\"$(command -v bun)\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
+    }
+
+    static var currentAgentChatStartCommand: String? {
+        agentChatStartCommand(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            sourceFilePath: #filePath
+        )
+    }
+
+    static func agentChatEnvironment() -> [String: String] {
+        guard isCurrentBundle else { return [:] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let sourceRoot = developerSourceRoot
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? home.appendingPathComponent("Library/Application Support")
+        return [
+            "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
+            "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
+            "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "agency-worker",
+            "CMUX_AGENT_UI_CWD": sourceRoot.path,
+            "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
+                home.appendingPathComponent("code").path,
+                home.appendingPathComponent("ms-desk").path,
+                sourceRoot.path,
+            ].joined(separator: ":"),
+            "CMUX_AGENT_CHAT_SESSION_DIR": appSupport
+                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
+                .path,
+            "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
+        ]
+    }
 }
 
 struct CmuxFeatureFlagDefinition: Identifiable, Equatable, Sendable {
