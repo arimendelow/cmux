@@ -108,6 +108,7 @@ interface AcpState {
   commands: CommandEntry[];
   initialApplied: boolean;
   pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
+  toolTitles: Map<string, string>;
   writeMsg(msg: unknown): void;
 }
 
@@ -199,6 +200,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     commands: [],
     initialApplied: false,
     pendingPermissions: new Map(),
+    toolTitles: new Map(),
     writeMsg,
   };
 
@@ -461,6 +463,7 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
         if (u.content?.text) sess.emit({ kind: "thinking", text: u.content.text });
         break;
       case "tool_call":
+        if (u.toolCallId && u.title) st.toolTitles.set(String(u.toolCallId), String(u.title));
         sess.emit({
           kind: "tool-start",
           toolId: u.toolCallId,
@@ -476,6 +479,7 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
             ok: u.status === "completed",
             detail: truncate(contentText(u.content), 400),
           });
+          st.toolTitles.delete(String(u.toolCallId));
         }
         break;
       case "plan":
@@ -525,10 +529,11 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
         return;
       }
       st.pendingPermissions.set(requestId, { rpcId: msg.id, options });
+      const toolCallId = String(msg.params?.toolCall?.toolCallId ?? "");
       sess.emit({
         kind: "permission-request",
         requestId,
-        title: truncate(msg.params?.toolCall?.title ?? "Permission requested", 160),
+        title: truncate(msg.params?.toolCall?.title ?? st.toolTitles.get(toolCallId) ?? "Permission requested", 160),
         options,
       });
       return;
@@ -661,6 +666,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             commands: [],
             initialApplied: false,
             pendingPermissions: new Map(),
+            toolTitles: new Map(),
             writeMsg: () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));
