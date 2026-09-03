@@ -1,4 +1,4 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 const modelFlag = Bun.argv.findIndex((arg) => arg === "--model");
@@ -13,7 +13,9 @@ const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
 const log = process.env.FAKE_ACP_MODEL_LOG;
 const methodLog = process.env.FAKE_ACP_METHOD_LOG;
+const pidFile = process.env.FAKE_ACP_PID_FILE;
 if (log) await appendFile(log, `${model}\n`);
+if (pidFile) await writeFile(pidFile, `${process.pid}\n`);
 
 const rl = createInterface({ input: process.stdin });
 let pendingPromptId: number | string | null = null;
