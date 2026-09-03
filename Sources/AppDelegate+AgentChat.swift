@@ -223,10 +223,21 @@ extension AppDelegate {
         let beforeIds = Set(tabManager.tabs.map(\.id))
         let workspaceName = OuroWorkbenchProduct.agentChatSurfaceTitle()
         if OuroWorkbenchProduct.isCurrentBundle,
-           let existing = tabManager.tabs.first(where: { $0.customTitle == workspaceName }),
-           let browserPanel = existing.focusedPanelId.flatMap({ existing.panels[$0] as? BrowserPanel })
-                ?? existing.panels.values.compactMap({ $0 as? BrowserPanel }).first {
-            browserPanel.navigateSmart(url.absoluteString)
+           let existing = tabManager.tabs.first(where: { $0.customTitle == workspaceName }) {
+            let browserPanel = existing.focusedPanelId.flatMap({ existing.panels[$0] as? BrowserPanel })
+                ?? existing.panels.values.compactMap({ $0 as? BrowserPanel }).first
+            if let browserPanel {
+                browserPanel.navigateSmart(url.absoluteString)
+            } else if let paneId = existing.bonsplitController.focusedPaneId
+                ?? existing.bonsplitController.allPaneIds.first {
+                _ = existing.newBrowserSurface(
+                    inPane: paneId,
+                    url: url,
+                    focus: true,
+                    creationPolicy: .automationPreload,
+                    omnibarVisible: false
+                )
+            }
             tabManager.selectWorkspace(existing)
             return existing
         }
