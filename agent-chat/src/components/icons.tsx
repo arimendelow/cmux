@@ -6,6 +6,8 @@ const PROVIDER_COLOR: Record<string, string> = {
   opencode: "#f2a600",
   pi: "#8b7cff",
   gemini: "#4285f4",
+  "agency-worker": "#7c5ce0",
+  copilot: "#2f81f7",
 };
 
 export function colorFor(id: string): string {
@@ -37,6 +39,16 @@ function themeIsDark(): boolean {
 
 function DrawnProviderIcon({ id }: { id: string }) {
   const color = colorFor(id);
+  if (id === "agency-worker" || id === "copilot") {
+    return (
+      <svg className="provider-icon" viewBox="0 0 16 16" style={{ color }}>
+        <circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        <text x="8" y="11" textAnchor="middle" fontSize="8.5" fontWeight="700" fill="currentColor">
+          {id === "agency-worker" ? "B" : "C"}
+        </text>
+      </svg>
+    );
+  }
   if (id === "claude") {
     return (
       <svg className="provider-icon" viewBox="0 0 16 16" style={{ color }}>
