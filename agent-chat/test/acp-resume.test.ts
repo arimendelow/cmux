@@ -25,7 +25,11 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
     startOptions: {},
     status: "idle",
     events,
-    internal: { acpResumeSessionId: "persisted-session", productId: "ouro-workbench-v1" },
+    internal: {
+      acpResumeSessionId: "persisted-session",
+      productId: "ouro-workbench-v1",
+      restoredFromDisk: true,
+    },
     emit(event) {
       events.push(event);
     },
@@ -51,6 +55,51 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
     adapter.dispose(context);
     if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;
     else process.env.FAKE_ACP_METHOD_LOG = previous;
+  }
+});
+
+test("ACP live reconnect does not append a second copy of the transcript", async () => {
+  const definition: ProviderDef = {
+    id: "live-reconnect-acp",
+    label: "Live Reconnect ACP",
+    adapter: "acp",
+    cmd: ["bun", `${import.meta.dir}/fake-acp.ts`],
+  };
+  const adapter = makeAcpAdapter(definition);
+  const events: AgentEvent[] = [
+    { kind: "user", text: "previous question" },
+    { kind: "delta", text: "previous answer" },
+  ];
+  const context: SessionCtx = {
+    id: "live-reconnect-session",
+    provider: definition.id,
+    cwd: `${import.meta.dir}/../scratch`,
+    title: "live reconnect",
+    autoApprove: false,
+    startOptions: {},
+    status: "idle",
+    events,
+    internal: { acpResumeSessionId: "persisted-session", productId: "ouro-workbench-v1" },
+    emit(event) {
+      events.push(event);
+    },
+    setStatus(status: SessionStatus) {
+      this.status = status;
+    },
+  };
+
+  try {
+    await adapter.refreshOptions?.(context);
+    expect(events.filter((event) => event.kind === "user")).toHaveLength(1);
+    expect(events.filter((event) => event.kind === "delta")).toHaveLength(1);
+    expect(events).toContainEqual({
+      kind: "recovery",
+      mode: "resumed",
+      title: "Conversation resumed",
+      message: "Reconnected to the existing provider session.",
+    });
+  } finally {
+    adapter.dispose(context);
   }
 });
 

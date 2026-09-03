@@ -11,6 +11,28 @@ import Testing
 @Suite
 struct QuitConfirmationAlertPresenterTests {
     @Test
+    func agentChatCleanupGetsASeparateBoundedQuitWindow() {
+        #expect(
+            AppDelegate.ownedCleanupDeadline(
+                hasSimulatorCleanup: false,
+                shouldStopAgentChat: false
+            ) == .milliseconds(3_500)
+        )
+        #expect(
+            AppDelegate.ownedCleanupDeadline(
+                hasSimulatorCleanup: false,
+                shouldStopAgentChat: true
+            ) == .seconds(8)
+        )
+        #expect(
+            AppDelegate.ownedCleanupDeadline(
+                hasSimulatorCleanup: true,
+                shouldStopAgentChat: true
+            ) == .seconds(150)
+        )
+    }
+
+    @Test
     func pendingTerminateReplyWaitsForOwnedCleanupOrTerminateOwnedConfirmation() {
         #expect(
             AppDelegate.pendingTerminateReply(
