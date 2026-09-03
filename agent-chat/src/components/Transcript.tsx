@@ -8,7 +8,7 @@ import { useActivityStartedAt, useTicker } from "../hooks/useTicker";
 import { useVirtualTurns } from "../hooks/useVirtualTurns";
 import { Check, Chevron, CopyIcon, EllipsisIcon, PinwheelSpinner } from "./icons";
 import { HintTooltip } from "./Tooltips";
-import { activityRowLabel, groupTurns, summarizeTurnActivity, type TurnGroup } from "../turns";
+import { activityRowLabel, groupTurns, shouldRenderTurnActions, summarizeTurnActivity, type TurnGroup } from "../turns";
 
 export type ToolBlockVariant = "card" | "inline" | "rail" | "oneliner" | "terminal";
 export const TOOL_BLOCK_VARIANT: ToolBlockVariant = "inline";
@@ -1034,7 +1034,9 @@ function TurnGroupView({
           />
         )}
       {group.assistant ? <div className="msg assistant"><div className="body selectable"><ChatMarkdown text={group.assistant.text} streaming={group.assistant.open} /></div></div> : null}
-      {group.footer ? <TurnActions stats={group.footer.text} text={group.assistant?.text ?? ""} actions={actions} onFork={onFork} forkPending={forkPending} /> : null}
+      {group.footer && shouldRenderTurnActions(group.assistant?.text ?? "", group.footer.text, Boolean(actions.fork))
+        ? <TurnActions stats={group.footer.text} text={group.assistant?.text ?? ""} actions={actions} onFork={onFork} forkPending={forkPending} />
+        : null}
     </div>
   );
 }

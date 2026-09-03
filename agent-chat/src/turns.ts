@@ -71,6 +71,7 @@ function sentenceCase(text: string) {
 }
 
 export function summarizeTurnActivity(blocks: Block[]): string {
+  if (blocks.length === 1 && blocks[0]?.kind === "status") return blocks[0].text;
   let edited = 0;
   let read = 0;
   let commands = 0;
@@ -114,6 +115,10 @@ export function summarizeTurnActivity(blocks: Block[]): string {
   if (commands) parts.push(`ran ${plural(commands, "command")}`);
   if (!commands && other) parts.push(`processed ${plural(other, "event")}`);
   return sentenceCase(joinSentence(parts));
+}
+
+export function shouldRenderTurnActions(assistantText: string, stats: string, canFork: boolean): boolean {
+  return Boolean(assistantText.trim() || stats.trim() || canFork);
 }
 
 export function activityRowLabel(block: Block): string {

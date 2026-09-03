@@ -30,15 +30,19 @@ async function waitForMessage(
   throw new Error(`timed out waiting for message: ${JSON.stringify(messages)}`);
 }
 
+async function writeFakeAgency(bin: string, extraArgs = ""): Promise<void> {
+  const agency = join(bin, "agency");
+  await Bun.write(agency, `#!/bin/sh\nexec "$BUN_BIN" "$FAKE_ACP_SCRIPT"${extraArgs ? ` ${extraArgs}` : ""}\n`);
+  await chmod(agency, 0o755);
+}
+
 test("Workbench root resumes the persisted Boss with a verified recovery event", async () => {
   const root = await mkdtemp(join(tmpdir(), "workbench-boss-recovery-"));
   const sessions = join(root, "sessions");
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
-  const agency = join(bin, "agency");
   await mkdir(bin);
-  await Bun.write(agency, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\"\n");
-  await chmod(agency, 0o755);
+  await writeFakeAgency(bin);
   await writePersistedSession(sessions, {
     id: "boss-restored",
     provider: "agency-worker",
@@ -115,3 +119,84 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Workbench can cancel Boss startup before the session id reaches the browser", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workbench-boss-cancel-"));
+  const sessions = join(root, "sessions");
+  const stateFile = join(root, "server.json");
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  await writeFakeAgency(bin, "--startup-delay-ms 1000");
+  const process = Bun.spawn(["bun", "server.ts"], {
+    cwd: join(import.meta.dir, ".."),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...globalThis.process.env,
+      PATH: `${bin}:${globalThis.process.env.PATH ?? ""}`,
+      BUN_BIN: Bun.which("bun") ?? "bun",
+      FAKE_ACP_SCRIPT: join(import.meta.dir, "fake-acp.ts"),
+      CMUX_AGENT_CHAT_PORT: "0",
+      CMUX_AGENT_CHAT_STATE_FILE: stateFile,
+      CMUX_AGENT_CHAT_SESSION_DIR: sessions,
+      CMUX_AGENT_CHAT_TOKEN: "cancel-token",
+      CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / cancel-fixture",
+      CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
+      CMUX_AGENT_UI_CWD: root,
+      CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
+    },
+  });
+  let socket: WebSocket | null = null;
+
+  try {
+    const port = await waitForPort(stateFile);
+    socket = new WebSocket(`ws://127.0.0.1:${port}/cancel-token/ws`);
+    const messages: any[] = [];
+    socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
+    await new Promise<void>((resolve, reject) => {
+      socket!.onopen = () => resolve();
+      socket!.onerror = () => reject(new Error("WebSocket failed to open"));
+    });
+    await waitForMessage(messages, (message) => message.kind === "hello");
+    socket.send(JSON.stringify({
+      op: "start",
+      requestId: "cancel-before-created",
+      provider: "agency-worker",
+      cwd: root,
+      prompt: "cancel this startup",
+    }));
+    socket.send(JSON.stringify({ op: "cancel-start", requestId: "cancel-before-created" }));
+    const created = await waitForMessage(
+      messages,
+      (message) => message.kind === "session-created" && message.requestId === "cancel-before-created",
+    );
+    await waitForMessage(
+      messages,
+      (message) => message.kind === "event" && message.evt?.kind === "status" && message.evt.text === "Stopped",
+    );
+    expect(messages.some((message) => message.kind === "event" && message.evt?.kind === "error")).toBe(false);
+    const beforeResubscribe = messages.length;
+    socket.send(JSON.stringify({ op: "subscribe", sessionId: created.session.id }));
+    await waitForMessage(
+      messages,
+      (message) => message.kind === "history" && message.sessionId === created.session.id,
+    );
+    await Bun.sleep(100);
+    expect(messages.slice(beforeResubscribe).some(
+      (message) => message.kind === "event"
+        && message.evt?.kind === "connection"
+        && message.evt.state === "starting",
+    )).toBe(false);
+    socket.send(JSON.stringify({ op: "send", sessionId: created.session.id, prompt: "later prompt" }));
+    await waitForMessage(
+      messages,
+      (message) => message.kind === "event" && message.evt?.kind === "delta" && message.evt.text === "OK",
+    );
+  } finally {
+    socket?.close();
+    process.kill();
+    await process.exited;
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10_000);

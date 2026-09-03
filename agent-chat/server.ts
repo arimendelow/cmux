@@ -708,6 +708,7 @@ function emitDoneAfterFiles(sess: Session, evt: InternalDoneEvent) {
 }
 
 function sendPrompt(sess: Session, prompt: string) {
+  delete sess.internal.userStopped;
   const activeGeneration = activeAttributionGeneration(sess);
   if (adapterAttributionMode(sess) === "current-turn" && activeGeneration) {
     sess.emit({ kind: "user", text: prompt });
@@ -748,9 +749,12 @@ function sendPrompt(sess: Session, prompt: string) {
 }
 
 function refreshSession(sess: Session) {
+  if (sess.internal.userStopped === true) return;
   Promise.resolve(sess.adapter.refreshOptions?.(sess)).catch((err) => {
     console.error("[agent-chat] refresh-options failed", err);
-    sess.emit({ kind: "error", message: safeErrorMessage("list-options", err) });
+    if (!isAgentCancellationError(err)) {
+      sess.emit({ kind: "error", message: safeErrorMessage("list-options", err) });
+    }
   });
 }
 
@@ -2248,6 +2252,12 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       Promise.resolve(checkCwd(cwd))
         .then((res) => ws.send(JSON.stringify({ kind: "cwd-check", cwd, ...res })))
         .catch((err) => ws.send(JSON.stringify({ kind: "cwd-check", cwd, ok: false, message: String(err) })));
+      break;
+    }
+    case "cancel-start": {
+      const requestId = String(msg.requestId ?? "");
+      const pending = requestId ? startRequests.get(requestId) : undefined;
+      pending?.promise.then((sess) => sess.adapter.stop(sess)).catch(() => {});
       break;
     }
     case "send": {

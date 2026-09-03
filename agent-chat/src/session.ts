@@ -663,7 +663,12 @@ export function useSession(): SessionState {
     }
   }, [sendRaw, start]);
   const stop = useCallback(() => {
-    if (sessionIdRef.current) sendRaw({ op: "stop", sessionId: sessionIdRef.current });
+    if (sessionIdRef.current) {
+      sendRaw({ op: "stop", sessionId: sessionIdRef.current });
+      return;
+    }
+    const pending = pendingStartRef.current;
+    if (pending && !pending.failed) sendRaw({ op: "cancel-start", requestId: pending.requestId });
   }, [sendRaw]);
   const setOption = useCallback((id: string, value: OptionValue) => {
     if (sessionIdRef.current) sendRaw({ op: "set-option", sessionId: sessionIdRef.current, id, value });

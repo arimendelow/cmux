@@ -1,5 +1,5 @@
 import type { Block } from "../src/session";
-import { activityRowLabel, groupTurns, summarizeTurnActivity } from "../src/turns";
+import { activityRowLabel, groupTurns, shouldRenderTurnActions, summarizeTurnActivity } from "../src/turns";
 import { measureVirtualRow, measureVirtualRowFromResize, scrollCompensationDelta, virtualFirstVisibleIndex, virtualRange } from "../src/hooks/useVirtualTurns";
 
 (globalThis as any).location ??= { pathname: "/" };
@@ -21,6 +21,12 @@ if (summary !== "Edited 2 files, read 1 file, searched code, listed files, and r
 }
 if (/Read 1 File|Searched Code|Listed Files|Ran 3 Commands/.test(summary)) {
   throw new Error(`summary regressed to title case: ${summary}`);
+}
+if (summarizeTurnActivity([{ kind: "status", text: "Stopped" }]) !== "Stopped") {
+  throw new Error("a single status outcome should remain visible in the collapsed turn");
+}
+if (shouldRenderTurnActions("", "", false) || !shouldRenderTurnActions("answer", "", false)) {
+  throw new Error("empty stopped turns should not render meaningless copy or overflow actions");
 }
 const labels = activity.map((block) => activityRowLabel(block));
 if (labels.join("|") !== "Read AGENTS.md|Searched RepositoryPicker|Listed Sources|Edited 2 files") {

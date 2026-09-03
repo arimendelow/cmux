@@ -39,7 +39,11 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
           });
           sess.emit({ kind: "done", stats: res?.stopReason ? `stop: ${res.stopReason}` : undefined, generation } as any);
         } catch (err) {
-          sess.emit({ kind: "error", message: truncate(String(err), 400) });
+          if (/\bcancelled\b/i.test(String(err instanceof Error ? err.message : err))) {
+            sess.emit({ kind: "status", text: "Stopped" });
+          } else {
+            sess.emit({ kind: "error", message: truncate(String(err), 400) });
+          }
           sess.emit({ kind: "done", generation } as any);
         }
         if (sess.internal.acpTurn === turn) sess.setStatus("idle");
@@ -57,6 +61,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
       if (startingProc?.exitCode === null && !startingProc.killed) {
         sess.internal.acpStartupCancelled = true;
+        sess.internal.userStopped = true;
         startingProc.kill();
       }
     },
