@@ -47,10 +47,10 @@ test("ACP form elicitation waits for one correlated response", async () => {
 
   try {
     const turn = Promise.resolve(adapter.send(context, "ask me"));
-    const request = await waitForEvent(events, "elicitation-request");
+    const request = await waitForEvent(events, "elicitation-request") as Extract<AgentEvent, { kind: "elicitation-request" }>;
     expect(request).toEqual({
       kind: "elicitation-request",
-      requestId: "100",
+      requestId: expect.stringMatching(/:100$/),
       message: "How should I update the greeting?",
       fields: [
         {
@@ -70,24 +70,24 @@ test("ACP form elicitation waits for one correlated response", async () => {
         },
       ],
     });
-    await expect(adapter.respondElicitation?.(context, "100", "accept", {
+    await expect(adapter.respondElicitation?.(context, request.requestId, "accept", {
       includeCheck: true,
     })).rejects.toThrow("elicitation field is required: strategy");
-    await adapter.respondElicitation?.(context, "100", "accept", {
+    await adapter.respondElicitation?.(context, request.requestId, "accept", {
       strategy: "conservative",
       includeCheck: true,
     });
     await turn;
     expect(events).toContainEqual({
       kind: "elicitation-resolved",
-      requestId: "100",
+      requestId: request.requestId,
       action: "accept",
     });
     expect(events).toContainEqual({
       kind: "delta",
       text: 'accept:{"strategy":"conservative","includeCheck":true}',
     });
-    await expect(adapter.respondElicitation?.(context, "100", "accept", {})).rejects.toThrow("elicitation request not found");
+    await expect(adapter.respondElicitation?.(context, request.requestId, "accept", {})).rejects.toThrow("elicitation request not found");
   } finally {
     adapter.dispose(context);
   }

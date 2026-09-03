@@ -9,6 +9,7 @@ const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
 const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
 const failLoad = Bun.argv.includes("--fail-load");
 const requestPermission = Bun.argv.includes("--request-permission");
+const exitAfterPermission = Bun.argv.includes("--exit-after-permission");
 const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
 const log = process.env.FAKE_ACP_MODEL_LOG;
@@ -108,6 +109,7 @@ for await (const line of rl) {
           ],
         },
       });
+      if (exitAfterPermission) setTimeout(() => process.exit(0), 10);
       continue;
     }
     if (requestElicitation) {
