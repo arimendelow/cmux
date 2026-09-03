@@ -148,6 +148,8 @@ interface AcpState {
   writeMsg(msg: unknown): void;
 }
 
+const MAX_UNSUPPORTED_UPDATE_NAMES = 16;
+
 function acpFallbackOptions(def: ProviderDef): SessionOption[] {
   const model = def.models?.length
     ? { id: "model", label: "Model", kind: "select" as const, value: def.defaultModel ?? def.models[0]!.value, choices: def.models }
@@ -708,8 +710,8 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
       case "usage_update":
         break;
       default: {
-        const name = typeof u.sessionUpdate === "string" ? u.sessionUpdate : "";
-        if (name && !st.unsupportedUpdates.has(name)) {
+        const name = typeof u.sessionUpdate === "string" ? truncate(u.sessionUpdate, 80) : "";
+        if (name && !st.unsupportedUpdates.has(name) && st.unsupportedUpdates.size < MAX_UNSUPPORTED_UPDATE_NAMES) {
           st.unsupportedUpdates.add(name);
           sess.emit({ kind: "status", text: `Unsupported ACP session update: ${name}` });
         }
