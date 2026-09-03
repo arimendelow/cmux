@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { providerDefinitionsForTest, resolveSessionStartForTest, workbenchExperienceForTest } from "../server";
+import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForTest, workbenchExperienceForTest } from "../server";
 
 test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", () => {
   const providers = providerDefinitionsForTest();
@@ -47,6 +47,10 @@ test("Workbench v1 advertises its boss-first authority contract", () => {
     hubAuthorityLabel: "Controlled in Agency Hub",
   });
   expect(workbenchExperienceForTest("", "Desk / demo-task")).toBeUndefined();
+  expect(providerDefinitionsForProductForTest("ouro-workbench-v1").map((provider) => provider.id)).toEqual([
+    "agency-worker",
+    "copilot",
+  ]);
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {

@@ -198,7 +198,7 @@ const AGENCY_COPILOT_BASE_COMMAND = [
   "--no-aec",
 ];
 
-const PROVIDERS: ProviderDef[] = [
+const ALL_PROVIDERS: ProviderDef[] = [
   {
     id: "agency-worker",
     label: "Agency worker",
@@ -242,6 +242,13 @@ const PROVIDERS: ProviderDef[] = [
     defaultModel: geminiDefaultModel(),
   },
 ];
+
+function providerDefinitionsForProduct(productId: string): ProviderDef[] {
+  if (productId !== "ouro-workbench-v1") return ALL_PROVIDERS;
+  return ALL_PROVIDERS.filter((provider) => provider.id === "agency-worker" || provider.id === "copilot");
+}
+
+const PROVIDERS = providerDefinitionsForProduct(PRODUCT_ID);
 
 const adapters = new Map<string, Adapter>();
 for (const def of PROVIDERS) {
@@ -372,6 +379,13 @@ function resolveSessionStart(provider: string, requestedAutoApprove: unknown): {
 
 export function providerDefinitionsForTest(): ProviderDef[] {
   return PROVIDERS.map((provider) => ({
+    ...provider,
+    cmd: provider.cmd ? [...provider.cmd] : undefined,
+  }));
+}
+
+export function providerDefinitionsForProductForTest(productId: string): ProviderDef[] {
+  return providerDefinitionsForProduct(productId).map((provider) => ({
     ...provider,
     cmd: provider.cmd ? [...provider.cmd] : undefined,
   }));
