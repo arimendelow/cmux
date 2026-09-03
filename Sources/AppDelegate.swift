@@ -7405,6 +7405,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !didBootstrapInitialMainWindow else { return windowId }
 
         didBootstrapInitialMainWindow = true
+        if let manager = tabManagerFor(windowId: windowId)
+            ?? mainWindowContexts.values.first(where: { $0.windowId == windowId })?.tabManager {
+            scheduleWorkbenchBossAfterInitialBootstrap(
+                tabManager: manager,
+                windowId: windowId
+            )
+        }
         if ProcessInfo.processInfo.environment["CMUX_UI_TEST_SHOW_SETTINGS"] == "1" {
             openPreferencesWindow(debugSource: "uiTestShowSettings.\(debugSource)")
         }

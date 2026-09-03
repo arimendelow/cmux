@@ -112,6 +112,42 @@ struct AgentChatServerAvailability: Sendable {
 }
 
 extension AppDelegate {
+    func scheduleWorkbenchBossAfterInitialBootstrap(
+        tabManager: TabManager,
+        windowId: UUID
+    ) {
+        guard OuroWorkbenchProduct.isCurrentBundle,
+              let context = mainWindowContext(for: tabManager),
+              context.cmuxConfigStore?.agentChat.startCommand != nil else {
+            return
+        }
+        let initialWorkspaceId = tabManager.selectedWorkspace?.id
+        DispatchQueue.main.async { [weak self, weak tabManager] in
+            guard let self,
+                  let tabManager,
+                  let context = self.mainWindowContext(for: tabManager),
+                  let action = context.cmuxConfigStore?.resolvedAction(
+                    id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID
+                  ) else {
+                return
+            }
+            _ = self.executeConfiguredCmuxAction(
+                action,
+                context: context,
+                preferredWindow: self.mainWindow(for: windowId),
+                onExecuted: {
+                    guard let initialWorkspaceId,
+                          tabManager.tabs.count > 1,
+                          let initialWorkspace = tabManager.tabs.first(where: { $0.id == initialWorkspaceId }),
+                          tabManager.selectedWorkspace?.id != initialWorkspaceId else {
+                        return
+                    }
+                    tabManager.closeWorkspace(initialWorkspace, recordHistory: false)
+                }
+            )
+        }
+    }
+
     /// Workstream feed title mapping extracted because `AppDelegate.swift`
     /// sits at its file-length budget.
     nonisolated static func feedWorkstreamTitle(for event: WorkstreamEvent) -> String? {
