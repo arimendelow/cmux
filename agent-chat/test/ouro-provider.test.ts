@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { providerDefinitionsForTest, resolveSessionStartForTest } from "../server";
+import { providerDefinitionsForTest, resolveSessionStartForTest, workbenchExperienceForTest } from "../server";
 
 test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", () => {
   const providers = providerDefinitionsForTest();
@@ -17,6 +17,8 @@ test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", ()
     "--stdio",
   ]);
   expect(worker?.label).toBe("Agency worker");
+  expect(worker?.role).toBe("boss");
+  expect(worker?.description).toBe("Desk-aware Workbench boss");
   expect(worker?.cmd).toEqual([
     "agency",
     "copilot",
@@ -33,6 +35,18 @@ test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", ()
   expect(worker?.startupTimeoutMs).toBe(90_000);
   expect(worker?.probeCatalogs).toBe(false);
   expect(worker?.defaultAutoApprove).toBe(false);
+});
+
+test("Workbench v1 advertises its boss-first authority contract", () => {
+  expect(workbenchExperienceForTest("ouro-workbench-v1", "Desk · demo-task")).toEqual({
+    productName: "Ouro Workbench v1",
+    surfaceName: "Boss",
+    contextLabel: "Desk · demo-task",
+    defaultProvider: "agency-worker",
+    localAuthorityLabel: "Controlled here",
+    hubAuthorityLabel: "Controlled in Agency Hub",
+  });
+  expect(workbenchExperienceForTest("", "Desk · demo-task")).toBeUndefined();
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {

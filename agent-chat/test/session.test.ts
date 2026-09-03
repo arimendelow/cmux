@@ -3,7 +3,7 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, providerStartTimeoutMs, restoreComposerDraft } = await import("../src/session");
+const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, providerStartTimeoutMs, resolveProviderSelection, restoreComposerDraft } = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -34,8 +34,14 @@ if (consumeOptimisticUserEcho(optimistic, "same")) {
 
 const providers = [
   { id: "copilot", label: "GitHub Copilot" },
-  { id: "agency-worker", label: "Agency worker" },
+  { id: "agency-worker", label: "Agency worker", role: "boss" as const },
 ];
+if (resolveProviderSelection(providers, "", "agency-worker") !== "agency-worker") {
+  throw new Error("a clean Workbench composer should select the configured boss");
+}
+if (resolveProviderSelection(providers, "copilot", "agency-worker") !== "copilot") {
+  throw new Error("an installed user-selected provider should be preserved");
+}
 if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
   throw new Error("session title should use the provider label");
 }

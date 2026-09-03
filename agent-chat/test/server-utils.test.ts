@@ -17,6 +17,7 @@ import {
   recordTurnBaselineForTest,
   rebuildFileDiffAllowlistForTest,
   renderPageForTest,
+  resolveAllowedRootsForTest,
   resetAssetCachesForTest,
   resolveFileDiffPath,
   sendPromptForTest,
@@ -30,11 +31,12 @@ import {
   turnBaselineCountForTest,
   turnBaselineKeysForTest,
   validateCmuxThemePayload,
+  validateWorkingDirectoryForTest,
   writeStateFileForTest,
 } from "../server";
 import { applyManagedThemeOverrideForTest, pickAccentColor, resolveThemeNameForTest, type GhosttyTheme } from "../theme";
 import type { Adapter, AgentEvent, SessionCtx, SessionStatus } from "../types";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -73,6 +75,20 @@ await rm(statePath, { force: true });
 await writeStateFileForTest(statePath, 54321);
 const state = JSON.parse(await readFile(statePath, "utf8"));
 assert(state.port === 54321 && state.pid === process.pid && state.protocolVersion === 1, `state file should contain discovery JSON: ${JSON.stringify(state)}`);
+
+const allowedRoot = join(import.meta.dir, "..", "scratch", "allowed-root-policy");
+const outsideRoot = join(import.meta.dir, "..", "scratch", "outside-root-policy");
+await rm(allowedRoot, { recursive: true, force: true });
+await rm(outsideRoot, { recursive: true, force: true });
+await mkdir(allowedRoot, { recursive: true });
+await mkdir(outsideRoot, { recursive: true });
+await symlink(outsideRoot, join(allowedRoot, "escape"));
+const parsedAllowedRoots = resolveAllowedRootsForTest(`${allowedRoot}:${outsideRoot}`);
+assert(parsedAllowedRoots.join("|") === `${allowedRoot}|${outsideRoot}`, `allowed roots should preserve explicit absolute entries: ${parsedAllowedRoots.join("|")}`);
+assert((await validateWorkingDirectoryForTest(allowedRoot, [allowedRoot])).ok, "the configured root itself should be allowed");
+assert((await validateWorkingDirectoryForTest(join(allowedRoot, "escape"), [allowedRoot])).ok === false, "a symlink escaping the configured root should be rejected");
+assert((await validateWorkingDirectoryForTest(outsideRoot, [allowedRoot])).ok === false, "a directory outside configured roots should be rejected");
+assert((await validateWorkingDirectoryForTest(outsideRoot, [])).ok, "legacy mode without configured roots should preserve existing-directory behavior");
 
 assert(resolveFileDiffPath(cwd, "src/../file.ts") === "file.ts", "normal in-cwd paths should normalize");
 for (const path of ["src/../../x", "../x", "..", "a\0b"]) {
