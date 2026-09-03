@@ -144,7 +144,41 @@ function geminiDefaultModel(): string | undefined {
   return agentModelCatalog.provider("gemini")?.defaultModel ?? (agentModelCatalog.hasPayload ? undefined : "gemini-3.1-pro-preview");
 }
 
+const AGENCY_COPILOT_BASE_COMMAND = [
+  "agency",
+  "copilot",
+  "--no-config-plugins",
+  "--no-default-mcps",
+  "--no-aec",
+];
+
 const PROVIDERS: ProviderDef[] = [
+  {
+    id: "copilot",
+    label: "GitHub Copilot",
+    adapter: "acp",
+    cmd: [...AGENCY_COPILOT_BASE_COMMAND, "--acp", "--stdio"],
+    defaultAutoApprove: false,
+    probeCatalogs: false,
+    startupTimeoutMs: 90_000,
+  },
+  {
+    id: "agency-worker",
+    label: "Agency worker",
+    adapter: "acp",
+    cmd: [
+      ...AGENCY_COPILOT_BASE_COMMAND,
+      "--plugin",
+      "github:shared-internal-tools/ms-desk:plugins/ms-desk",
+      "-a",
+      "ms-desk:worker",
+      "--acp",
+      "--stdio",
+    ],
+    defaultAutoApprove: false,
+    probeCatalogs: false,
+    startupTimeoutMs: 90_000,
+  },
   { id: "claude", label: "Claude Code", adapter: "claude", cmd: ["claude"], installCommand: "npm i -g @anthropic-ai/claude-code" },
   { id: "codex", label: "Codex", adapter: "codex", cmd: ["codex"], installCommand: "npm i -g @openai/codex" },
   { id: "opencode", label: "OpenCode", adapter: "acp", cmd: ["opencode", "acp"], installCommand: "npm i -g opencode-ai" },
@@ -258,6 +292,37 @@ function providerInfo(p: ProviderDef) {
     installCommand: p.installCommand,
     ...(providerIconInfo.get(p.id) ?? {}),
   };
+}
+
+function providerDefinition(provider: string): ProviderDef {
+  const definition = PROVIDERS.find((candidate) => candidate.id === provider);
+  if (!definition) throw new Error(`unknown provider: ${provider}`);
+  return definition;
+}
+
+function resolveSessionStart(provider: string, requestedAutoApprove: unknown): { title: string; autoApprove: boolean } {
+  const definition = providerDefinition(provider);
+  return {
+    title: definition.label,
+    autoApprove: typeof requestedAutoApprove === "boolean"
+      ? requestedAutoApprove
+      : definition.defaultAutoApprove ?? true,
+  };
+}
+
+export function providerDefinitionsForTest(): ProviderDef[] {
+  return PROVIDERS.map((provider) => ({
+    ...provider,
+    cmd: provider.cmd ? [...provider.cmd] : undefined,
+  }));
+}
+
+export function resolveSessionStartForTest(
+  provider: string,
+  _prompt: string,
+  requestedAutoApprove: unknown,
+): { title: string; autoApprove: boolean } {
+  return resolveSessionStart(provider, requestedAutoApprove);
 }
 
 function broadcastSessions() {
@@ -1791,13 +1856,12 @@ function startServer() {
       const provider = String(body.provider ?? "claude");
       const prompt = String(body.prompt ?? "").trim();
       const cwd = String(body.cwd || DEFAULT_CWD);
-      const title = prompt ? (prompt.length > 64 ? prompt.slice(0, 64) + "…" : prompt) : `${provider} chat`;
       let sess: Session;
       try {
+        const start = resolveSessionStart(provider, body.autoApprove);
         await assertCwd(cwd);
-        const autoApprove = body.autoApprove !== false;
-        const options = applyAutoApproveDefaults(provider, autoApprove, parseOptions(body.options));
-        sess = createSession(provider, cwd, autoApprove, title, await sanitizeStartOptions(provider, cwd, options));
+        const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
+        sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
       } catch (err) {
         return Response.json({ error: String(err) }, { status: 400 });
       }
@@ -1917,14 +1981,13 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       if (!prompt) return;
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const cwd = String(msg.cwd || DEFAULT_CWD);
-      const title = prompt.length > 64 ? prompt.slice(0, 64) + "…" : prompt;
       const provider = String(msg.provider);
-      const autoApprove = msg.autoApprove !== false;
-      const rawOptions = applyAutoApproveDefaults(provider, autoApprove, parseOptions(msg.options));
+      const start = resolveSessionStart(provider, msg.autoApprove);
+      const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
       pruneStartRequests();
       const existing = requestId ? startRequests.get(requestId) : undefined;
       const startPromise = existing?.promise ?? Promise.resolve(assertCwd(cwd).then(() => sanitizeStartOptions(provider, cwd, rawOptions))).then((options) => {
-        const sess = createSession(provider, cwd, autoApprove, title, options);
+        const sess = createSession(provider, cwd, start.autoApprove, start.title, options);
         refreshSession(sess);
         sendPrompt(sess, prompt);
         return sess;

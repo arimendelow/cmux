@@ -95,6 +95,8 @@ export interface ProviderDef {
   // Extra spawn config consumed by the adapter.
   cmd?: string[];
   autoApproveArgs?: string[];
+  defaultAutoApprove?: boolean;
+  probeCatalogs?: boolean;
   startupTimeoutMs?: number;
   installCommand?: string;
   models?: { value: string; label: string; description?: string }[];

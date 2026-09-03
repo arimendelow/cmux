@@ -194,6 +194,10 @@ export function consumeOptimisticUserEcho(queue: string[], text: string): boolea
   return true;
 }
 
+export function providerSessionTitle(providers: Provider[], provider: string): string {
+  return providers.find((candidate) => candidate.id === provider)?.label ?? "Agent";
+}
+
 export function useSession(): SessionState {
   const [ready, setReady] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -436,13 +440,14 @@ export function useSession(): SessionState {
     optimisticUsersRef.current = [opts.prompt];
     sessionIdRef.current = null;
     history.replaceState(null, "", appPath("/"));
-    document.title = opts.prompt.length > 64 ? opts.prompt.slice(0, 64) + "…" : opts.prompt;
+    const title = providerSessionTitle(providers, opts.provider);
+    document.title = title;
     setLastError("");
     setSession({
       id: `pending-${requestId}`,
       provider: opts.provider,
       cwd: opts.cwd,
-      title: opts.prompt.length > 64 ? opts.prompt.slice(0, 64) + "…" : opts.prompt,
+      title,
       status: "running",
     });
     setBlocks([{ kind: "user", text: opts.prompt }]);
@@ -453,7 +458,7 @@ export function useSession(): SessionState {
     setFileDiffs({});
     setPhase("chat");
     return true;
-  }, [armPendingStartTimeout, sendRaw]);
+  }, [armPendingStartTimeout, providers, sendRaw]);
   const compose = useCallback(() => {
     clearPendingStartTimeout();
     pendingStartRef.current = null;

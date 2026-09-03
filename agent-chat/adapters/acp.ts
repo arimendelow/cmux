@@ -67,9 +67,11 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       emitAcpState(sess, st);
     },
     async listOptions(cwd) {
+      if (def.probeCatalogs === false) return fallbackOptions;
       return withAcpLocalOptions(await fetchAcpOptions(def, cwd, fallbackOptions), false);
     },
     async listCommands(cwd) {
+      if (def.probeCatalogs === false) return [{ trigger: "/", commands: [] }];
       return [{ trigger: "/", commands: await fetchAcpCommands(def, cwd) }];
     },
   };
