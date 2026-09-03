@@ -3,6 +3,8 @@ import { createInterface } from "node:readline";
 
 const modelFlag = Bun.argv.findIndex((arg) => arg === "--model");
 const model = modelFlag >= 0 ? Bun.argv[modelFlag + 1] ?? "" : "";
+const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms");
+const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const log = process.env.FAKE_ACP_MODEL_LOG;
 if (log) await appendFile(log, `${model}\n`);
 
@@ -15,6 +17,7 @@ for await (const line of rl) {
   if (!line.trim()) continue;
   const msg = JSON.parse(line);
   if (msg.method === "initialize") {
+    if (startupDelayMs > 0) await Bun.sleep(startupDelayMs);
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
   } else if (msg.method === "session/new") {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: `fake-${model || "default"}` } });
