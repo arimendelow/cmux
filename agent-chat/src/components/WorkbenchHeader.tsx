@@ -17,7 +17,7 @@ export function WorkbenchHeader({
       <div className="workbench-authority" aria-label="Session control authority">
         <span className="authority-local">{experience.localAuthorityLabel}</span>
         <span className="authority-hub">
-          <span>Remote sessions</span>
+          <span>Remote sessions:</span>
           <strong>{experience.hubAuthorityLabel}</strong>
         </span>
       </div>
