@@ -287,7 +287,7 @@ export function ElicitationBlock({
       <div className="elicitation-message">{block.message}</div>
       <div className="elicitation-fields">
         {block.fields.map((field) => (
-          <label key={field.name} className="elicitation-field">
+          <label key={field.name} className={`elicitation-field${field.type === "boolean" ? " elicitation-boolean" : ""}`}>
             <span>{field.title}{field.required ? " *" : ""}</span>
             {field.type === "boolean" ? (
               <input
@@ -320,7 +320,7 @@ export function ElicitationBlock({
         ))}
       </div>
       <div className="elicitation-actions">
-        <button type="submit" disabled={!complete}>Submit</button>
+        <button className="elicitation-submit" type="submit" disabled={!complete}>Submit</button>
         <button type="button" onClick={() => onRespond(block.requestId, "decline")}>Decline</button>
         <button type="button" onClick={() => onRespond(block.requestId, "cancel")}>Cancel</button>
       </div>

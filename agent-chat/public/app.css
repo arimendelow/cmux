@@ -592,7 +592,7 @@ details.thinking .t-body { white-space: pre-wrap; font-size: calc(var(--font-siz
   background: var(--bg); color: var(--text); font: inherit;
 }
 .permission-actions button:hover { background: var(--bg-hover); }
-.permission-allow { border-color: color-mix(in srgb, var(--green) 55%, var(--border)) !important; }
+.permission-allow { border-color: color-mix(in srgb, var(--green) 55%, var(--border)) !important; background: color-mix(in srgb, var(--green) 10%, var(--bg)) !important; }
 .permission-reject { border-color: color-mix(in srgb, var(--red) 55%, var(--border)) !important; }
 .permission-result { margin-top: 6px; color: var(--text-dim); }
 .plan-card {
@@ -617,6 +617,10 @@ details.thinking .t-body { white-space: pre-wrap; font-size: calc(var(--font-siz
   background: var(--bg); color: var(--text); font: inherit;
 }
 .elicitation-field input[type="checkbox"] { width: 16px; height: 16px; }
+.elicitation-field.elicitation-boolean { grid-template-columns: 18px 1fr; align-items: center; }
+.elicitation-field.elicitation-boolean > input { grid-column: 1; grid-row: 1; margin: 0; }
+.elicitation-field.elicitation-boolean > span { grid-column: 2; grid-row: 1; }
+.elicitation-field.elicitation-boolean > small { grid-column: 2; }
 .elicitation-field small { color: var(--text-faint); }
 .elicitation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .elicitation-actions button {
@@ -624,6 +628,7 @@ details.thinking .t-body { white-space: pre-wrap; font-size: calc(var(--font-siz
   background: var(--bg); color: var(--text); font: inherit;
 }
 .elicitation-actions button:hover:not(:disabled) { background: var(--bg-hover); }
+.elicitation-actions .elicitation-submit { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
 .elicitation-actions button:disabled { opacity: .5; }
 .elicitation-result { margin-top: 6px; color: var(--text-dim); }
 .files-changed {
