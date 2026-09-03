@@ -11,6 +11,7 @@ export type AgentEvent =
   | { kind: "elicitation-resolved"; requestId: string; action: ElicitationAction }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
+  | { kind: "recovery"; mode: "resumed"; title: string; message: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string }
@@ -106,7 +107,8 @@ export interface WorkbenchExperience {
   localAuthorityLabel: string;
   hubAuthorityLabel: string;
 }
-export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; capabilities?: ProviderCapabilities; }
+export interface RecoveryState { mode: "resumed"; title: string; message: string; }
+export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; createdAt?: number; capabilities?: ProviderCapabilities; }
 export type CtrlJMode = "newline" | "menu";
 
 function closeStreaming(blocks: Block[]): Block[] {
@@ -185,6 +187,8 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
           ? { ...block, status: "resolved", optionId: evt.optionId }
           : block
       );
+    case "recovery":
+      return blocks;
     default:
       return blocks;
   }
@@ -206,6 +210,7 @@ export interface SessionState {
   defaultCwd: string;
   defaultProvider: string;
   experience: WorkbenchExperience | null;
+  recovery: RecoveryState | null;
   ctrlJ: CtrlJMode;
   phase: "composer" | "chat";
   session: SessionSummary | null;
@@ -291,6 +296,16 @@ export function resolveProviderSelection(providers: Provider[], current: string,
   return installed[0]?.id ?? current;
 }
 
+export function pickInitialBossSession(
+  sessions: SessionSummary[],
+  experience: WorkbenchExperience | null,
+): SessionSummary | null {
+  if (!experience) return null;
+  return sessions
+    .filter((session) => session.provider === experience.defaultProvider)
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0] ?? null;
+}
+
 export function useSession(): SessionState {
   const [ready, setReady] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -299,6 +314,7 @@ export function useSession(): SessionState {
   const [defaultCwd, setDefaultCwd] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("");
   const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
   const [phase, setPhase] = useState<"composer" | "chat">(routedSessionId ? "chat" : "composer");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -328,6 +344,8 @@ export function useSession(): SessionState {
   } | null>(null);
   const pendingStartTimeoutRef = useRef<number | null>(null);
   const optimisticUsersRef = useRef<string[]>([]);
+  const experienceRef = useRef<WorkbenchExperience | null>(null);
+  const initialSessionListHandledRef = useRef(false);
 
   const clearPendingStartTimeout = useCallback(() => {
     if (pendingStartTimeoutRef.current) window.clearTimeout(pendingStartTimeoutRef.current);
@@ -393,7 +411,8 @@ export function useSession(): SessionState {
             setCapabilities(h.capabilities ?? {});
             setDefaultCwd(h.defaultCwd);
             setDefaultProvider(h.defaultProvider ?? "");
-            setExperience(h.experience ?? null);
+            experienceRef.current = h.experience ?? null;
+            setExperience(experienceRef.current);
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
@@ -419,6 +438,7 @@ export function useSession(): SessionState {
             setOptions([]);
             setActions({});
             setCommands([]);
+            setRecovery(null);
             pendingFileDiffKeysRef.current = {};
             setFileDiffs({});
             setPhase("chat");
@@ -428,6 +448,7 @@ export function useSession(): SessionState {
             document.title = msg.session.title || "cmux agent";
             setSession(msg.session);
             setBlocks((msg.events as AgentEvent[]).reduce(foldEvent, [] as Block[]));
+            setRecovery(latestRecovery(msg.events as AgentEvent[]));
             optimisticUsersRef.current = [];
             setOptions(latestOptions(msg.events as AgentEvent[]));
             setActions(latestActions(msg.events as AgentEvent[]));
@@ -443,11 +464,27 @@ export function useSession(): SessionState {
             setOptions([]);
             setActions({});
             setCommands([]);
+            setRecovery(null);
             pendingFileDiffKeysRef.current = {};
             setFileDiffs({});
             setPhase("composer");
             optimisticUsersRef.current = [];
             break;
+          case "sessions": {
+            if (initialSessionListHandledRef.current) break;
+            initialSessionListHandledRef.current = true;
+            if (routedSessionId || sessionIdRef.current || pendingStartRef.current) break;
+            const recovered = pickInitialBossSession(msg.sessions ?? [], experienceRef.current);
+            if (!recovered) break;
+            sessionIdRef.current = recovered.id;
+            history.replaceState(null, "", appPath("/s/" + recovered.id));
+            setSession(recovered);
+            setBlocks([]);
+            setRecovery(null);
+            setPhase("chat");
+            sendRaw({ op: "subscribe", sessionId: recovered.id });
+            break;
+          }
           case "session-status":
             if (msg.sessionId === sessionIdRef.current) {
               setSession((s) => (s ? { ...s, status: msg.status } : s));
@@ -456,6 +493,10 @@ export function useSession(): SessionState {
           case "event":
             if (msg.sessionId === sessionIdRef.current) {
               const evt = msg.evt as AgentEvent;
+              if (evt.kind === "recovery") {
+                setRecovery({ mode: evt.mode, title: evt.title, message: evt.message });
+                break;
+              }
               if (evt.kind === "user" && consumeOptimisticUserEcho(optimisticUsersRef.current, evt.text)) {
                 break;
               }
@@ -551,6 +592,7 @@ export function useSession(): SessionState {
     setOptions([]);
     setActions({});
     setCommands([]);
+    setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
     setPhase("chat");
@@ -567,6 +609,7 @@ export function useSession(): SessionState {
     setOptions([]);
     setActions({});
     setCommands([]);
+    setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
     setPhase("composer");
@@ -642,6 +685,7 @@ export function useSession(): SessionState {
     defaultCwd,
     defaultProvider,
     experience,
+    recovery,
     ctrlJ,
     phase,
     session,
@@ -689,6 +733,16 @@ function latestActions(events: AgentEvent[]): SessionActions {
 
 function latestCommands(events: AgentEvent[]): CommandGroup[] {
   return events.reduce((groups, evt) => evt.kind === "commands" ? upsertCommands(groups, evt) : groups, [] as CommandGroup[]);
+}
+
+function latestRecovery(events: AgentEvent[]): RecoveryState | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === "recovery") {
+      return { mode: event.mode, title: event.title, message: event.message };
+    }
+  }
+  return null;
 }
 
 function upsertCommands(groups: CommandGroup[], evt: Extract<AgentEvent, { kind: "commands" }>): CommandGroup[] {

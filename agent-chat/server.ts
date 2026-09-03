@@ -459,7 +459,10 @@ function createSession(
     seedOptions: optionCatalog.get(provider)?.options,
     status: "idle",
     events: [],
-    internal: restored ? { acpResumeSessionId: restored.providerSessionId } : {},
+    internal: {
+      ...(PRODUCT_ID ? { productId: PRODUCT_ID } : {}),
+      ...(restored ? { acpResumeSessionId: restored.providerSessionId } : {}),
+    },
     adapter,
     sockets: new Set(),
     createdAt: restored?.createdAt ?? Date.now(),

@@ -4,6 +4,7 @@ import { CmdkMenu, type CmdkGroup } from "./components/CmdkMenu";
 import { StatusRow } from "./components/StatusRow";
 import { ActivityIndicatorBlock, Blocks, ElicitationBlock, PermissionBlock, PlanBlock, ToolBlock, TurnActions, type ToolBlockVariant } from "./components/Transcript";
 import { WorkbenchHeader } from "./components/WorkbenchHeader";
+import { RecoveryBanner } from "./components/RecoveryBanner";
 import { BarsIcon, PinwheelSpinner, ProviderIcon } from "./components/icons";
 import { HintTooltip } from "./components/Tooltips";
 import { useOverlayScrollbars } from "./hooks/useOverlayScrollbars";
@@ -289,6 +290,14 @@ export function GalleryApp() {
                 defaultProvider: "agency-worker",
                 localAuthorityLabel: "Controlled here",
                 hubAuthorityLabel: "Controlled in Agency Hub",
+              }} />
+            </div>
+            <div>
+              <div className="gallery-label">Native resume</div>
+              <RecoveryBanner recovery={{
+                mode: "resumed",
+                title: "Conversation resumed",
+                message: "Loaded the existing provider session after Workbench restarted.",
               }} />
             </div>
             <div>

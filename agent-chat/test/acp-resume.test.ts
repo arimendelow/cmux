@@ -25,7 +25,7 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
     startOptions: {},
     status: "idle",
     events,
-    internal: { acpResumeSessionId: "persisted-session" },
+    internal: { acpResumeSessionId: "persisted-session", productId: "ouro-workbench-v1" },
     emit(event) {
       events.push(event);
     },

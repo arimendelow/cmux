@@ -278,6 +278,15 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     sess.internal.acpResumeSessionId = st.acpSessionId;
     ingestAcpOptions(st, sessionState ?? {}, def, spawnModel);
     sess.internal.acp = st;
+    if (resumeSessionId) {
+      const hostName = sess.internal.productId === "ouro-workbench-v1" ? "Workbench" : "Agent Chat";
+      sess.emit({
+        kind: "recovery",
+        mode: "resumed",
+        title: "Conversation resumed",
+        message: `Loaded the existing provider session after ${hostName} restarted.`,
+      });
+    }
     sess.emit({ kind: "meta", providerSessionId: st.acpSessionId });
     emitAcpState(sess, st);
     return st;

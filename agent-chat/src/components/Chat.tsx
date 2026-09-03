@@ -8,6 +8,7 @@ import { optionAcceptsValue } from "./options";
 import { StatusRow } from "./StatusRow";
 import { Blocks } from "./Transcript";
 import { WorkbenchHeader } from "./WorkbenchHeader";
+import { RecoveryBanner } from "./RecoveryBanner";
 import { ShortcutOverlay, useKeymap } from "../hooks/useKeymap";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 import { providerOptionMap, useFileCatalog, useProviderCatalogs, withFileTrigger } from "../hooks/useCatalogs";
@@ -55,7 +56,7 @@ function useStickToBottom(scrollRef: RefObject<HTMLDivElement | null>, stickRef:
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
   const [text, setText] = useState("");
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -124,6 +125,7 @@ export function Chat() {
     <section id="chat-view">
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
       <div id="messages" ref={scrollRef} onScroll={onScroll}>
+        {recovery ? <RecoveryBanner recovery={recovery} /> : null}
         <Blocks
           blocks={blocks}
           status={session?.status}

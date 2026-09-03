@@ -388,6 +388,15 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   user-select: none; -webkit-user-select: none; cursor: default;
 }
 .turn-list { min-height: 100%; }
+.recovery-banner-wrap { max-width: 760px; margin: 0 auto; padding: 0 24px 16px; }
+.recovery-banner {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px;
+  color: var(--text-dim); background: color-mix(in srgb, var(--green) 8%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--green) 24%, var(--border));
+  font-size: calc(var(--font-size-base) - 2px);
+}
+.recovery-banner strong { color: color-mix(in srgb, var(--green) 74%, var(--text)); font-weight: 600; }
+.recovery-banner span { color: var(--text-dim); }
 .turn-virtual-row { overflow-anchor: none; }
 .turn-group { min-width: 0; }
 .msg { max-width: 760px; margin: 0 auto; padding: 0 24px 16px; }
