@@ -20,6 +20,35 @@ struct CmuxAgentChatConfigTests {
         #expect(OuroWorkbenchProduct.agentChatActionTitle(bundleIdentifier: bundleIdentifier) == "Open Boss")
         #expect(OuroWorkbenchProduct.agentChatSurfaceTitle(bundleIdentifier: bundleIdentifier) == "Boss")
         #expect(OuroWorkbenchProduct.agentChatSubtitle(bundleIdentifier: bundleIdentifier) == "Workbench boss")
+        let command = OuroWorkbenchProduct.agentChatStartCommand(
+            bundleIdentifier: bundleIdentifier,
+            sourceFilePath: #filePath
+        )
+        #expect(command?.contains("/agent-chat/cmux-chat") == true)
+    }
+
+    @Test func ouroWorkbenchDefaultUsesItsSourceOwnedAgentChatHelper() {
+        let command = "'/repo/agent-chat/cmux-chat' --no-open"
+        let resolved = CmuxAgentChatConfiguration.resolved(
+            local: nil,
+            global: nil,
+            localSourcePath: nil,
+            globalSourcePath: nil,
+            productDefaultStartCommand: command
+        )
+
+        #expect(resolved.startCommand == command)
+        #expect(resolved.serverMode == .appOwned)
+
+        let explicit = CmuxAgentChatConfiguration.resolved(
+            local: CmuxAgentChatConfigDefinition(url: "http://127.0.0.1:9000"),
+            global: nil,
+            localSourcePath: "/repo/cmux.json",
+            globalSourcePath: nil,
+            productDefaultStartCommand: command
+        )
+        #expect(explicit.startCommand == nil)
+        #expect(explicit.serverMode == .explicitURL)
     }
 
     @MainActor
