@@ -43,6 +43,29 @@ if (providerSessionTitle(providers, "missing") !== "Agent") {
   throw new Error("unknown provider title should be neutral");
 }
 
+const permissionRequested = foldEvent([], {
+  kind: "permission-request",
+  requestId: "99",
+  title: "Read greeting.mjs",
+  options: [
+    { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+    { optionId: "reject-once", name: "Reject", kind: "reject_once" },
+  ],
+});
+const pendingPermission = permissionRequested[0];
+if (pendingPermission?.kind !== "permission" || pendingPermission.status !== "pending") {
+  throw new Error(`permission request should create a pending block: ${JSON.stringify(permissionRequested)}`);
+}
+const permissionResolved = foldEvent(permissionRequested, {
+  kind: "permission-resolved",
+  requestId: "99",
+  optionId: "allow-once",
+});
+const resolvedPermission = permissionResolved[0];
+if (resolvedPermission?.kind !== "permission" || resolvedPermission.status !== "resolved" || resolvedPermission.optionId !== "allow-once") {
+  throw new Error(`permission response should resolve the matching block: ${JSON.stringify(permissionResolved)}`);
+}
+
 console.log("session store assertions passed");
 
 export {};
