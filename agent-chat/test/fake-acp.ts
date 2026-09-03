@@ -45,7 +45,7 @@ for await (const line of rl) {
         method: "session/request_permission",
         params: {
           sessionId: `fake-${model || "default"}`,
-          toolCall: { toolCallId: "tool-1", title: "Read greeting.mjs" },
+          toolCall: { toolCallId: "tool-1" },
           options: [
             { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
             { optionId: "reject-once", name: "Reject", kind: "reject_once" },
