@@ -142,6 +142,7 @@ interface AcpState {
   pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
   pendingElicitations: Map<string, { rpcId: unknown; fields: ElicitationField[] }>;
   toolTitles: Map<string, string>;
+  requestNamespace: string;
   suppressSessionReplay: boolean;
   writeMsg(msg: unknown): void;
 }
@@ -254,6 +255,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     pendingPermissions: new Map(),
     pendingElicitations: new Map(),
     toolTitles: new Map(),
+    requestNamespace: crypto.randomUUID().slice(0, 8),
     suppressSessionReplay: false,
     writeMsg,
   };
@@ -274,6 +276,12 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   }, () => {
     for (const p of pending.values()) p.reject(new Error(`${def.id} acp process exited`));
     pending.clear();
+    for (const requestId of st.pendingPermissions.keys()) {
+      sess.emit({ kind: "permission-resolved", requestId, optionId: "cancelled" });
+    }
+    for (const requestId of st.pendingElicitations.keys()) {
+      sess.emit({ kind: "elicitation-resolved", requestId, action: "cancel" });
+    }
     st.pendingPermissions.clear();
     st.pendingElicitations.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
@@ -709,7 +717,7 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
     }
     try {
       const fields = elicitationFields(msg.params?.requestedSchema);
-      const requestId = String(msg.id);
+      const requestId = `${st.requestNamespace}:${String(msg.id)}`;
       st.pendingElicitations.set(requestId, { rpcId: msg.id, fields });
       sess.emit({
         kind: "elicitation-request",
@@ -735,7 +743,7 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
     // though auto-approve is off. "cancelled" is the spec's no-selection
     // outcome.
     if (!st.autoApprove) {
-      const requestId = String(msg.id);
+      const requestId = `${st.requestNamespace}:${String(msg.id)}`;
       if (!options.length) {
         writeMsg({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "cancelled" } } });
         sess.emit({ kind: "status", text: "permission request had no valid options" });
@@ -890,6 +898,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             pendingPermissions: new Map(),
             pendingElicitations: new Map(),
             toolTitles: new Map(),
+            requestNamespace: "catalog",
             suppressSessionReplay: false,
             writeMsg: () => {},
           };
