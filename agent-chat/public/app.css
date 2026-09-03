@@ -595,6 +595,16 @@ details.thinking .t-body { white-space: pre-wrap; font-size: calc(var(--font-siz
 .permission-allow { border-color: color-mix(in srgb, var(--green) 55%, var(--border)) !important; }
 .permission-reject { border-color: color-mix(in srgb, var(--red) 55%, var(--border)) !important; }
 .permission-result { margin-top: 6px; color: var(--text-dim); }
+.plan-card {
+  max-width: 760px; margin: 0 auto 12px; padding: 12px 14px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg-raised); color: var(--text);
+}
+.plan-title { margin-bottom: 8px; font-weight: 600; }
+.plan-steps { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.plan-steps li { display: grid; grid-template-columns: 10px 1fr; gap: 8px; align-items: start; color: var(--text-dim); }
+.plan-marker { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--text-faint); }
+.plan-steps li[data-plan-status="completed"] .plan-marker { background: var(--green); }
+.plan-steps li[data-plan-status="in_progress"] .plan-marker { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 18%, transparent); }
 .files-changed {
   max-width: 760px; margin: -8px auto 18px; padding: 0 24px; color: var(--text-dim);
 }

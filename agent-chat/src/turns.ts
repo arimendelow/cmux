@@ -87,6 +87,10 @@ export function summarizeTurnActivity(blocks: Block[]): string {
       other++;
       continue;
     }
+    if (block.kind === "plan") {
+      other++;
+      continue;
+    }
     if (block.kind !== "tool") {
       other++;
       continue;
@@ -128,5 +132,6 @@ export function activityRowLabel(block: Block): string {
     const selected = block.options.find((option) => option.optionId === block.optionId)?.name;
     return block.status === "pending" ? "Permission needed" : `Permission: ${selected ?? block.optionId ?? "resolved"}`;
   }
+  if (block.kind === "plan") return "Plan";
   return "Activity";
 }

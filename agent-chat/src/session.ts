@@ -6,6 +6,7 @@ export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
+  | { kind: "plan"; entries: PlanEntry[] }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
@@ -23,6 +24,7 @@ export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
 export interface PermissionOption { optionId: string; name: string; kind: string; }
+export interface PlanEntry { content: string; status?: string; }
 export interface OptionChoice { value: string; label: string; description?: string; disabled?: boolean; disabledReason?: string; }
 export interface SessionOption {
   id: string;
@@ -69,6 +71,7 @@ export type Block =
   | { kind: "error"; text: string }
   | { kind: "footer"; text: string }
   | { kind: "files"; files: ChangedFile[]; revision?: string }
+  | { kind: "plan"; entries: PlanEntry[] }
   | { kind: "permission"; requestId: string; title: string; options: PermissionOption[]; status: "pending" | "resolved"; optionId?: string };
 
 export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; startupTimeoutMs?: number; }
@@ -121,6 +124,8 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
       return [...closeStreaming(blocks), { kind: "error", text: evt.message }];
     case "status":
       return [...closeStreaming(blocks), { kind: "status", text: evt.text }];
+    case "plan":
+      return [...closeStreaming(blocks), { kind: "plan", entries: evt.entries }];
     case "permission-request":
       return [...closeStreaming(blocks), {
         kind: "permission",

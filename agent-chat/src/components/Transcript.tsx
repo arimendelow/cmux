@@ -231,6 +231,22 @@ export function PermissionBlock({
   );
 }
 
+export function PlanBlock({ block }: { block: Extract<Block, { kind: "plan" }> }) {
+  return (
+    <div className="plan-card">
+      <div className="plan-title">Plan</div>
+      <ol className="plan-steps">
+        {block.entries.map((entry, index) => (
+          <li key={`${index}:${entry.content}`} data-plan-status={entry.status ?? "pending"}>
+            <span className="plan-marker" aria-hidden="true" />
+            <span>{entry.content}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function durationText(stats: string): string {
   return stats.split(" · ").find((part) => /^\d+(\.\d+)?s$/.test(part.trim())) ?? "";
 }
@@ -697,6 +713,8 @@ function activityBlockHasDetail(block: Block): boolean {
       return block.files.length > 0;
     case "permission":
       return true;
+    case "plan":
+      return block.entries.length > 0;
     default:
       return false;
   }
@@ -778,6 +796,8 @@ function ActivityBlock({
       return <ChangedFilesBlock files={block.files} revision={block.revision} diffs={fileDiffs} onDiff={onFileDiff} />;
     case "permission":
       return <PermissionBlock block={block} onRespond={onPermissionResponse} />;
+    case "plan":
+      return <PlanBlock block={block} />;
     default:
       return null;
   }

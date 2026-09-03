@@ -492,10 +492,7 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
         }
         break;
       case "plan":
-        sess.emit({
-          kind: "status",
-          text: "plan: " + (u.entries ?? []).map((e: any) => e.content).join(" → ").slice(0, 300),
-        });
+        sess.emit({ kind: "plan", entries: normalizePlanEntries(u.entries) });
         break;
       case "available_commands_update":
         st.commands = normalizeCommands(u.availableCommands);
@@ -571,6 +568,15 @@ function normalizeCommands(commands: any): CommandEntry[] {
     description: c.description ? String(c.description) : undefined,
     source: c.source ? String(c.source) : undefined,
   })).filter((c) => c.name);
+}
+
+function normalizePlanEntries(entries: unknown) {
+  if (!Array.isArray(entries)) return [];
+  return entries.flatMap((entry) => {
+    const content = typeof entry?.content === "string" ? entry.content.trim() : "";
+    const status = typeof entry?.status === "string" ? entry.status : undefined;
+    return content ? [{ content, status }] : [];
+  });
 }
 
 function contentText(content: unknown): string {

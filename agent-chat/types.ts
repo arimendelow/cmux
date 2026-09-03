@@ -3,6 +3,7 @@ export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
+  | { kind: "plan"; entries: PlanEntry[] }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
@@ -25,6 +26,11 @@ export interface PermissionOption {
   optionId: string;
   name: string;
   kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
+}
+
+export interface PlanEntry {
+  content: string;
+  status?: string;
 }
 
 export interface OptionChoice {
