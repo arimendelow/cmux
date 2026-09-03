@@ -6,6 +6,7 @@ const model = modelFlag >= 0 ? Bun.argv[modelFlag + 1] ?? "" : "";
 const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms");
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const requestPermission = Bun.argv.includes("--request-permission");
+const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
 const log = process.env.FAKE_ACP_MODEL_LOG;
 const methodLog = process.env.FAKE_ACP_METHOD_LOG;
@@ -99,6 +100,37 @@ for await (const line of rl) {
       });
       continue;
     }
+    if (requestElicitation) {
+      pendingPromptId = msg.id;
+      send({
+        jsonrpc: "2.0",
+        id: 100,
+        method: "elicitation/create",
+        params: {
+          sessionId: `fake-${model || "default"}`,
+          mode: "form",
+          message: "How should I update the greeting?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              strategy: {
+                type: "string",
+                title: "Strategy",
+                enum: ["conservative", "balanced"],
+                default: "balanced",
+              },
+              includeCheck: {
+                type: "boolean",
+                title: "Run the check",
+                default: true,
+              },
+            },
+            required: ["strategy"],
+          },
+        },
+      });
+      continue;
+    }
     send({
       jsonrpc: "2.0",
       method: "session/update",
@@ -123,6 +155,20 @@ for await (const line of rl) {
       jsonrpc: "2.0",
       method: "session/update",
       params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: selected } } },
+    });
+    send({ jsonrpc: "2.0", id: pendingPromptId, result: { stopReason: "end_turn" } });
+    pendingPromptId = null;
+  } else if (msg.id === 100 && msg.result && pendingPromptId !== null) {
+    const result = msg.result;
+    send({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `${result.action}:${JSON.stringify(result.content ?? null)}` },
+        },
+      },
     });
     send({ jsonrpc: "2.0", id: pendingPromptId, result: { stopReason: "end_turn" } });
     pendingPromptId = null;

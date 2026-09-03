@@ -83,6 +83,35 @@ if (plan[0]?.kind !== "plan" || plan[0].entries[1]?.content !== "Update the mess
   throw new Error(`structured plan should survive event folding: ${JSON.stringify(plan)}`);
 }
 
+const elicitationRequested = foldEvent([], {
+  kind: "elicitation-request",
+  requestId: "100",
+  message: "How should I update the greeting?",
+  fields: [
+    {
+      name: "strategy",
+      type: "string",
+      title: "Strategy",
+      required: true,
+      options: ["conservative", "balanced"],
+      defaultValue: "balanced",
+    },
+  ],
+});
+const pendingElicitation = elicitationRequested[0];
+if (pendingElicitation?.kind !== "elicitation" || pendingElicitation.status !== "pending") {
+  throw new Error(`elicitation request should create a pending block: ${JSON.stringify(elicitationRequested)}`);
+}
+const elicitationResolved = foldEvent(elicitationRequested, {
+  kind: "elicitation-resolved",
+  requestId: "100",
+  action: "accept",
+});
+const resolvedElicitation = elicitationResolved[0];
+if (resolvedElicitation?.kind !== "elicitation" || resolvedElicitation.status !== "resolved" || resolvedElicitation.action !== "accept") {
+  throw new Error(`elicitation response should resolve the matching block: ${JSON.stringify(elicitationResolved)}`);
+}
+
 console.log("session store assertions passed");
 
 export {};
