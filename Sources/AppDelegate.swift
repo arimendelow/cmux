@@ -1422,7 +1422,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 #if DEBUG
         writeUITestDiagnosticsIfNeeded(stage: "didFinishLaunching")
-        CmuxMainRunLoopStallMonitor.shared.installIfNeeded()
+        if !OuroWorkbenchProduct.isCurrentBundle {
+            CmuxMainRunLoopStallMonitor.shared.installIfNeeded()
+        }
         CmuxMainThreadTurnProfiler.shared.installIfNeeded()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.writeUITestDiagnosticsIfNeeded(stage: "after1s")
