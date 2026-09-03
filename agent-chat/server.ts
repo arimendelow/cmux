@@ -2062,6 +2062,16 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       });
       break;
     }
+    case "permission-response": {
+      const sess = sessions.get(String(msg.sessionId));
+      const requestId = String(msg.requestId ?? "");
+      const optionId = String(msg.optionId ?? "");
+      if (!sess || !requestId || !optionId || !sess.adapter.respondPermission) return;
+      Promise.resolve(sess.adapter.respondPermission(sess, requestId, optionId)).catch((err) => {
+        sess.emit({ kind: "error", message: safeErrorMessage("permission-response", err) });
+      });
+      break;
+    }
     case "fork": {
       const sess = sessions.get(String(msg.sessionId));
       if (!sess) {

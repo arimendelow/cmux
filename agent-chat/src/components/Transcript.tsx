@@ -202,6 +202,35 @@ export function ActivityIndicatorBlock({ label, startedAt }: { label: "Thinking"
   );
 }
 
+export function PermissionBlock({
+  block,
+  onRespond,
+}: {
+  block: Extract<Block, { kind: "permission" }>;
+  onRespond: (requestId: string, optionId: string) => void;
+}) {
+  const selected = block.options.find((option) => option.optionId === block.optionId)?.name;
+  return (
+    <div className="permission-card" data-permission-status={block.status} aria-live="polite">
+      <div className="permission-title">{block.title}</div>
+      {block.status === "pending" ? (
+        <div className="permission-actions">
+          {block.options.map((option) => (
+            <button
+              key={option.optionId}
+              type="button"
+              className={option.kind.startsWith("allow") ? "permission-allow" : "permission-reject"}
+              onClick={() => onRespond(block.requestId, option.optionId)}
+            >
+              {option.name}
+            </button>
+          ))}
+        </div>
+      ) : <div className="permission-result">{selected ?? block.optionId ?? "Resolved"}</div>}
+    </div>
+  );
+}
+
 function durationText(stats: string): string {
   return stats.split(" · ").find((part) => /^\d+(\.\d+)?s$/.test(part.trim())) ?? "";
 }
@@ -666,6 +695,8 @@ function activityBlockHasDetail(block: Block): boolean {
       return Boolean(block.text.trim());
     case "files":
       return block.files.length > 0;
+    case "permission":
+      return true;
     default:
       return false;
   }
@@ -724,11 +755,13 @@ function ActivityBlock({
   fileDiffs,
   onFileDiff,
   thinkingDefaultOpen,
+  onPermissionResponse,
 }: {
   block: Block;
   fileDiffs: Record<string, string>;
   onFileDiff: (path: string) => void;
   thinkingDefaultOpen: boolean;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
 }) {
   switch (block.kind) {
     case "tool":
@@ -743,6 +776,8 @@ function ActivityBlock({
       return <div className="error-block-wrap"><div className="error-block">{block.text}</div></div>;
     case "files":
       return <ChangedFilesBlock files={block.files} revision={block.revision} diffs={fileDiffs} onDiff={onFileDiff} />;
+    case "permission":
+      return <PermissionBlock block={block} onRespond={onPermissionResponse} />;
     default:
       return null;
   }
@@ -757,6 +792,7 @@ function TurnActivity({
   fileDiffs,
   onFileDiff,
   thinkingDefaultOpen,
+  onPermissionResponse,
 }: {
   group: TurnGroup;
   expanded: boolean;
@@ -766,6 +802,7 @@ function TurnActivity({
   fileDiffs: Record<string, string>;
   onFileDiff: (path: string) => void;
   thinkingDefaultOpen: boolean;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
 }) {
   if (!group.activity.length) return null;
   const summary = summarizeTurnActivity(group.activity);
@@ -787,7 +824,7 @@ function TurnActivity({
                   if (block.kind === "assistant") {
                     return (
                       <div className="turn-activity-item" key={`${group.id}:${i}`}>
-                        <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} />
+                        <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
                       </div>
                     );
                   }
@@ -806,7 +843,7 @@ function TurnActivity({
                       <DisclosureMotion open={open && canExpand}>
                         {() => (
                           <div className="turn-activity-detail" style={activityDetailStyle}>
-                            <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} />
+                            <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
                           </div>
                         )}
                       </DisclosureMotion>
@@ -835,6 +872,7 @@ function TurnGroupView({
   setExpandedTurns,
   expandedItems,
   setExpandedItems,
+  onPermissionResponse,
 }: {
   group: TurnGroup;
   status?: string;
@@ -848,6 +886,7 @@ function TurnGroupView({
   setExpandedTurns: (next: Record<string, boolean>) => void;
   expandedItems: Record<string, boolean>;
   setExpandedItems: (next: Record<string, boolean>) => void;
+  onPermissionResponse: (requestId: string, optionId: string) => void;
 }) {
   const live = status === "running" && !group.done;
   return (
@@ -855,7 +894,7 @@ function TurnGroupView({
       {group.user ? <div className="msg user"><div className="body selectable">{group.user.text}</div></div> : null}
       {live
         ? group.activity.map((block, i) => (
-          <ActivityBlock key={i} block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} />
+          <ActivityBlock key={i} block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
         ))
         : (
           <TurnActivity
@@ -867,6 +906,7 @@ function TurnGroupView({
             fileDiffs={fileDiffs}
             onFileDiff={onFileDiff}
             thinkingDefaultOpen={thinkingDefaultOpen}
+            onPermissionResponse={onPermissionResponse}
           />
         )}
       {group.assistant ? <div className="msg assistant"><div className="body selectable"><ChatMarkdown text={group.assistant.text} streaming={group.assistant.open} /></div></div> : null}
@@ -886,6 +926,7 @@ export function Blocks({
   thinkingDefaultOpen = false,
   initialExpandedTurns = {},
   initialExpandedItems = {},
+  onPermissionResponse = () => {},
 }: {
   blocks: Block[];
   status?: string;
@@ -897,6 +938,7 @@ export function Blocks({
   thinkingDefaultOpen?: boolean;
   initialExpandedTurns?: Record<string, boolean>;
   initialExpandedItems?: Record<string, boolean>;
+  onPermissionResponse?: (requestId: string, optionId: string) => void;
 }) {
   const activity = activityIndicatorState(status, blocks);
   const activityKey = `${status}:${activity.label}:${activityTailKey(blocks)}`;
@@ -929,6 +971,7 @@ export function Blocks({
               setExpandedTurns={setExpandedTurns}
               expandedItems={expandedItems}
               setExpandedItems={setExpandedItems}
+              onPermissionResponse={onPermissionResponse}
             />
           </div>
         );

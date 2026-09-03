@@ -3,6 +3,8 @@ export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
+  | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
+  | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string } // streaming assistant text
@@ -18,6 +20,12 @@ export type SessionStatus = "idle" | "running" | "exited" | "error";
 export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
+
+export interface PermissionOption {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
+}
 
 export interface OptionChoice {
   value: string;
@@ -84,6 +92,7 @@ export interface Adapter {
   refreshOptions?(sess: SessionCtx): Promise<void>;
   listOptions?(cwd: string): Promise<SessionOption[]>;
   listCommands?(cwd: string): Promise<{ trigger: CommandTrigger; commands: CommandEntry[] }[]>;
+  respondPermission?(sess: SessionCtx, requestId: string, optionId: string): Promise<void>;
   forkSession?(source: SessionCtx, target: SessionCtx): Promise<void>;
   capabilities?: ProviderCapabilities;
 }

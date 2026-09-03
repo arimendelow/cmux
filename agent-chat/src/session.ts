@@ -6,6 +6,8 @@ export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
+  | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
+  | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string }
@@ -20,6 +22,7 @@ export type AgentEvent =
 export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
+export interface PermissionOption { optionId: string; name: string; kind: string; }
 export interface OptionChoice { value: string; label: string; description?: string; disabled?: boolean; disabledReason?: string; }
 export interface SessionOption {
   id: string;
@@ -65,7 +68,8 @@ export type Block =
   | { kind: "status"; text: string }
   | { kind: "error"; text: string }
   | { kind: "footer"; text: string }
-  | { kind: "files"; files: ChangedFile[]; revision?: string };
+  | { kind: "files"; files: ChangedFile[]; revision?: string }
+  | { kind: "permission"; requestId: string; title: string; options: PermissionOption[]; status: "pending" | "resolved"; optionId?: string };
 
 export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; capabilities?: ProviderCapabilities; }
@@ -117,6 +121,20 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
       return [...closeStreaming(blocks), { kind: "error", text: evt.message }];
     case "status":
       return [...closeStreaming(blocks), { kind: "status", text: evt.text }];
+    case "permission-request":
+      return [...closeStreaming(blocks), {
+        kind: "permission",
+        requestId: evt.requestId,
+        title: evt.title,
+        options: evt.options,
+        status: "pending",
+      }];
+    case "permission-resolved":
+      return blocks.map((block) =>
+        block.kind === "permission" && block.requestId === evt.requestId
+          ? { ...block, status: "resolved", optionId: evt.optionId }
+          : block
+      );
     default:
       return blocks;
   }
@@ -149,6 +167,7 @@ export interface SessionState {
   reply(text: string): void;
   stop(): void;
   setOption(id: string, value: OptionValue): void;
+  respondPermission(requestId: string, optionId: string): void;
   fork(): void;
   requestProviderOptions(provider: string, cwd: string): void;
   requestProviderCommands(provider: string, cwd: string): void;
@@ -498,6 +517,11 @@ export function useSession(): SessionState {
   const setOption = useCallback((id: string, value: OptionValue) => {
     if (sessionIdRef.current) sendRaw({ op: "set-option", sessionId: sessionIdRef.current, id, value });
   }, [sendRaw]);
+  const respondPermission = useCallback((requestId: string, optionId: string) => {
+    if (sessionIdRef.current) {
+      sendRaw({ op: "permission-response", sessionId: sessionIdRef.current, requestId, optionId });
+    }
+  }, [sendRaw]);
   const fork = useCallback(() => {
     if (sessionIdRef.current) {
       if (sendRaw({ op: "fork", sessionId: sessionIdRef.current })) setForkPending(true);
@@ -548,6 +572,7 @@ export function useSession(): SessionState {
     reply,
     stop,
     setOption,
+    respondPermission,
     fork,
     requestProviderOptions,
     requestProviderCommands,

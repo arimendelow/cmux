@@ -3,6 +3,7 @@ import type {
   CommandEntry,
   OptionChoice,
   OptionValue,
+  PermissionOption,
   ProviderDef,
   SessionCtx,
   SessionOption,
@@ -46,7 +47,10 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
     },
     stop(sess) {
       const st = sess.internal.acp as AcpState | undefined;
-      if (st?.acpSessionId) st.notify("session/cancel", { sessionId: st.acpSessionId });
+      if (st?.acpSessionId) {
+        cancelPendingPermissions(sess, st);
+        st.notify("session/cancel", { sessionId: st.acpSessionId });
+      }
     },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
@@ -56,6 +60,21 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       sess.internal.acpStartingProc = undefined;
       st?.proc.kill();
       startingProc?.kill();
+    },
+    async respondPermission(sess, requestId, optionId) {
+      const st = sess.internal.acp as AcpState | undefined;
+      if (!st) throw new Error(`${def.id} ACP provider is not ready`);
+      const pending = st.pendingPermissions.get(requestId);
+      if (!pending) throw new Error(`permission request not found: ${requestId}`);
+      const option = pending.options.find((candidate) => candidate.optionId === optionId);
+      if (!option) throw new Error(`permission option not found: ${optionId}`);
+      st.pendingPermissions.delete(requestId);
+      st.writeMsg({
+        jsonrpc: "2.0",
+        id: pending.rpcId,
+        result: { outcome: { outcome: "selected", optionId } },
+      });
+      sess.emit({ kind: "permission-resolved", requestId, optionId });
     },
     async setOption(sess, id, value) {
       const st = await ensureAcp(sess, def);
@@ -88,6 +107,8 @@ interface AcpState {
   autoApprove: boolean;
   commands: CommandEntry[];
   initialApplied: boolean;
+  pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
+  writeMsg(msg: unknown): void;
 }
 
 function acpFallbackOptions(def: ProviderDef): SessionOption[] {
@@ -177,6 +198,8 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     autoApprove,
     commands: [],
     initialApplied: false,
+    pendingPermissions: new Map(),
+    writeMsg,
   };
 
   readLines(proc.stdout, (line) => {
@@ -195,6 +218,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   }, () => {
     for (const p of pending.values()) p.reject(new Error(`${def.id} acp process exited`));
     pending.clear();
+    st.pendingPermissions.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
       sess.internal.acp = undefined;
     }
@@ -402,6 +426,28 @@ function withAcpLocalOptions(options: SessionOption[], autoApprove: boolean): Se
   ];
 }
 
+function cancelPendingPermissions(sess: SessionCtx, st: AcpState) {
+  for (const [requestId, pending] of st.pendingPermissions) {
+    st.writeMsg({
+      jsonrpc: "2.0",
+      id: pending.rpcId,
+      result: { outcome: { outcome: "cancelled" } },
+    });
+    sess.emit({ kind: "permission-resolved", requestId, optionId: "cancelled" });
+  }
+  st.pendingPermissions.clear();
+}
+
+function permissionOptions(value: unknown): PermissionOption[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((option) => {
+    const optionId = typeof option?.optionId === "string" ? option.optionId : "";
+    const name = typeof option?.name === "string" ? option.name : "";
+    const kind = typeof option?.kind === "string" ? option.kind : "";
+    return optionId && name && kind ? [{ optionId, name, kind }] : [];
+  });
+}
+
 // Notifications and reverse requests from the agent.
 function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, msg: any, writeMsg: (m: unknown) => void) {
   if (msg.method === "session/update") {
@@ -464,19 +510,30 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
   }
   // Reverse request: must answer or the agent hangs.
   if (msg.id != null && msg.method === "session/request_permission") {
-    const options: any[] = msg.params?.options ?? [];
+    const options = permissionOptions(msg.params?.options);
     const allow = options.find((o) => o.kind === "allow_always")
       ?? options.find((o) => o.kind === "allow_once");
     // Never fall back to an arbitrary option when denying: if the agent only
     // offered allow options, picking options[0] would approve the tool even
     // though auto-approve is off. "cancelled" is the spec's no-selection
     // outcome.
-    const reject = options.find((o) => o.kind?.startsWith("reject"));
-    const choice = st.autoApprove && allow ? allow : reject;
-    if (choice !== allow) {
-      const tc = msg.params?.toolCall;
-      sess.emit({ kind: "status", text: `denied: ${truncate(tc?.title ?? "tool", 120)} (auto-approve is off)` });
+    if (!st.autoApprove) {
+      const requestId = String(msg.id);
+      if (!options.length) {
+        writeMsg({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "cancelled" } } });
+        sess.emit({ kind: "status", text: "permission request had no valid options" });
+        return;
+      }
+      st.pendingPermissions.set(requestId, { rpcId: msg.id, options });
+      sess.emit({
+        kind: "permission-request",
+        requestId,
+        title: truncate(msg.params?.toolCall?.title ?? "Permission requested", 160),
+        options,
+      });
+      return;
     }
+    const choice = allow;
     writeMsg({
       jsonrpc: "2.0",
       id: msg.id,
@@ -603,6 +660,8 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             autoApprove: false,
             commands: [],
             initialApplied: false,
+            pendingPermissions: new Map(),
+            writeMsg: () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));
           resolve(st.options.length ? st.options : fallback);

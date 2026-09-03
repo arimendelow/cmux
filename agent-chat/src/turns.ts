@@ -83,6 +83,10 @@ export function summarizeTurnActivity(blocks: Block[]): string {
       edited += block.files.length;
       continue;
     }
+    if (block.kind === "permission") {
+      other++;
+      continue;
+    }
     if (block.kind !== "tool") {
       other++;
       continue;
@@ -120,5 +124,9 @@ export function activityRowLabel(block: Block): string {
   if (block.kind === "assistant") return "Assistant";
   if (block.kind === "status") return block.text;
   if (block.kind === "error") return "Error";
+  if (block.kind === "permission") {
+    const selected = block.options.find((option) => option.optionId === block.optionId)?.name;
+    return block.status === "pending" ? "Permission needed" : `Permission: ${selected ?? block.optionId ?? "resolved"}`;
+  }
   return "Activity";
 }

@@ -54,7 +54,7 @@ function useStickToBottom(scrollRef: RefObject<HTMLDivElement | null>, stickRef:
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
   const [text, setText] = useState("");
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -130,6 +130,7 @@ export function Chat() {
           forkPending={forkPending}
           fileDiffs={fileDiffs}
           onFileDiff={(path) => { if (session) requestFileDiff(session.id, path); }}
+          onPermissionResponse={respondPermission}
         />
       </div>
       <div id="chat-input-row">
