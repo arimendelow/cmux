@@ -70,6 +70,9 @@ test("ACP form elicitation waits for one correlated response", async () => {
         },
       ],
     });
+    await expect(adapter.respondElicitation?.(context, "100", "accept", {
+      includeCheck: true,
+    })).rejects.toThrow("elicitation field is required: strategy");
     await adapter.respondElicitation?.(context, "100", "accept", {
       strategy: "conservative",
       includeCheck: true,

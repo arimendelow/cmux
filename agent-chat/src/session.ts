@@ -7,6 +7,8 @@ export type AgentEvent =
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
   | { kind: "plan"; entries: PlanEntry[] }
+  | { kind: "elicitation-request"; requestId: string; message: string; fields: ElicitationField[] }
+  | { kind: "elicitation-resolved"; requestId: string; action: ElicitationAction }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
@@ -25,6 +27,16 @@ export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
 export interface PermissionOption { optionId: string; name: string; kind: string; }
 export interface PlanEntry { content: string; status?: string; }
+export type ElicitationAction = "accept" | "decline" | "cancel";
+export interface ElicitationField {
+  name: string;
+  type: "string" | "boolean" | "number" | "integer";
+  title: string;
+  description?: string;
+  required: boolean;
+  options?: string[];
+  defaultValue?: string | boolean | number;
+}
 export interface OptionChoice { value: string; label: string; description?: string; disabled?: boolean; disabledReason?: string; }
 export interface SessionOption {
   id: string;
@@ -72,6 +84,7 @@ export type Block =
   | { kind: "footer"; text: string }
   | { kind: "files"; files: ChangedFile[]; revision?: string }
   | { kind: "plan"; entries: PlanEntry[] }
+  | { kind: "elicitation"; requestId: string; message: string; fields: ElicitationField[]; status: "pending" | "resolved"; action?: ElicitationAction }
   | { kind: "permission"; requestId: string; title: string; options: PermissionOption[]; status: "pending" | "resolved"; optionId?: string };
 
 export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; startupTimeoutMs?: number; }
@@ -126,6 +139,20 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
       return [...closeStreaming(blocks), { kind: "status", text: evt.text }];
     case "plan":
       return [...closeStreaming(blocks), { kind: "plan", entries: evt.entries }];
+    case "elicitation-request":
+      return [...closeStreaming(blocks), {
+        kind: "elicitation",
+        requestId: evt.requestId,
+        message: evt.message,
+        fields: evt.fields,
+        status: "pending",
+      }];
+    case "elicitation-resolved":
+      return blocks.map((block) =>
+        block.kind === "elicitation" && block.requestId === evt.requestId
+          ? { ...block, status: "resolved", action: evt.action }
+          : block
+      );
     case "permission-request":
       return [...closeStreaming(blocks), {
         kind: "permission",
@@ -173,6 +200,11 @@ export interface SessionState {
   stop(): void;
   setOption(id: string, value: OptionValue): void;
   respondPermission(requestId: string, optionId: string): void;
+  respondElicitation(
+    requestId: string,
+    action: ElicitationAction,
+    content?: Record<string, string | boolean | number>,
+  ): void;
   fork(): void;
   requestProviderOptions(provider: string, cwd: string): void;
   requestProviderCommands(provider: string, cwd: string): void;
@@ -531,6 +563,15 @@ export function useSession(): SessionState {
       sendRaw({ op: "permission-response", sessionId: sessionIdRef.current, requestId, optionId });
     }
   }, [sendRaw]);
+  const respondElicitation = useCallback((
+    requestId: string,
+    action: ElicitationAction,
+    content?: Record<string, string | boolean | number>,
+  ) => {
+    if (sessionIdRef.current) {
+      sendRaw({ op: "elicitation-response", sessionId: sessionIdRef.current, requestId, action, content });
+    }
+  }, [sendRaw]);
   const fork = useCallback(() => {
     if (sessionIdRef.current) {
       if (sendRaw({ op: "fork", sessionId: sessionIdRef.current })) setForkPending(true);
@@ -582,6 +623,7 @@ export function useSession(): SessionState {
     stop,
     setOption,
     respondPermission,
+    respondElicitation,
     fork,
     requestProviderOptions,
     requestProviderCommands,

@@ -91,6 +91,10 @@ export function summarizeTurnActivity(blocks: Block[]): string {
       other++;
       continue;
     }
+    if (block.kind === "elicitation") {
+      other++;
+      continue;
+    }
     if (block.kind !== "tool") {
       other++;
       continue;
@@ -133,5 +137,6 @@ export function activityRowLabel(block: Block): string {
     return block.status === "pending" ? "Permission needed" : `Permission: ${selected ?? block.optionId ?? "resolved"}`;
   }
   if (block.kind === "plan") return "Plan";
+  if (block.kind === "elicitation") return block.status === "pending" ? "Question needs an answer" : `Question: ${block.action ?? "resolved"}`;
   return "Activity";
 }

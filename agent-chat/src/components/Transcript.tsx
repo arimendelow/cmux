@@ -247,6 +247,87 @@ export function PlanBlock({ block }: { block: Extract<Block, { kind: "plan" }> }
   );
 }
 
+export function ElicitationBlock({
+  block,
+  onRespond,
+}: {
+  block: Extract<Block, { kind: "elicitation" }>;
+  onRespond: (
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, string | boolean | number>,
+  ) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string | boolean | number>>(() =>
+    Object.fromEntries(block.fields.flatMap((field) => {
+      const initial = field.defaultValue ?? (field.required ? field.options?.[0] : undefined);
+      return initial === undefined ? [] : [[field.name, initial]];
+    }))
+  );
+  const complete = block.fields.every((field) =>
+    !field.required || (values[field.name] !== undefined && values[field.name] !== "")
+  );
+  if (block.status === "resolved") {
+    return (
+      <div className="elicitation-card" data-elicitation-status="resolved">
+        <div className="elicitation-message">{block.message}</div>
+        <div className="elicitation-result">{block.action ?? "Resolved"}</div>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="elicitation-card"
+      data-elicitation-status="pending"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (complete) onRespond(block.requestId, "accept", values);
+      }}
+    >
+      <div className="elicitation-message">{block.message}</div>
+      <div className="elicitation-fields">
+        {block.fields.map((field) => (
+          <label key={field.name} className="elicitation-field">
+            <span>{field.title}{field.required ? " *" : ""}</span>
+            {field.type === "boolean" ? (
+              <input
+                type="checkbox"
+                checked={Boolean(values[field.name])}
+                onChange={(event) => setValues({ ...values, [field.name]: event.target.checked })}
+              />
+            ) : field.options ? (
+              <select
+                value={String(values[field.name] ?? "")}
+                onChange={(event) => setValues({ ...values, [field.name]: event.target.value })}
+              >
+                {!field.required ? <option value="">Not set</option> : null}
+                {field.options.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+            ) : (
+              <input
+                type={field.type === "number" || field.type === "integer" ? "number" : "text"}
+                value={String(values[field.name] ?? "")}
+                onChange={(event) => {
+                  const value = field.type === "number" || field.type === "integer"
+                    ? event.target.value === "" ? "" : Number(event.target.value)
+                    : event.target.value;
+                  setValues({ ...values, [field.name]: value });
+                }}
+              />
+            )}
+            {field.description ? <small>{field.description}</small> : null}
+          </label>
+        ))}
+      </div>
+      <div className="elicitation-actions">
+        <button type="submit" disabled={!complete}>Submit</button>
+        <button type="button" onClick={() => onRespond(block.requestId, "decline")}>Decline</button>
+        <button type="button" onClick={() => onRespond(block.requestId, "cancel")}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
 function durationText(stats: string): string {
   return stats.split(" · ").find((part) => /^\d+(\.\d+)?s$/.test(part.trim())) ?? "";
 }
@@ -715,6 +796,8 @@ function activityBlockHasDetail(block: Block): boolean {
       return true;
     case "plan":
       return block.entries.length > 0;
+    case "elicitation":
+      return true;
     default:
       return false;
   }
@@ -774,12 +857,18 @@ function ActivityBlock({
   onFileDiff,
   thinkingDefaultOpen,
   onPermissionResponse,
+  onElicitationResponse,
 }: {
   block: Block;
   fileDiffs: Record<string, string>;
   onFileDiff: (path: string) => void;
   thinkingDefaultOpen: boolean;
   onPermissionResponse: (requestId: string, optionId: string) => void;
+  onElicitationResponse: (
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, string | boolean | number>,
+  ) => void;
 }) {
   switch (block.kind) {
     case "tool":
@@ -798,6 +887,8 @@ function ActivityBlock({
       return <PermissionBlock block={block} onRespond={onPermissionResponse} />;
     case "plan":
       return <PlanBlock block={block} />;
+    case "elicitation":
+      return <ElicitationBlock block={block} onRespond={onElicitationResponse} />;
     default:
       return null;
   }
@@ -813,6 +904,7 @@ function TurnActivity({
   onFileDiff,
   thinkingDefaultOpen,
   onPermissionResponse,
+  onElicitationResponse,
 }: {
   group: TurnGroup;
   expanded: boolean;
@@ -823,6 +915,11 @@ function TurnActivity({
   onFileDiff: (path: string) => void;
   thinkingDefaultOpen: boolean;
   onPermissionResponse: (requestId: string, optionId: string) => void;
+  onElicitationResponse: (
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, string | boolean | number>,
+  ) => void;
 }) {
   if (!group.activity.length) return null;
   const summary = summarizeTurnActivity(group.activity);
@@ -844,7 +941,7 @@ function TurnActivity({
                   if (block.kind === "assistant") {
                     return (
                       <div className="turn-activity-item" key={`${group.id}:${i}`}>
-                        <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
+                        <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} onElicitationResponse={onElicitationResponse} />
                       </div>
                     );
                   }
@@ -863,7 +960,7 @@ function TurnActivity({
                       <DisclosureMotion open={open && canExpand}>
                         {() => (
                           <div className="turn-activity-detail" style={activityDetailStyle}>
-                            <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
+                            <ActivityBlock block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} onElicitationResponse={onElicitationResponse} />
                           </div>
                         )}
                       </DisclosureMotion>
@@ -893,6 +990,7 @@ function TurnGroupView({
   expandedItems,
   setExpandedItems,
   onPermissionResponse,
+  onElicitationResponse,
 }: {
   group: TurnGroup;
   status?: string;
@@ -907,6 +1005,11 @@ function TurnGroupView({
   expandedItems: Record<string, boolean>;
   setExpandedItems: (next: Record<string, boolean>) => void;
   onPermissionResponse: (requestId: string, optionId: string) => void;
+  onElicitationResponse: (
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, string | boolean | number>,
+  ) => void;
 }) {
   const live = status === "running" && !group.done;
   return (
@@ -914,7 +1017,7 @@ function TurnGroupView({
       {group.user ? <div className="msg user"><div className="body selectable">{group.user.text}</div></div> : null}
       {live
         ? group.activity.map((block, i) => (
-          <ActivityBlock key={i} block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} />
+          <ActivityBlock key={i} block={block} fileDiffs={fileDiffs} onFileDiff={onFileDiff} thinkingDefaultOpen={thinkingDefaultOpen} onPermissionResponse={onPermissionResponse} onElicitationResponse={onElicitationResponse} />
         ))
         : (
           <TurnActivity
@@ -927,6 +1030,7 @@ function TurnGroupView({
             onFileDiff={onFileDiff}
             thinkingDefaultOpen={thinkingDefaultOpen}
             onPermissionResponse={onPermissionResponse}
+            onElicitationResponse={onElicitationResponse}
           />
         )}
       {group.assistant ? <div className="msg assistant"><div className="body selectable"><ChatMarkdown text={group.assistant.text} streaming={group.assistant.open} /></div></div> : null}
@@ -947,6 +1051,7 @@ export function Blocks({
   initialExpandedTurns = {},
   initialExpandedItems = {},
   onPermissionResponse = () => {},
+  onElicitationResponse = () => {},
 }: {
   blocks: Block[];
   status?: string;
@@ -959,6 +1064,11 @@ export function Blocks({
   initialExpandedTurns?: Record<string, boolean>;
   initialExpandedItems?: Record<string, boolean>;
   onPermissionResponse?: (requestId: string, optionId: string) => void;
+  onElicitationResponse?: (
+    requestId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Record<string, string | boolean | number>,
+  ) => void;
 }) {
   const activity = activityIndicatorState(status, blocks);
   const activityKey = `${status}:${activity.label}:${activityTailKey(blocks)}`;
@@ -992,6 +1102,7 @@ export function Blocks({
               expandedItems={expandedItems}
               setExpandedItems={setExpandedItems}
               onPermissionResponse={onPermissionResponse}
+              onElicitationResponse={onElicitationResponse}
             />
           </div>
         );

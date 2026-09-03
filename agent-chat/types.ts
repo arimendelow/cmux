@@ -4,6 +4,8 @@ export type AgentEvent =
   | { kind: "options"; options: SessionOption[]; actions?: SessionActions }
   | { kind: "commands"; trigger: CommandTrigger; commands: CommandEntry[] }
   | { kind: "plan"; entries: PlanEntry[] }
+  | { kind: "elicitation-request"; requestId: string; message: string; fields: ElicitationField[] }
+  | { kind: "elicitation-resolved"; requestId: string; action: ElicitationAction }
   | { kind: "permission-request"; requestId: string; title: string; options: PermissionOption[] }
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "user"; text: string }
@@ -31,6 +33,18 @@ export interface PermissionOption {
 export interface PlanEntry {
   content: string;
   status?: string;
+}
+
+export type ElicitationAction = "accept" | "decline" | "cancel";
+
+export interface ElicitationField {
+  name: string;
+  type: "string" | "boolean" | "number" | "integer";
+  title: string;
+  description?: string;
+  required: boolean;
+  options?: string[];
+  defaultValue?: string | boolean | number;
 }
 
 export interface OptionChoice {
@@ -99,6 +113,12 @@ export interface Adapter {
   listOptions?(cwd: string): Promise<SessionOption[]>;
   listCommands?(cwd: string): Promise<{ trigger: CommandTrigger; commands: CommandEntry[] }[]>;
   respondPermission?(sess: SessionCtx, requestId: string, optionId: string): Promise<void>;
+  respondElicitation?(
+    sess: SessionCtx,
+    requestId: string,
+    action: ElicitationAction,
+    content?: Record<string, string | boolean | number>,
+  ): Promise<void>;
   forkSession?(source: SessionCtx, target: SessionCtx): Promise<void>;
   capabilities?: ProviderCapabilities;
 }

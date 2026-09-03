@@ -605,6 +605,27 @@ details.thinking .t-body { white-space: pre-wrap; font-size: calc(var(--font-siz
 .plan-marker { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--text-faint); }
 .plan-steps li[data-plan-status="completed"] .plan-marker { background: var(--green); }
 .plan-steps li[data-plan-status="in_progress"] .plan-marker { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 18%, transparent); }
+.elicitation-card {
+  max-width: 760px; margin: 0 auto 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, var(--bg-raised)); color: var(--text);
+}
+.elicitation-message { font-weight: 600; }
+.elicitation-fields { display: grid; gap: 10px; margin-top: 12px; }
+.elicitation-field { display: grid; gap: 5px; color: var(--text-dim); }
+.elicitation-field input:not([type="checkbox"]), .elicitation-field select {
+  width: 100%; min-height: 32px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.elicitation-field input[type="checkbox"] { width: 16px; height: 16px; }
+.elicitation-field small { color: var(--text-faint); }
+.elicitation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.elicitation-actions button {
+  min-height: 30px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.elicitation-actions button:hover:not(:disabled) { background: var(--bg-hover); }
+.elicitation-actions button:disabled { opacity: .5; }
+.elicitation-result { margin-top: 6px; color: var(--text-dim); }
 .files-changed {
   max-width: 760px; margin: -8px auto 18px; padding: 0 24px; color: var(--text-dim);
 }

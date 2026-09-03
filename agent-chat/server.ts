@@ -2137,6 +2137,22 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       });
       break;
     }
+    case "elicitation-response": {
+      const sess = sessions.get(String(msg.sessionId));
+      const requestId = String(msg.requestId ?? "");
+      const action = String(msg.action ?? "");
+      const content = msg.content;
+      if (!sess || !requestId || !["accept", "decline", "cancel"].includes(action) || !sess.adapter.respondElicitation) return;
+      Promise.resolve(sess.adapter.respondElicitation(
+        sess,
+        requestId,
+        action as "accept" | "decline" | "cancel",
+        content && typeof content === "object" && !Array.isArray(content) ? content : undefined,
+      )).catch((err) => {
+        sess.emit({ kind: "error", message: safeErrorMessage("elicitation-response", err) });
+      });
+      break;
+    }
     case "fork": {
       const sess = sessions.get(String(msg.sessionId));
       if (!sess) {

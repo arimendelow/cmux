@@ -1,6 +1,8 @@
 import type {
   Adapter,
   CommandEntry,
+  ElicitationAction,
+  ElicitationField,
   OptionChoice,
   OptionValue,
   PermissionOption,
@@ -76,6 +78,25 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       });
       sess.emit({ kind: "permission-resolved", requestId, optionId });
     },
+    async respondElicitation(sess, requestId, action, content) {
+      const st = sess.internal.acp as AcpState | undefined;
+      if (!st) throw new Error(`${def.id} ACP provider is not ready`);
+      const pending = st.pendingElicitations.get(requestId);
+      if (!pending) throw new Error(`elicitation request not found: ${requestId}`);
+      const validatedContent = action === "accept"
+        ? validateElicitationContent(pending.fields, content ?? {})
+        : undefined;
+      st.pendingElicitations.delete(requestId);
+      st.writeMsg({
+        jsonrpc: "2.0",
+        id: pending.rpcId,
+        result: {
+          action,
+          ...(validatedContent ? { content: validatedContent } : {}),
+        },
+      });
+      sess.emit({ kind: "elicitation-resolved", requestId, action });
+    },
     async setOption(sess, id, value) {
       const st = await ensureAcp(sess, def);
       await setAcpOption(sess, st, def, id, value);
@@ -108,6 +129,7 @@ interface AcpState {
   commands: CommandEntry[];
   initialApplied: boolean;
   pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
+  pendingElicitations: Map<string, { rpcId: unknown; fields: ElicitationField[] }>;
   toolTitles: Map<string, string>;
   writeMsg(msg: unknown): void;
 }
@@ -200,6 +222,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     commands: [],
     initialApplied: false,
     pendingPermissions: new Map(),
+    pendingElicitations: new Map(),
     toolTitles: new Map(),
     writeMsg,
   };
@@ -221,6 +244,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     for (const p of pending.values()) p.reject(new Error(`${def.id} acp process exited`));
     pending.clear();
     st.pendingPermissions.clear();
+    st.pendingElicitations.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
       sess.internal.acp = undefined;
     }
@@ -239,7 +263,10 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   try {
     await request("initialize", {
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        elicitation: { form: {} },
+      },
     });
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
       ? sess.internal.acpResumeSessionId
@@ -444,6 +471,11 @@ function cancelPendingPermissions(sess: SessionCtx, st: AcpState) {
     sess.emit({ kind: "permission-resolved", requestId, optionId: "cancelled" });
   }
   st.pendingPermissions.clear();
+  for (const [requestId, pending] of st.pendingElicitations) {
+    st.writeMsg({ jsonrpc: "2.0", id: pending.rpcId, result: { action: "cancel" } });
+    sess.emit({ kind: "elicitation-resolved", requestId, action: "cancel" });
+  }
+  st.pendingElicitations.clear();
 }
 
 function permissionOptions(value: unknown): PermissionOption[] {
@@ -454,6 +486,66 @@ function permissionOptions(value: unknown): PermissionOption[] {
     const kind = typeof option?.kind === "string" ? option.kind : "";
     return optionId && name && kind ? [{ optionId, name, kind }] : [];
   });
+}
+
+function elicitationFields(schema: unknown): ElicitationField[] {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new Error("elicitation schema must be an object");
+  const raw = schema as Record<string, unknown>;
+  if (raw.type !== "object" || !raw.properties || typeof raw.properties !== "object" || Array.isArray(raw.properties)) {
+    throw new Error("elicitation schema must describe object properties");
+  }
+  const required = new Set(Array.isArray(raw.required) ? raw.required.filter((name): name is string => typeof name === "string") : []);
+  return Object.entries(raw.properties).map(([name, value]) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`elicitation field ${name} is invalid`);
+    const field = value as Record<string, unknown>;
+    const type = field.type;
+    if (type !== "string" && type !== "boolean" && type !== "number" && type !== "integer") {
+      throw new Error(`elicitation field ${name} has unsupported type`);
+    }
+    const options = Array.isArray(field.enum)
+      ? field.enum.map((option) => {
+        if (typeof option !== "string") throw new Error(`elicitation field ${name} has a non-string enum option`);
+        return option;
+      })
+      : undefined;
+    const defaultValue = typeof field.default === "string" || typeof field.default === "boolean" || typeof field.default === "number"
+      ? field.default
+      : undefined;
+    return {
+      name,
+      type,
+      title: typeof field.title === "string" && field.title.trim() ? field.title : name,
+      description: typeof field.description === "string" ? field.description : undefined,
+      required: required.has(name),
+      options,
+      defaultValue,
+    };
+  });
+}
+
+function validateElicitationContent(
+  fields: ElicitationField[],
+  content: Record<string, string | boolean | number>,
+): Record<string, string | boolean | number> {
+  const result: Record<string, string | boolean | number> = {};
+  for (const field of fields) {
+    const value = content[field.name];
+    if (value === undefined || value === "") {
+      if (field.required) throw new Error(`elicitation field is required: ${field.name}`);
+      continue;
+    }
+    const validType = field.type === "boolean"
+      ? typeof value === "boolean"
+      : field.type === "string"
+        ? typeof value === "string"
+        : typeof value === "number" && Number.isFinite(value) && (field.type !== "integer" || Number.isInteger(value));
+    if (!validType) throw new Error(`elicitation field has invalid value: ${field.name}`);
+    if (field.options && (typeof value !== "string" || !field.options.includes(value))) {
+      throw new Error(`elicitation field has invalid option: ${field.name}`);
+    }
+    result[field.name] = value;
+  }
+  return result;
 }
 
 // Notifications and reverse requests from the agent.
@@ -519,6 +611,30 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
     return;
   }
   // Reverse request: must answer or the agent hangs.
+  if (msg.id != null && msg.method === "elicitation/create") {
+    if (msg.params?.mode !== "form") {
+      writeMsg({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "unsupported elicitation mode" } });
+      return;
+    }
+    try {
+      const fields = elicitationFields(msg.params?.requestedSchema);
+      const requestId = String(msg.id);
+      st.pendingElicitations.set(requestId, { rpcId: msg.id, fields });
+      sess.emit({
+        kind: "elicitation-request",
+        requestId,
+        message: truncate(msg.params?.message ?? "Information requested", 300),
+        fields,
+      });
+    } catch (error) {
+      writeMsg({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32602, message: error instanceof Error ? error.message : String(error) },
+      });
+    }
+    return;
+  }
   if (msg.id != null && msg.method === "session/request_permission") {
     const options = permissionOptions(msg.params?.options);
     const allow = options.find((o) => o.kind === "allow_always")
@@ -681,6 +797,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             commands: [],
             initialApplied: false,
             pendingPermissions: new Map(),
+            pendingElicitations: new Map(),
             toolTitles: new Map(),
             writeMsg: () => {},
           };
@@ -693,7 +810,10 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
       });
       write("initialize", {
         protocolVersion: 1,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          elicitation: { form: {} },
+        },
       });
     });
   } finally {
