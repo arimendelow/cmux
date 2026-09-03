@@ -52,7 +52,10 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       if (st?.acpSessionId) {
         cancelPendingPermissions(sess, st);
         st.notify("session/cancel", { sessionId: st.acpSessionId });
+        return;
       }
+      const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
+      if (startingProc?.exitCode === null && !startingProc.killed) startingProc.kill();
     },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
