@@ -12,6 +12,7 @@ const requestPermission = Bun.argv.includes("--request-permission");
 const exitAfterPermission = Bun.argv.includes("--exit-after-permission");
 const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
+const emitUpdateDispositions = Bun.argv.includes("--emit-update-dispositions");
 const log = process.env.FAKE_ACP_MODEL_LOG;
 const methodLog = process.env.FAKE_ACP_METHOD_LOG;
 const pidFile = process.env.FAKE_ACP_PID_FILE;
@@ -65,6 +66,16 @@ for await (const line of rl) {
     });
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   } else if (msg.method === "session/prompt") {
+    if (emitUpdateDispositions) {
+      for (const update of [
+        { sessionUpdate: "session_info_update", title: "sensitive title" },
+        { sessionUpdate: "usage_update", inputTokens: 123456 },
+        { sessionUpdate: "mystery_update", secret: "do not surface" },
+        { sessionUpdate: "mystery_update", secret: "still do not surface" },
+      ]) {
+        send({ jsonrpc: "2.0", method: "session/update", params: { update } });
+      }
+    }
     if (emitPlan) {
       send({
         jsonrpc: "2.0",
