@@ -738,7 +738,8 @@ function sendPrompt(sess: Session, prompt: string) {
   // block. Turn completion still awaits the stored baseline promise.
   Promise.resolve((sess.adapter.send as any)(sess, prompt, generation)).catch((err) => {
     console.error("[agent-chat] send failed", err);
-    sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
+    if (isAgentCancellationError(err)) sess.emit({ kind: "status", text: "Stopped" });
+    else sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
     // The UI treats "done" as the turn boundary; without it a failed send
     // leaves an open streaming block with no footer.
     sess.emit({ kind: "done", generation } as any);
@@ -2150,6 +2151,14 @@ function safeReason(err: unknown): string {
   if (text.includes("permission") || text.includes("auth") || text.includes("forbidden")) return "permission or authentication failed";
   if (text.includes("support")) return "operation is not supported";
   return "unexpected error";
+}
+
+function isAgentCancellationError(err: unknown): boolean {
+  return /\bcancelled\b/i.test(String(err instanceof Error ? err.message : err));
+}
+
+export function isAgentCancellationErrorForTest(err: unknown): boolean {
+  return isAgentCancellationError(err);
 }
 
 function providerDisplayLabel(provider: string | undefined, experience = WORKBENCH_EXPERIENCE): string {

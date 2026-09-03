@@ -55,7 +55,10 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
         return;
       }
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
-      if (startingProc?.exitCode === null && !startingProc.killed) startingProc.kill();
+      if (startingProc?.exitCode === null && !startingProc.killed) {
+        sess.internal.acpStartupCancelled = true;
+        startingProc.kill();
+      }
     },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
@@ -308,6 +311,10 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     return st;
   } catch (err) {
     proc.kill();
+    if (sess.internal.acpStartupCancelled === true) {
+      delete sess.internal.acpStartupCancelled;
+      throw new Error(`${def.id} ACP startup cancelled`);
+    }
     throw startupTimedOut ? new Error(`${def.id} did not finish ACP startup within ${startupTimeoutMs}ms`) : err;
   } finally {
     clearTimeout(startupTimer);

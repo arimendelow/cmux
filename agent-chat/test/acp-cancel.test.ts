@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
 import { makeAcpAdapter } from "../adapters/acp";
+import { isAgentCancellationErrorForTest } from "../server";
 import type { AgentEvent, ProviderDef, SessionCtx, SessionStatus } from "../types";
 
 function context(provider: string): SessionCtx {
@@ -78,8 +79,13 @@ test("ACP stop terminates a provider that is still starting", async () => {
     const starting = adapter.refreshOptions?.(session);
     await Bun.sleep(30);
     adapter.stop(session);
-    await expect(starting).rejects.toThrow("process exited");
+    await expect(starting).rejects.toThrow("ACP startup cancelled");
   } finally {
     adapter.dispose(session);
   }
+});
+
+test("server classifies provider cancellation without turning it into an error", () => {
+  expect(isAgentCancellationErrorForTest(new Error("agency-worker ACP startup cancelled"))).toBe(true);
+  expect(isAgentCancellationErrorForTest(new Error("provider crashed"))).toBe(false);
 });
