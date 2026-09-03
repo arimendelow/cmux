@@ -142,6 +142,7 @@ interface AcpState {
   pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
   pendingElicitations: Map<string, { rpcId: unknown; fields: ElicitationField[] }>;
   toolTitles: Map<string, string>;
+  suppressSessionReplay: boolean;
   writeMsg(msg: unknown): void;
 }
 
@@ -253,6 +254,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     pendingPermissions: new Map(),
     pendingElicitations: new Map(),
     toolTitles: new Map(),
+    suppressSessionReplay: false,
     writeMsg,
   };
 
@@ -305,7 +307,15 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     let sessionState: any;
     if (resumeSessionId) {
       try {
-        sessionState = await request("session/load", { sessionId: resumeSessionId, cwd: sess.cwd, mcpServers: [] });
+        const restoredFromDisk = sess.internal.restoredFromDisk === true;
+        st.suppressSessionReplay = !restoredFromDisk && sess.events.some((event) =>
+          ["user", "assistant", "delta", "thinking", "tool-start", "tool-end", "plan"].includes(event.kind)
+        );
+        try {
+          sessionState = await request("session/load", { sessionId: resumeSessionId, cwd: sess.cwd, mcpServers: [] });
+        } finally {
+          st.suppressSessionReplay = false;
+        }
         resumed = true;
       } catch (error) {
         if (!isUnavailableSessionLoad(error)) throw error;
@@ -324,14 +334,19 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     ingestAcpOptions(st, sessionState ?? {}, def, spawnModel);
     sess.internal.acp = st;
     if (resumed) {
+      const restoredFromDisk = sess.internal.restoredFromDisk === true;
+      delete sess.internal.restoredFromDisk;
       const hostName = sess.internal.productId === "ouro-workbench-v1" ? "Workbench" : "Agent Chat";
       sess.emit({
         kind: "recovery",
         mode: "resumed",
         title: "Conversation resumed",
-        message: `Loaded the existing provider session after ${hostName} restarted.`,
+        message: restoredFromDisk
+          ? `Loaded the existing provider session after ${hostName} restarted.`
+          : "Reconnected to the existing provider session.",
       });
     } else if (respawned) {
+      delete sess.internal.restoredFromDisk;
       sess.emit({
         kind: "recovery",
         mode: "respawned",
@@ -621,6 +636,14 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
   if (msg.method === "session/update") {
     const u = msg.params?.update;
     if (!u) return;
+    if (st.suppressSessionReplay && [
+      "user_message_chunk",
+      "agent_message_chunk",
+      "agent_thought_chunk",
+      "tool_call",
+      "tool_call_update",
+      "plan",
+    ].includes(u.sessionUpdate)) return;
     switch (u.sessionUpdate) {
       case "user_message_chunk":
         if (u.content?.text) sess.emit({ kind: "user", text: u.content.text });
@@ -867,6 +890,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             pendingPermissions: new Map(),
             pendingElicitations: new Map(),
             toolTitles: new Map(),
+            suppressSessionReplay: false,
             writeMsg: () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));

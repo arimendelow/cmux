@@ -463,7 +463,10 @@ function createSession(
     events: [],
     internal: {
       ...(PRODUCT_ID ? { productId: PRODUCT_ID } : {}),
-      ...(restored ? { acpResumeSessionId: restored.providerSessionId } : {}),
+      ...(restored ? {
+        acpResumeSessionId: restored.providerSessionId,
+        restoredFromDisk: true,
+      } : {}),
     },
     adapter,
     sockets: new Set(),
