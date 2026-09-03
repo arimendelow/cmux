@@ -290,6 +290,7 @@ function providerInfo(p: ProviderDef) {
     // every provider reads as uninstalled under launchd's minimal PATH.
     installed: Boolean(Bun.which(p.cmd?.[0] ?? p.id, { PATH: process.env.PATH })),
     installCommand: p.installCommand,
+    startupTimeoutMs: p.startupTimeoutMs,
     ...(providerIconInfo.get(p.id) ?? {}),
   };
 }

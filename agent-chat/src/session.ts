@@ -71,7 +71,7 @@ export type Block =
   | { kind: "files"; files: ChangedFile[]; revision?: string }
   | { kind: "permission"; requestId: string; title: string; options: PermissionOption[]; status: "pending" | "resolved"; optionId?: string };
 
-export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; }
+export interface Provider { id: string; label: string; iconUrl?: string; iconDarkUrl?: string; installed?: boolean; installCommand?: string; startupTimeoutMs?: number; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; capabilities?: ProviderCapabilities; }
 export type CtrlJMode = "newline" | "menu";
 
@@ -217,6 +217,10 @@ export function providerSessionTitle(providers: Provider[], provider: string): s
   return providers.find((candidate) => candidate.id === provider)?.label ?? "Agent";
 }
 
+export function providerStartTimeoutMs(providers: Provider[], provider: string): number {
+  return providers.find((candidate) => candidate.id === provider)?.startupTimeoutMs ?? PENDING_START_TIMEOUT_MS;
+}
+
 export function useSession(): SessionState {
   const [ready, setReady] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -279,12 +283,12 @@ export function useSession(): SessionState {
     setPhase("composer");
   }, [clearPendingStartTimeout]);
 
-  const armPendingStartTimeout = useCallback(() => {
+  const armPendingStartTimeout = useCallback((provider: string) => {
     clearPendingStartTimeout();
     pendingStartTimeoutRef.current = window.setTimeout(() => {
       failPendingStart("Failed to start agent: request timed out");
-    }, PENDING_START_TIMEOUT_MS);
-  }, [clearPendingStartTimeout, failPendingStart]);
+    }, providerStartTimeoutMs(providers, provider));
+  }, [clearPendingStartTimeout, failPendingStart, providers]);
 
   const sendRaw = useCallback((obj: unknown) => {
     const ws = wsRef.current;
@@ -305,7 +309,7 @@ export function useSession(): SessionState {
         if (sessionIdRef.current) sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
         else if (pending && !pending.failed) {
           sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, options: pending.options });
-          armPendingStartTimeout();
+          armPendingStartTimeout(pending.provider);
         }
       };
       ws.onmessage = (e) => {
@@ -455,7 +459,7 @@ export function useSession(): SessionState {
     const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     if (!sendRaw({ op: "start", requestId, ...opts })) return false;
     pendingStartRef.current = { requestId, key, queuedReplies: [], ...opts };
-    armPendingStartTimeout();
+    armPendingStartTimeout(opts.provider);
     optimisticUsersRef.current = [opts.prompt];
     sessionIdRef.current = null;
     history.replaceState(null, "", appPath("/"));
