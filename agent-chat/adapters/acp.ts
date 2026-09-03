@@ -67,7 +67,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       emitAcpState(sess, st);
     },
     async listOptions(cwd) {
-      return withAcpLocalOptions(await fetchAcpOptions(def, cwd, fallbackOptions), true);
+      return withAcpLocalOptions(await fetchAcpOptions(def, cwd, fallbackOptions), false);
     },
     async listCommands(cwd) {
       return [{ trigger: "/", commands: await fetchAcpCommands(def, cwd) }];
@@ -104,7 +104,7 @@ function acpFallbackOptions(def: ProviderDef): SessionOption[] {
         { value: "plan", label: "plan" },
       ],
     },
-    { id: "autoApprove", label: "Auto-approve", kind: "toggle", value: true, role: "approval" },
+    { id: "autoApprove", label: "Auto-approve", kind: "toggle", value: false, role: "approval" },
   ];
 }
 
@@ -203,10 +203,11 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   // the session stuck in "running" with nothing to cancel; killing the process
   // closes stdout, which rejects the pending startup requests.
   let startupTimedOut = false;
+  const startupTimeoutMs = def.startupTimeoutMs ?? 30_000;
   const startupTimer = setTimeout(() => {
     startupTimedOut = true;
     proc.kill();
-  }, 30_000);
+  }, startupTimeoutMs);
   try {
     await request("initialize", {
       protocolVersion: 1,
@@ -221,7 +222,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     return st;
   } catch (err) {
     proc.kill();
-    throw startupTimedOut ? new Error(`${def.id} did not finish ACP startup within 30s`) : err;
+    throw startupTimedOut ? new Error(`${def.id} did not finish ACP startup within ${startupTimeoutMs}ms`) : err;
   } finally {
     clearTimeout(startupTimer);
   }
@@ -597,7 +598,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             notify: () => {},
             options: [],
             sources: new Map(),
-            autoApprove: true,
+            autoApprove: false,
             commands: [],
             initialApplied: false,
           };
