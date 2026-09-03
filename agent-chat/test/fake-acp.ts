@@ -5,6 +5,8 @@ const modelFlag = Bun.argv.findIndex((arg) => arg === "--model");
 const model = modelFlag >= 0 ? Bun.argv[modelFlag + 1] ?? "" : "";
 const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms");
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
+const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
+const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
 const requestPermission = Bun.argv.includes("--request-permission");
 const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
@@ -14,6 +16,7 @@ if (log) await appendFile(log, `${model}\n`);
 
 const rl = createInterface({ input: process.stdin });
 let pendingPromptId: number | string | null = null;
+let pendingPromptTimer: ReturnType<typeof setTimeout> | null = null;
 const send = (msg: unknown) => {
   process.stdout.write(`${JSON.stringify(msg)}\n`);
 };
@@ -131,12 +134,31 @@ for await (const line of rl) {
       });
       continue;
     }
+    if (slowPromptMs > 0) {
+      pendingPromptId = msg.id;
+      pendingPromptTimer = setTimeout(() => {
+        send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "OK" } } },
+        });
+        send({ jsonrpc: "2.0", id: pendingPromptId, result: { stopReason: "end_turn" } });
+        pendingPromptId = null;
+        pendingPromptTimer = null;
+      }, slowPromptMs);
+      continue;
+    }
     send({
       jsonrpc: "2.0",
       method: "session/update",
       params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "OK" } } },
     });
     send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+  } else if (msg.method === "session/cancel" && pendingPromptId !== null) {
+    if (pendingPromptTimer) clearTimeout(pendingPromptTimer);
+    pendingPromptTimer = null;
+    send({ jsonrpc: "2.0", id: pendingPromptId, result: { stopReason: "cancelled" } });
+    pendingPromptId = null;
   } else if (msg.id === 99 && msg.result && pendingPromptId !== null) {
     const selected = msg.result.outcome?.optionId ?? "cancelled";
     send({
