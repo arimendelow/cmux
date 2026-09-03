@@ -1,6 +1,7 @@
 import {
   assetCacheStatsForTest,
   buildBundles,
+  canonicalizeAllowedRootsForTest,
   cssAsset,
   cssFontFamily,
   dirtyStateForTest,
@@ -36,7 +37,7 @@ import {
 } from "../server";
 import { applyManagedThemeOverrideForTest, pickAccentColor, resolveThemeNameForTest, type GhosttyTheme } from "../theme";
 import type { Adapter, AgentEvent, SessionCtx, SessionStatus } from "../types";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -89,6 +90,15 @@ assert((await validateWorkingDirectoryForTest(allowedRoot, [allowedRoot])).ok, "
 assert((await validateWorkingDirectoryForTest(join(allowedRoot, "escape"), [allowedRoot])).ok === false, "a symlink escaping the configured root should be rejected");
 assert((await validateWorkingDirectoryForTest(outsideRoot, [allowedRoot])).ok === false, "a directory outside configured roots should be rejected");
 assert((await validateWorkingDirectoryForTest(outsideRoot, [])).ok, "legacy mode without configured roots should preserve existing-directory behavior");
+const rootsWithMissingEntry = await canonicalizeAllowedRootsForTest([allowedRoot, join(allowedRoot, "missing")]);
+assert(rootsWithMissingEntry.length === 1 && rootsWithMissingEntry[0] === await realpath(allowedRoot), "missing configured roots should be skipped when another explicit root remains");
+let allRootsMissingRejected = false;
+try {
+  await canonicalizeAllowedRootsForTest([join(allowedRoot, "missing")]);
+} catch {
+  allRootsMissingRejected = true;
+}
+assert(allRootsMissingRejected, "an explicit policy with no available roots must fail closed");
 
 assert(resolveFileDiffPath(cwd, "src/../file.ts") === "file.ts", "normal in-cwd paths should normalize");
 for (const path of ["src/../../x", "../x", "..", "a\0b"]) {

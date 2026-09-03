@@ -46,6 +46,64 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
       title: "Conversation resumed",
       message: "Loaded the existing provider session after Workbench restarted.",
     });
+
+  } finally {
+    adapter.dispose(context);
+    if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;
+    else process.env.FAKE_ACP_METHOD_LOG = previous;
+  }
+});
+
+test("ACP replaces an unloadable persisted session with an honest fresh conversation", async () => {
+  const log = `${import.meta.dir}/../scratch/fake-acp-respawn-methods.log`;
+  await writeFile(log, "");
+  const previous = process.env.FAKE_ACP_METHOD_LOG;
+  process.env.FAKE_ACP_METHOD_LOG = log;
+  const definition: ProviderDef = {
+    id: "respawn-acp",
+    label: "Respawn ACP",
+    adapter: "acp",
+    cmd: ["bun", `${import.meta.dir}/fake-acp.ts`, "--fail-load"],
+  };
+  const adapter = makeAcpAdapter(definition);
+  const events: AgentEvent[] = [];
+  let invalidations = 0;
+  const context: SessionCtx = {
+    id: "respawn-session",
+    provider: definition.id,
+    cwd: `${import.meta.dir}/../scratch`,
+    title: "respawn",
+    autoApprove: false,
+    startOptions: {},
+    status: "idle",
+    events,
+    internal: { acpResumeSessionId: "missing-session", productId: "ouro-workbench-v1" },
+    emit(event) {
+      events.push(event);
+    },
+    setStatus(status: SessionStatus) {
+      this.status = status;
+    },
+    async invalidatePersistedSession() {
+      invalidations += 1;
+    },
+  };
+
+  try {
+    await adapter.refreshOptions?.(context);
+    expect((await readFile(log, "utf8")).trim().split(/\n+/)).toEqual([
+      "initialize",
+      "session/load",
+      "session/new",
+    ]);
+    expect(invalidations).toBe(1);
+    expect(context.internal.acpResumeSessionId).toBe("fake-default");
+    expect(events).toContainEqual({
+      kind: "recovery",
+      mode: "respawned",
+      title: "Started a fresh conversation",
+      message: "The previous provider session could not be loaded.",
+    });
   } finally {
     adapter.dispose(context);
     if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;

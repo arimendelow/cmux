@@ -7,6 +7,7 @@ const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
 const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
+const failLoad = Bun.argv.includes("--fail-load");
 const requestPermission = Bun.argv.includes("--request-permission");
 const requestElicitation = Bun.argv.includes("--request-elicitation");
 const emitPlan = Bun.argv.includes("--emit-plan");
@@ -31,6 +32,10 @@ for await (const line of rl) {
   } else if (msg.method === "session/new") {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: `fake-${model || "default"}` } });
   } else if (msg.method === "session/load") {
+    if (failLoad) {
+      send({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "session not found" } });
+      continue;
+    }
     send({
       jsonrpc: "2.0",
       method: "session/update",

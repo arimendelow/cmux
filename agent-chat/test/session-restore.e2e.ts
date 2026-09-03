@@ -30,6 +30,7 @@ test("fresh sidecar restores persisted session metadata", async () => {
     startOptions: {},
     createdAt: 1_725_000_000_000,
   });
+
   const process = Bun.spawn(["bun", "server.ts"], {
     cwd: join(import.meta.dir, ".."),
     stdout: "pipe",
@@ -57,6 +58,42 @@ test("fresh sidecar restores persisted session metadata", async () => {
     ]);
   } finally {
     process.kill();
+    await process.exited;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("token-authenticated shutdown stops the owned sidecar", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-chat-shutdown-"));
+  const stateFile = join(root, "server.json");
+  const process = Bun.spawn(["bun", "server.ts"], {
+    cwd: join(import.meta.dir, ".."),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...globalThis.process.env,
+      CMUX_AGENT_CHAT_PORT: "0",
+      CMUX_AGENT_CHAT_STATE_FILE: stateFile,
+      CMUX_AGENT_CHAT_TOKEN: "shutdown-token",
+      CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
+      CMUX_AGENT_UI_CWD: root,
+      CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
+    },
+  });
+
+  try {
+    const port = await waitForPort(stateFile);
+    const response = await fetch(`http://127.0.0.1:${port}/shutdown-token/api/shutdown`, { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    const exitCode = await Promise.race([
+      process.exited,
+      Bun.sleep(2_000).then(() => "timeout" as const),
+    ]);
+    expect(exitCode).not.toBe("timeout");
+  } finally {
+    if (process.exitCode === null) process.kill();
     await process.exited;
     await rm(root, { recursive: true, force: true });
   }
