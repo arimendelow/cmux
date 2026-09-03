@@ -72,6 +72,17 @@ if (resolvedPermission?.kind !== "permission" || resolvedPermission.status !== "
   throw new Error(`permission response should resolve the matching block: ${JSON.stringify(permissionResolved)}`);
 }
 
+const plan = foldEvent([], {
+  kind: "plan",
+  entries: [
+    { content: "Inspect the greeting", status: "completed" },
+    { content: "Update the message", status: "in_progress" },
+  ],
+});
+if (plan[0]?.kind !== "plan" || plan[0].entries[1]?.content !== "Update the message") {
+  throw new Error(`structured plan should survive event folding: ${JSON.stringify(plan)}`);
+}
+
 console.log("session store assertions passed");
 
 export {};

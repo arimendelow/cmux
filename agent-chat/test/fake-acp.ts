@@ -6,6 +6,7 @@ const model = modelFlag >= 0 ? Bun.argv[modelFlag + 1] ?? "" : "";
 const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms");
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const requestPermission = Bun.argv.includes("--request-permission");
+const emitPlan = Bun.argv.includes("--emit-plan");
 const log = process.env.FAKE_ACP_MODEL_LOG;
 const methodLog = process.env.FAKE_ACP_METHOD_LOG;
 if (log) await appendFile(log, `${model}\n`);
@@ -52,6 +53,22 @@ for await (const line of rl) {
     });
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   } else if (msg.method === "session/prompt") {
+    if (emitPlan) {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "plan",
+            entries: [
+              { content: "Inspect the greeting", status: "completed" },
+              { content: "Update the message", status: "in_progress" },
+              { content: "Run the check", status: "pending" },
+            ],
+          },
+        },
+      });
+    }
     if (requestPermission) {
       pendingPromptId = msg.id;
       send({
