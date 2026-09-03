@@ -1976,9 +1976,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // headroom. It cancels the actual panel and rollback tasks, joins
             // rollback only for a bounded grace period, then explicitly cancels
             // this quit request. Durable records preserve any unfinished work.
-            let cleanupDeadline: Duration = simulatorCleanupTasks.isEmpty
-                ? .milliseconds(3_500)
-                : .seconds(150)
+            let cleanupDeadline = Self.ownedCleanupDeadline(
+                hasSimulatorCleanup: !simulatorCleanupTasks.isEmpty,
+                shouldStopAgentChat: shouldStopAgentChat
+            )
             terminateCleanupWatchdogTask?.cancel()
             terminateCleanupWatchdogTask = Task { @MainActor in
                 try? await ContinuousClock().sleep(for: cleanupDeadline)
@@ -1996,6 +1997,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
         return true
+    }
+
+    nonisolated static func ownedCleanupDeadline(
+        hasSimulatorCleanup: Bool,
+        shouldStopAgentChat: Bool
+    ) -> Duration {
+        if hasSimulatorCleanup { return .seconds(150) }
+        if shouldStopAgentChat { return .seconds(8) }
+        return .milliseconds(3_500)
     }
 
     private func cancelTerminationAfterSimulatorCleanupFailure() {
