@@ -40,6 +40,12 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
     expect(events).toContainEqual({ kind: "user", text: "previous question" });
     expect(events).toContainEqual({ kind: "delta", text: "previous answer" });
     expect(events).toContainEqual({ kind: "meta", providerSessionId: "persisted-session" });
+    expect(events).toContainEqual({
+      kind: "recovery",
+      mode: "resumed",
+      title: "Conversation resumed",
+      message: "Loaded the existing provider session after Workbench restarted.",
+    });
   } finally {
     adapter.dispose(context);
     if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;

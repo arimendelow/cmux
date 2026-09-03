@@ -3,7 +3,7 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, providerSessionTitle, providerStartTimeoutMs, resolveProviderSelection, restoreComposerDraft } = await import("../src/session");
+const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, pickInitialBossSession, providerSessionTitle, providerStartTimeoutMs, resolveProviderSelection, restoreComposerDraft } = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -41,6 +41,22 @@ if (resolveProviderSelection(providers, "", "agency-worker") !== "agency-worker"
 }
 if (resolveProviderSelection(providers, "copilot", "agency-worker") !== "copilot") {
   throw new Error("an installed user-selected provider should be preserved");
+}
+const recoveredBoss = pickInitialBossSession([
+  { id: "copilot-newer", provider: "copilot", cwd: "/tmp", title: "GitHub Copilot", status: "idle", createdAt: 20 },
+  { id: "boss-older", provider: "agency-worker", cwd: "/tmp", title: "Boss", status: "idle", createdAt: 10 },
+], {
+  productName: "Ouro Workbench v1",
+  surfaceName: "Boss",
+  defaultProvider: "agency-worker",
+  localAuthorityLabel: "Controlled here",
+  hubAuthorityLabel: "Controlled in Agency Hub",
+});
+if (recoveredBoss?.id !== "boss-older") {
+  throw new Error(`Workbench root should resume its newest Boss, got ${JSON.stringify(recoveredBoss)}`);
+}
+if (pickInitialBossSession([], null) !== null) {
+  throw new Error("generic Agent Chat should not auto-resume a Workbench Boss");
 }
 if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
   throw new Error("session title should use the provider label");
