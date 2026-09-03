@@ -2342,7 +2342,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const sess = sessions.get(String(msg.sessionId));
       const requestId = String(msg.requestId ?? "");
       const optionId = String(msg.optionId ?? "");
-      if (!sess || !requestId || !optionId || !sess.adapter.respondPermission) return;
+      if (!sess || ws.data.subscribed !== sess.id || !requestId || !optionId || !sess.adapter.respondPermission) {
+        sendWsErrorDetails(ws, "permission-response", new Error("no session"), { sessionId: String(msg.sessionId ?? "") });
+        return;
+      }
       Promise.resolve(sess.adapter.respondPermission(sess, requestId, optionId)).catch((err) => {
         sess.emit({ kind: "error", message: safeErrorMessage("permission-response", err) });
       });
@@ -2353,7 +2356,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const requestId = String(msg.requestId ?? "");
       const action = String(msg.action ?? "");
       const content = msg.content;
-      if (!sess || !requestId || !["accept", "decline", "cancel"].includes(action) || !sess.adapter.respondElicitation) return;
+      if (!sess || ws.data.subscribed !== sess.id || !requestId || !["accept", "decline", "cancel"].includes(action) || !sess.adapter.respondElicitation) {
+        sendWsErrorDetails(ws, "elicitation-response", new Error("no session"), { sessionId: String(msg.sessionId ?? "") });
+        return;
+      }
       Promise.resolve(sess.adapter.respondElicitation(
         sess,
         requestId,

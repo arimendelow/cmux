@@ -144,6 +144,7 @@ interface AcpState {
   toolTitles: Map<string, string>;
   requestNamespace: string;
   suppressSessionReplay: boolean;
+  unsupportedUpdates: Set<string>;
   writeMsg(msg: unknown): void;
 }
 
@@ -257,6 +258,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     toolTitles: new Map(),
     requestNamespace: crypto.randomUUID().slice(0, 8),
     suppressSessionReplay: false,
+    unsupportedUpdates: new Set(),
     writeMsg,
   };
 
@@ -702,6 +704,17 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
           emitAcpState(sess, st);
         }
         break;
+      case "session_info_update":
+      case "usage_update":
+        break;
+      default: {
+        const name = typeof u.sessionUpdate === "string" ? u.sessionUpdate : "";
+        if (name && !st.unsupportedUpdates.has(name)) {
+          st.unsupportedUpdates.add(name);
+          sess.emit({ kind: "status", text: `Unsupported ACP session update: ${name}` });
+        }
+        break;
+      }
     }
     if (u.configOptions || u.modes || u.models) {
       ingestAcpOptions(st, u, def);
@@ -900,6 +913,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             toolTitles: new Map(),
             requestNamespace: "catalog",
             suppressSessionReplay: false,
+            unsupportedUpdates: new Set(),
             writeMsg: () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));
