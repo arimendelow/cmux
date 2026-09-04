@@ -21,6 +21,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
     public let isError: Bool?
     public let context: WorkstreamContext?
     public let requestId: String?
+    public let sourceEventId: String?
+    public let sourceRevision: String?
+    public let causalChainId: String?
+    public let actionRequestId: String?
     public let ppid: Int?
     public let receivedAt: Date
     public let extraFieldsJSON: String?
@@ -38,6 +42,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
         isError: Bool? = nil,
         context: WorkstreamContext? = nil,
         requestId: String? = nil,
+        sourceEventId: String? = nil,
+        sourceRevision: String? = nil,
+        causalChainId: String? = nil,
+        actionRequestId: String? = nil,
         ppid: Int? = nil,
         receivedAt: Date = Date(),
         extraFieldsJSON: String? = nil
@@ -54,6 +62,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
         self.isError = isError
         self.context = context
         self.requestId = requestId
+        self.sourceEventId = sourceEventId
+        self.sourceRevision = sourceRevision
+        self.causalChainId = causalChainId
+        self.actionRequestId = actionRequestId
         self.ppid = ppid
         self.receivedAt = receivedAt
         self.extraFieldsJSON = extraFieldsJSON
@@ -96,6 +108,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
         case isError = "is_error"
         case context
         case requestId = "_opencode_request_id"
+        case sourceEventId = "_source_event_id"
+        case sourceRevision = "_source_revision"
+        case causalChainId = "_causal_chain_id"
+        case actionRequestId = "_action_request_id"
         case ppid = "_ppid"
         case receivedAt = "_received_at"
     }
@@ -113,6 +129,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
         self.isError = try c.decodeIfPresent(Bool.self, forKey: .isError)
         self.context = try c.decodeIfPresent(WorkstreamContext.self, forKey: .context)
         self.requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        self.sourceEventId = try c.decodeIfPresent(String.self, forKey: .sourceEventId)
+        self.sourceRevision = try c.decodeIfPresent(String.self, forKey: .sourceRevision)
+        self.causalChainId = try c.decodeIfPresent(String.self, forKey: .causalChainId)
+        self.actionRequestId = try c.decodeIfPresent(String.self, forKey: .actionRequestId)
         self.ppid = try c.decodeIfPresent(Int.self, forKey: .ppid)
         self.receivedAt = try c.decodeIfPresent(Date.self, forKey: .receivedAt) ?? Date()
         let knownKeys = Set(CodingKeys.allCases.map(\.stringValue))
@@ -146,6 +166,10 @@ public struct WorkstreamEvent: Codable, Sendable, Equatable {
         try c.encodeIfPresent(isError, forKey: .isError)
         try c.encodeIfPresent(context, forKey: .context)
         try c.encodeIfPresent(requestId, forKey: .requestId)
+        try c.encodeIfPresent(sourceEventId, forKey: .sourceEventId)
+        try c.encodeIfPresent(sourceRevision, forKey: .sourceRevision)
+        try c.encodeIfPresent(causalChainId, forKey: .causalChainId)
+        try c.encodeIfPresent(actionRequestId, forKey: .actionRequestId)
         try c.encodeIfPresent(ppid, forKey: .ppid)
         try c.encode(receivedAt, forKey: .receivedAt)
         if let extraFieldsJSON,

@@ -11,6 +11,16 @@ public let WorkstreamDefaultRingCapacity = 2_000
 public let WorkstreamDefaultInitialLoadLimit = 300
 public let WorkstreamDefaultHistoryPageSize = 300
 
+public struct WorkstreamIngestResult: Sendable, Equatable {
+    public let item: WorkstreamItem
+    public let inserted: Bool
+
+    public init(item: WorkstreamItem, inserted: Bool) {
+        self.item = item
+        self.inserted = inserted
+    }
+}
+
 /// Main-actor `@Observable` store that holds the Feed state.
 ///
 /// One instance per cmux process. All windows observe it through the
@@ -78,7 +88,7 @@ public final class WorkstreamStore {
     public func start() async {
         if let persistence {
             if let page = try? await persistence.loadPage(limit: min(initialLoadLimit, ringCapacity)) {
-                items = page.items
+                items = deduplicatedPersistedItems(page.items)
                 hasMorePersistedItems = page.hasMoreBefore
                 oldestLoadedPersistenceOffset = page.startOffset
                 rebuildContextIndex()
@@ -116,7 +126,11 @@ public final class WorkstreamStore {
         }
 
         let existingIds = Set(items.map(\.id))
-        let olderItems = page.items.filter { !existingIds.contains($0.id) }
+        let existingSourceKeys = Set(items.compactMap(sourceEventKey))
+        let olderItems = deduplicatedPersistedItems(page.items).filter {
+            !existingIds.contains($0.id)
+                && sourceEventKey($0).map { !existingSourceKeys.contains($0) } != false
+        }
         if !olderItems.isEmpty {
             items.insert(contentsOf: olderItems, at: 0)
         }
@@ -130,15 +144,32 @@ public final class WorkstreamStore {
     /// Applies an inbound wire frame. Creates or updates a
     /// `WorkstreamItem`, enforces the ring-buffer cap, and appends to
     /// the JSONL log.
-    public func ingest(_ event: WorkstreamEvent) {
-        let item = makeItem(from: event)
-        insert(item)
+    @discardableResult
+    public func ingest(_ event: WorkstreamEvent) -> WorkstreamIngestResult {
+        let source = WorkstreamSource(wireName: event.source) ?? .claude
+        let incomingSourceKey = sourceEventKey(
+            source: source,
+            workstreamId: event.sessionId,
+            sourceEventId: event.sourceEventId
+        )
+        let existingIndex = incomingSourceKey.flatMap { key in
+            items.firstIndex { sourceEventKey($0) == key }
+        }
+        let existing = existingIndex.map { items[$0] }
+        let item = makeItem(from: event, replacing: existing)
+        let inserted = existingIndex == nil
+        if let existingIndex {
+            items[existingIndex] = item
+        } else {
+            insert(item)
+        }
         updateContextIndex(with: item)
         if let persistence {
             Task { [persistence, item] in
                 try? await persistence.append(item)
             }
         }
+        return WorkstreamIngestResult(item: item, inserted: inserted)
     }
 
     // MARK: - Actions
@@ -207,23 +238,95 @@ public final class WorkstreamStore {
         }
     }
 
-    private func makeItem(from event: WorkstreamEvent) -> WorkstreamItem {
+    private func makeItem(from event: WorkstreamEvent, replacing existing: WorkstreamItem? = nil) -> WorkstreamItem {
         let source = WorkstreamSource(wireName: event.source) ?? .claude
-        let (kind, payload) = decode(event: event, source: source)
+        let (kind, decodedPayload) = decode(event: event, source: source)
+        let payload = existing.map {
+            payloadPreservingRequestIdentity(decodedPayload, existing: $0.payload)
+        } ?? decodedPayload
         let status: WorkstreamStatus = kind.isActionable ? .pending : .telemetry
         return WorkstreamItem(
+            id: existing?.id ?? UUID(),
             workstreamId: event.sessionId,
             source: source,
             kind: kind,
-            createdAt: event.receivedAt,
+            createdAt: existing?.createdAt ?? event.receivedAt,
             updatedAt: event.receivedAt,
             cwd: event.cwd,
             title: defaultTitle(for: event),
-            status: status,
+            status: existing?.status ?? status,
             payload: payload,
             context: context(for: event, payload: payload),
-            ppid: event.ppid
+            sourceEventId: event.sourceEventId ?? existing?.sourceEventId,
+            sourceRevision: event.sourceRevision ?? existing?.sourceRevision,
+            causalChainId: event.causalChainId ?? existing?.causalChainId,
+            actionRequestId: event.actionRequestId ?? existing?.actionRequestId,
+            ppid: event.ppid ?? existing?.ppid
         )
+    }
+
+    private func payloadPreservingRequestIdentity(
+        _ updated: WorkstreamPayload,
+        existing: WorkstreamPayload
+    ) -> WorkstreamPayload {
+        switch (existing, updated) {
+        case let (
+            .permissionRequest(requestId, _, _, _),
+            .permissionRequest(_, toolName, toolInputJSON, pattern)
+        ):
+            return .permissionRequest(
+                requestId: requestId,
+                toolName: toolName,
+                toolInputJSON: toolInputJSON,
+                pattern: pattern
+            )
+        case let (.question(requestId, _), .question(_, questions)):
+            return .question(requestId: requestId, questions: questions)
+        case let (.exitPlan(requestId, _, _), .exitPlan(_, plan, defaultMode)):
+            return .exitPlan(requestId: requestId, plan: plan, defaultMode: defaultMode)
+        default:
+            return updated
+        }
+    }
+
+    private func sourceEventKey(_ item: WorkstreamItem) -> String? {
+        sourceEventKey(
+            source: item.source,
+            workstreamId: item.workstreamId,
+            sourceEventId: item.sourceEventId
+        )
+    }
+
+    private func sourceEventKey(
+        source: WorkstreamSource,
+        workstreamId: String,
+        sourceEventId: String?
+    ) -> String? {
+        guard let sourceEventId = sourceEventId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sourceEventId.isEmpty else {
+            return nil
+        }
+        return "\(source.rawValue)\u{0}\(workstreamId)\u{0}\(sourceEventId)"
+    }
+
+    private func deduplicatedPersistedItems(_ source: [WorkstreamItem]) -> [WorkstreamItem] {
+        var selected: [(item: WorkstreamItem, index: Int)] = []
+        for (index, item) in source.enumerated() {
+            let sourceKey = sourceEventKey(item)
+            if let existingIndex = selected.firstIndex(where: {
+                $0.item.id == item.id
+                    || (sourceKey != nil && sourceEventKey($0.item) == sourceKey)
+            }) {
+                let current = selected[existingIndex]
+                if item.updatedAt > current.item.updatedAt
+                    || (item.updatedAt == current.item.updatedAt && index > current.index) {
+                    selected[existingIndex] = (item, current.index)
+                }
+            } else {
+                selected.append((item, index))
+            }
+        }
+        return selected.sorted { $0.index < $1.index }.map(\.item)
     }
 
     /// Marks every pending item with `ppid` as `.expired`. Meant to
@@ -343,7 +446,10 @@ public final class WorkstreamStore {
         case .todoWrite:
             return (.todos, .todos(Self.todos(from: event.toolInputJSON)))
         case .notification:
-            return (.toolResult, .toolResult(toolName: "notification", resultJSON: toolInput, isError: false))
+            return (
+                .toolResult,
+                .toolResult(toolName: "notification", resultJSON: toolInput, isError: event.isError ?? false)
+            )
         }
     }
 

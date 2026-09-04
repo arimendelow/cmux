@@ -236,6 +236,23 @@ final class ClaudeHookSessionStore {
         }
     }
 
+    func latestSession(workspaceId: String, surfaceId: String?) throws -> ClaudeHookSessionRecord? {
+        try withLockedState { state in
+            guard var record = fallbackRecord(
+                sessions: Array(state.sessions.values),
+                workspaceId: normalizeOptional(workspaceId),
+                surfaceId: normalizeOptional(surfaceId)
+            ) else {
+                return nil
+            }
+            if record.runtimeStatus == .running, !Self.processExists(record.pid) {
+                record.runtimeStatus = nil
+                state.sessions[record.sessionId] = record
+            }
+            return record
+        }
+    }
+
     /// Records the hook-observed permission mode on an existing session record.
     /// The already-current check happens INSIDE the lock: an unlocked pre-check
     /// can race an overlapping hook's write and skip persisting the newest mode,
@@ -29708,6 +29725,7 @@ export default CMUXSessionRestore;
         }
 
         try pruneLegacyGrokHookFileIfNeeded(def: def, configDir: configDir, primaryFilePath: filePath)
+        try pruneLegacyCopilotHookFileIfNeeded(def: def, configDir: configDir, primaryFilePath: filePath)
 
         // Post-install actions
         if let action = def.postInstallAction {
@@ -29829,6 +29847,58 @@ export default CMUXSessionRestore;
         print("Removed \(removed) legacy \(def.displayName) cmux hook(s) from \(legacyURL.path)")
     }
 
+    private func pruneLegacyCopilotHookFileIfNeeded(
+        def: AgentHookDef,
+        configDir: String,
+        primaryFilePath: String
+    ) throws {
+        guard def.name == "copilot" else { return }
+        let legacyURL = URL(fileURLWithPath: configDir, isDirectory: true)
+            .deletingLastPathComponent()
+            .appendingPathComponent("config.json", isDirectory: false)
+        guard legacyURL.path != primaryFilePath,
+              FileManager.default.fileExists(atPath: legacyURL.path),
+              let data = FileManager.default.contents(atPath: legacyURL.path),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var hooks = json["hooks"] as? [String: Any] else {
+            return
+        }
+
+        let isCmuxOwnedCommand: (String) -> Bool = { command in
+            Self.isCmuxOwnedHookCommand(command, for: def)
+        }
+        var removed = 0
+        for (event, value) in hooks {
+            guard let entries = value as? [[String: Any]] else { continue }
+            var rewrittenEntries: [[String: Any]] = []
+            for var entry in entries {
+                if isCmuxOwnedCommand(entry["command"] as? String ?? "") {
+                    removed += 1
+                    continue
+                }
+                if var nested = entry["hooks"] as? [[String: Any]] {
+                    let before = nested.count
+                    nested.removeAll { isCmuxOwnedCommand($0["command"] as? String ?? "") }
+                    removed += before - nested.count
+                    guard !nested.isEmpty else { continue }
+                    entry["hooks"] = nested
+                }
+                rewrittenEntries.append(entry)
+            }
+            if rewrittenEntries.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = rewrittenEntries
+            }
+        }
+
+        guard removed > 0 else { return }
+        json["hooks"] = hooks
+        let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try newData.write(to: legacyURL, options: .atomic)
+        print("Removed \(removed) legacy \(def.displayName) cmux hook(s) from \(legacyURL.path)")
+    }
+
     private func uninstallAgentHooks(_ def: AgentHookDef) throws {
         if def.name == "opencode" { try uninstallOpenCodePluginHooks(def); return }
         if def.name == "pi" { try uninstallPiExtensionHooks(def); return }
@@ -29862,6 +29932,11 @@ export default CMUXSessionRestore;
         guard let data = fm.contents(atPath: filePath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             print("No \(def.configFile) found at \(filePath)")
+            try pruneLegacyCopilotHookFileIfNeeded(
+                def: def,
+                configDir: configDir,
+                primaryFilePath: filePath
+            )
             return
         }
 
@@ -29927,6 +30002,11 @@ export default CMUXSessionRestore;
         let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try newData.write(to: URL(fileURLWithPath: filePath), options: .atomic)
         print("Removed \(removed) cmux hook(s) from \(filePath)")
+        try pruneLegacyCopilotHookFileIfNeeded(
+            def: def,
+            configDir: configDir,
+            primaryFilePath: filePath
+        )
 
         // Post-uninstall actions
         if let action = def.postInstallAction {
@@ -31010,6 +31090,44 @@ export default CMUXSessionRestore;
                 sendAgentFeedTelemetry(workspaceId: workspaceId, surfaceId: surfaceId)
             }
         }
+        func suppressCopilotChildSession(
+            target: (workspaceId: String, surfaceId: String),
+            allowIdleRootReplacement: Bool = false
+        ) -> Bool {
+            guard def.name == "copilot", !sessionId.isEmpty,
+                  let root = try? store.latestSession(
+                    workspaceId: target.workspaceId,
+                    surfaceId: target.surfaceId
+                  ),
+                  root.sessionId != sessionId else {
+                return false
+            }
+            if allowIdleRootReplacement, root.runtimeStatus != .running {
+                return false
+            }
+            telemetry.breadcrumb("\(def.name)-hook.\(subcommand).child-session-telemetry")
+            sendAgentFeedTelemetry(workspaceId: target.workspaceId, surfaceId: target.surfaceId)
+            print("{}")
+            return true
+        }
+        func suppressCopilotAsynchronousNotification(
+            target: (workspaceId: String, surfaceId: String)
+        ) -> Bool {
+            guard def.name == "copilot",
+                  let notificationType = input.rawObject.flatMap({
+                      firstString(in: $0, keys: ["notification_type", "notificationType"])
+                  }) else {
+                return false
+            }
+            guard notificationType != "permission_prompt",
+                  notificationType != "elicitation_dialog" else {
+                return false
+            }
+            telemetry.breadcrumb("\(def.name)-hook.notification.asynchronous-telemetry")
+            sendAgentFeedTelemetry(workspaceId: target.workspaceId, surfaceId: target.surfaceId)
+            print("{}")
+            return true
+        }
         func notificationDedupeFingerprint(
             status: AgentHookNotificationStatus?,
             category: AgentHookNotifyCategory,
@@ -31183,6 +31301,9 @@ export default CMUXSessionRestore;
             }
             let workspaceId = target.workspaceId
             let surfaceId = target.surfaceId
+            if suppressCopilotChildSession(target: target, allowIdleRootReplacement: true) {
+                return
+            }
             let pid = inferredPID
             let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(currentAgentPID: pid, env: env)
             let launchCommand = agentLaunchCommandFromEnvironment(
@@ -31332,6 +31453,9 @@ export default CMUXSessionRestore;
             }
             let workspaceId = target.workspaceId
             let surfaceId = target.surfaceId
+            if suppressCopilotChildSession(target: target) {
+                return
+            }
             if def.name == "omp", let mapped {
                 clearSupersededAgentHookSessions(
                     [],
@@ -31681,6 +31805,9 @@ export default CMUXSessionRestore;
             }
             let workspaceId = target.workspaceId
             let surfaceId = target.surfaceId
+            if suppressCopilotChildSession(target: target) {
+                return
+            }
             if def.name == "omp", let mapped {
                 clearSupersededAgentHookSessions(
                     [],
@@ -32030,6 +32157,9 @@ export default CMUXSessionRestore;
             }
             let workspaceId = target.workspaceId
             let surfaceId = target.surfaceId
+            if suppressCopilotChildSession(target: target) {
+                return
+            }
             sendAgentFeedTelemetryUnlessSuppressed(workspaceId: workspaceId, surfaceId: surfaceId)
             let pid = preferredAgentHookEventPID(agentName: def.name, mappedPID: mapped?.pid, inferredPID: inferredPID)
             let launchCommand = agentLaunchCommandFromEnvironment(
@@ -32103,6 +32233,10 @@ export default CMUXSessionRestore;
             }
             let workspaceId = target.workspaceId
             let surfaceId = target.surfaceId
+            if suppressCopilotChildSession(target: target)
+                || suppressCopilotAsynchronousNotification(target: target) {
+                return
+            }
 
             let notificationCwd = hookCwd ?? mapped?.cwd
 #if DEBUG
@@ -32507,13 +32641,25 @@ export default CMUXSessionRestore;
         if let toolInput = parsedInput.object?["tool_input"] {
             event["tool_input"] = toolInput
         }
+        if hookEventName == "Notification", let notification = parsedInput.object {
+            event["tool_input"] = notification
+            if source == "copilot",
+               notification["error"] != nil,
+               firstString(in: notification, keys: ["error_context", "errorContext"]) != nil {
+                event["is_error"] = true
+            }
+        }
         if let context = feedContextForEvent(
             source: source,
             hookEventName: hookEventName,
             toolName: toolName,
             toolInput: event["tool_input"],
             rawObject: parsedInput.object,
-            transcriptPath: parsedInput.transcriptPath
+            transcriptPath: parsedInput.transcriptPath,
+            sourceSessionId: parsedInput.sessionId,
+            sourceTraceparent: parsedInput.rawObject.flatMap {
+                firstString(in: $0, keys: ["traceparent"])
+            }
         ) {
             event["context"] = context
         }
@@ -32522,6 +32668,7 @@ export default CMUXSessionRestore;
             hookEventName: hookEventName,
             promptText: promptText
         )
+        FeedSourceIdentity(payload: parsedInput.rawObject ?? parsedInput.object ?? [:]).apply(to: &event)
         event["_opencode_request_id"] = "\(source)-\(sessionId)-\(hookEventName)-\(Int(Date().timeIntervalSince1970 * 1000))"
 
         let frame: [String: Any] = [
@@ -32543,7 +32690,9 @@ export default CMUXSessionRestore;
         toolName: String?,
         toolInput: Any?,
         rawObject: [String: Any]?,
-        transcriptPath: String?
+        transcriptPath: String?,
+        sourceSessionId: String? = nil,
+        sourceTraceparent: String? = nil
     ) -> [String: Any]? {
         var context: [String: Any] = [:]
 
@@ -32584,6 +32733,17 @@ export default CMUXSessionRestore;
            let transcriptContext = readClaudeFeedContext(
                 path: transcriptPath,
                 matchingToolName: toolName
+           ) {
+            mergeFeedContext(&context, transcriptContext)
+        }
+        if source == "copilot",
+           hookEventName == "Stop",
+           let transcriptPath,
+           let sessionId = sourceSessionId,
+           let transcriptContext = readCopilotFeedContext(
+                path: transcriptPath,
+                sessionId: sessionId,
+                traceparent: sourceTraceparent
            ) {
             mergeFeedContext(&context, transcriptContext)
         }
@@ -32848,6 +33008,181 @@ export default CMUXSessionRestore;
         setFeedContext(&fallback, key: "assistantPreamble", value: lastAssistantText, maxLength: 1_000)
         setFeedContext(&fallback, key: "permissionMode", value: permissionMode, maxLength: 80)
         return fallback.isEmpty ? nil : fallback
+    }
+
+    private func readCopilotFeedContext(
+        path: String,
+        sessionId: String,
+        traceparent: String?
+    ) -> [String: Any]? {
+        let expandedPath = (path as NSString).expandingTildeInPath
+        let mainSessionId = URL(fileURLWithPath: expandedPath)
+            .deletingLastPathComponent()
+            .lastPathComponent
+        let deadline = Date().addingTimeInterval(0.35)
+
+        func isTargetAgent(_ object: [String: Any]) -> Bool {
+            if sessionId == mainSessionId {
+                return object["agentId"] == nil || (object["agentId"] as? String) == sessionId
+            }
+            return (object["agentId"] as? String) == sessionId
+        }
+
+        func snapshot(allowPreHookFallback: Bool) -> [String: Any]? {
+            guard let lines = readRecentTextFileLines(path: expandedPath, maxBytes: 1_048_576) else {
+                return nil
+            }
+            let events: [[String: Any]] = lines.compactMap { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty,
+                      let data = trimmed.data(using: .utf8) else {
+                    return nil
+                }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }
+            guard let hookIndex = events.lastIndex(where: { event in
+                guard (event["type"] as? String) == "hook.start",
+                      let data = event["data"] as? [String: Any],
+                      (data["hookType"] as? String) == "agentStop",
+                      let input = data["input"] as? [String: Any],
+                      firstString(in: input, keys: ["session_id", "sessionId"]) == sessionId else {
+                    return false
+                }
+                guard let traceparent else { return true }
+                return firstString(in: input, keys: ["traceparent"]) == traceparent
+            }) else {
+                return nil
+            }
+
+            func completedAssistant(after lowerBound: Int, before upperBound: Int) -> (
+                turnId: String,
+                interactionId: String?,
+                content: String,
+                messageIndex: Int,
+                endIndex: Int
+            )? {
+                guard lowerBound < upperBound else { return nil }
+                var messages: [String: (content: String, interactionId: String?, index: Int)] = [:]
+                var activeTurnId: String?
+                var turnByInteractionId: [String: String] = [:]
+                var completed: (
+                    turnId: String,
+                    interactionId: String?,
+                    content: String,
+                    messageIndex: Int,
+                    endIndex: Int
+                )?
+                for index in 0..<upperBound {
+                    let event = events[index]
+                    guard isTargetAgent(event),
+                          let type = event["type"] as? String,
+                          let data = event["data"] as? [String: Any] else {
+                        continue
+                    }
+                    if type == "assistant.turn_start",
+                       let turnId = firstString(in: data, keys: ["turnId", "turn_id"]) {
+                        activeTurnId = turnId
+                        if let interactionId = firstString(in: data, keys: ["interactionId", "interaction_id"]) {
+                            turnByInteractionId[interactionId] = turnId
+                        }
+                        continue
+                    }
+                    if type == "assistant.turn_end",
+                       let turnId = firstString(in: data, keys: ["turnId", "turn_id"]) {
+                        if index >= lowerBound, let message = messages[turnId] {
+                            completed = (
+                                turnId,
+                                message.interactionId,
+                                truncate(normalizedSingleLine(message.content), maxLength: 1_000),
+                                message.index,
+                                index
+                            )
+                        }
+                        if activeTurnId == turnId {
+                            activeTurnId = nil
+                        }
+                        continue
+                    }
+                    guard index >= lowerBound, type == "assistant.message" else { continue }
+                    let interactionId = firstString(in: data, keys: ["interactionId", "interaction_id"])
+                    guard let turnId = firstString(in: data, keys: ["turnId", "turn_id"])
+                        ?? interactionId.flatMap({ turnByInteractionId[$0] })
+                        ?? activeTurnId else {
+                        continue
+                    }
+                    if type == "assistant.message",
+                       let content = firstString(in: data, keys: ["content"]) {
+                        messages[turnId] = (
+                            content,
+                            interactionId,
+                            index
+                        )
+                    }
+                }
+                return completed
+            }
+
+            let afterHook = completedAssistant(after: hookIndex + 1, before: events.count)
+            let candidate: (
+                turnId: String,
+                interactionId: String?,
+                content: String,
+                messageIndex: Int,
+                endIndex: Int
+            )?
+            if let afterHook {
+                candidate = afterHook
+            } else if allowPreHookFallback,
+                      let beforeHook = completedAssistant(after: 0, before: hookIndex) {
+                let newerTurnStarted = ((beforeHook.endIndex + 1)..<hookIndex).contains { index in
+                    let event = events[index]
+                    return isTargetAgent(event)
+                        && (event["type"] as? String) == "assistant.turn_start"
+                }
+                candidate = newerTurnStarted ? nil : beforeHook
+            } else {
+                candidate = nil
+            }
+            guard let candidate else { return nil }
+
+            var matchingInteractionUser: String?
+            var nearestUser: String?
+            if candidate.messageIndex > 0 {
+                for index in stride(from: candidate.messageIndex - 1, through: 0, by: -1) {
+                    let event = events[index]
+                    guard isTargetAgent(event),
+                          (event["type"] as? String) == "user.message",
+                          let data = event["data"] as? [String: Any],
+                          let content = firstString(in: data, keys: ["content"]) else {
+                        continue
+                    }
+                    if nearestUser == nil {
+                        nearestUser = content
+                    }
+                    if let interactionId = candidate.interactionId,
+                       firstString(in: data, keys: ["interactionId", "interaction_id"]) == interactionId {
+                        matchingInteractionUser = content
+                        break
+                    }
+                }
+            }
+            let userMessage = candidate.interactionId == nil
+                ? (matchingInteractionUser ?? nearestUser)
+                : matchingInteractionUser
+
+            var context: [String: Any] = [:]
+            setFeedContext(&context, key: "lastUserMessage", value: userMessage, maxLength: 1_000)
+            setFeedContext(&context, key: "assistantPreamble", value: candidate.content, maxLength: 1_000)
+            return context.isEmpty ? nil : context
+        }
+
+        while Date() < deadline {
+            if let context = snapshot(allowPreHookFallback: false) {
+                return context
+            }
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+        return snapshot(allowPreHookFallback: true)
     }
 
     private func feedPlanContext(from rawToolInput: Any?) -> [String: Any]? {
@@ -34461,7 +34796,7 @@ export default CMUXSessionRestore;
         // decoding without changing other agents' actionable hook reads.
         let stdinData: Data
         let feedHookStdinLimit: Int? = switch source {
-        case "codex": Self.feedHookMaxStdinBytes
+        case "codex", "copilot": Self.feedHookMaxStdinBytes
         case "pi": Self.piFeedHookMaxStdinBytes
         default: nil
         }
@@ -34535,6 +34870,69 @@ export default CMUXSessionRestore;
             in: stdinObj,
             keys: ["session_id", "sessionId", "conversation_id", "conversationId"]
         ) ?? stableFallbackFeedSessionId(source: source, rawObject: stdinObj, agentPid: agentPid)
+        if source == "copilot",
+           hookEventName == "PreToolUse",
+           let toolCalls = stdinObj["toolCalls"] as? [[String: Any]],
+           !toolCalls.isEmpty {
+            let workspaceId = feedWorkspaceId(rawObject: stdinObj, fallback: env["CMUX_WORKSPACE_ID"])
+            let cwd = firstString(in: stdinObj, keys: ["cwd", "working_directory", "workingDirectory"])
+                ?? firstWorkspacePath(in: stdinObj)
+            var identityPayload = stdinObj
+            let environmentTraceparent = ["TRACEPARENT", "traceparent", "OTEL_TRACEPARENT"]
+                .compactMap { env[$0]?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first(where: { !$0.isEmpty })
+            if firstString(in: identityPayload, keys: ["traceparent"]) == nil,
+               let environmentTraceparent {
+                identityPayload["traceparent"] = environmentTraceparent
+            }
+            let identity = FeedSourceIdentity(payload: identityPayload)
+            for (index, call) in toolCalls.enumerated() {
+                var event: [String: Any] = [
+                    "session_id": "\(source)-\(sessionId)",
+                    "hook_event_name": hookEventName,
+                    "_source": source,
+                    "_ppid": agentPid,
+                ]
+                if let workspaceId { event["workspace_id"] = workspaceId }
+                if let cwd { event["cwd"] = cwd }
+                if let toolName = firstString(in: call, keys: ["name", "toolName", "tool_name"]) {
+                    event["tool_name"] = toolName
+                }
+                if let args = Self.copilotToolCallArguments(call["args"]) {
+                    event["tool_input"] = args
+                }
+                identity.apply(to: &event)
+                let callId = firstString(in: call, keys: ["id", "toolCallId", "tool_call_id"])
+                if let callId {
+                    event["_source_event_id"] = callId
+                    event["_action_request_id"] = callId
+                }
+                event["_opencode_request_id"] = callId
+                    ?? "\(source)-\(sessionId)-\(rawEvent)-\(index)-\(Int(Date().timeIntervalSince1970 * 1000))"
+                let request: [String: Any] = [
+                    "method": "feed.push",
+                    "params": [
+                        "event": event,
+                        "wait_timeout_seconds": 0,
+                    ],
+                ]
+                guard let payload = try? JSONSerialization.data(withJSONObject: request),
+                      let line = String(data: payload, encoding: .utf8) else {
+                    continue
+                }
+                if let client {
+                    _ = try? client.sendOneWay(command: line, writeTimeout: 0.05)
+                } else if let socketPath {
+                    sendBestEffortFeedTelemetry(
+                        socketPath: socketPath,
+                        line: line,
+                        socketPassword: socketPassword
+                    )
+                }
+            }
+            print("{}")
+            return
+        }
 
         var eventDict: [String: Any] = [
             "session_id": "\(source)-\(sessionId)",
@@ -34545,7 +34943,10 @@ export default CMUXSessionRestore;
         if let workspaceId = feedWorkspaceId(rawObject: stdinObj, fallback: env["CMUX_WORKSPACE_ID"]) {
             eventDict["workspace_id"] = workspaceId
         }
-        let toolRequestInput = stdinObj["tool_input"] ?? stdinObj["toolInput"] ?? toolCall?["args"]
+        let toolRequestInput = stdinObj["tool_input"]
+            ?? stdinObj["toolInput"]
+            ?? stdinObj["toolArgs"]
+            ?? toolCall?["args"]
         let postToolUseResponseInput = stdinObj["tool_response"]
             ?? stdinObj["toolResponse"]
             ?? stdinObj["tool_result"]
@@ -34584,7 +34985,9 @@ export default CMUXSessionRestore;
             toolName: toolName.isEmpty ? nil : toolName,
             toolInput: eventDict["tool_input"],
             rawObject: stdinObj,
-            transcriptPath: firstString(in: stdinObj, keys: ["transcript_path", "transcriptPath"])
+            transcriptPath: firstString(in: stdinObj, keys: ["transcript_path", "transcriptPath"]),
+            sourceSessionId: sessionId,
+            sourceTraceparent: firstString(in: stdinObj, keys: ["traceparent"])
         ) {
             eventDict["context"] = context
         }
@@ -34593,6 +34996,7 @@ export default CMUXSessionRestore;
             hookEventName: hookEventName,
             promptText: promptText
         )
+        FeedSourceIdentity(payload: stdinObj).apply(to: &eventDict)
         let requestId = stdinObj["_opencode_request_id"] as? String
             ?? firstString(in: stdinObj, keys: ["request_id", "tool_use_id", "toolUseID"])
             ?? "\(source)-\(sessionId)-\(rawEvent)-\(toolName)-\(Int(Date().timeIntervalSince1970 * 1000))"
@@ -34764,6 +35168,19 @@ export default CMUXSessionRestore;
             return nil
         }
         return data
+    }
+
+    private static func copilotToolCallArguments(_ value: Any?) -> Any? {
+        if let string = value as? String {
+            let bounded = String(string.prefix(64 * 1024))
+            if let data = bounded.data(using: .utf8),
+               let decoded = try? JSONSerialization.jsonObject(with: data) {
+                return decoded
+            }
+            return bounded
+        }
+        guard let value, JSONSerialization.isValidJSONObject(value) else { return nil }
+        return value
     }
 
     private static let feedPostToolUseScalarStringLimitBytes = 512

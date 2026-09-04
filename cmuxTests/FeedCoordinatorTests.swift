@@ -523,6 +523,190 @@ struct FeedCoordinatorTests {
         }
     }
 
+    @Test func resolvedExactReplayReturnsExistingDecisionWithoutWaitingOrTargetingLastItem() async {
+        defer { Self.resetFeedCoordinatorTestHooks() }
+        let attention = AttentionSurfaceRecorder()
+        let event = WorkstreamEvent(
+            sessionId: "copilot-replay-session",
+            hookEventName: .permissionRequest,
+            source: "copilot",
+            toolName: "shell",
+            requestId: "copilot-replay-request",
+            sourceEventId: "copilot-native-event"
+        )
+        let targetItemId = await MainActor.run {
+            let store = WorkstreamStore(ringCapacity: 10)
+            FeedCoordinator.shared.install(store: store)
+            FeedCoordinatorTestHooks.attentionSurfaceObserver = { event in
+                attention.record(event)
+            }
+            let target = store.ingest(event)
+            store.markResolved(target.item.id, decision: .permission(.once))
+            store.ingest(WorkstreamEvent(
+                sessionId: "unrelated-session",
+                hookEventName: .stop,
+                source: "copilot"
+            ))
+            return target.item.id
+        }
+
+        let done = DispatchSemaphore(value: 0)
+        let resultBox = IngestResultBox()
+        let startedAt = ContinuousClock.now
+        DispatchQueue.global(qos: .userInitiated).async {
+            resultBox.value = FeedCoordinator.shared.ingestBlocking(
+                event: WorkstreamEvent(
+                    sessionId: event.sessionId,
+                    hookEventName: event.hookEventName,
+                    source: event.source,
+                    toolName: event.toolName,
+                    requestId: "copilot-replay-request-2",
+                    sourceEventId: event.sourceEventId
+                ),
+                waitTimeout: 1
+            )
+            done.signal()
+        }
+
+        #expect(waitForFeedTestSignal(done, timeout: .now() + 0.5) == .success)
+        #expect(startedAt.duration(to: .now) < .milliseconds(500))
+        guard case .resolved(let itemId, .permission(.once)) = resultBox.value else {
+            Issue.record("expected the exact replay to reuse the resolved decision")
+            return
+        }
+        #expect(itemId == targetItemId)
+        let items = await MainActor.run { FeedCoordinator.shared.store.items }
+        #expect(items.count == 2)
+        #expect(items.first?.id == targetItemId)
+        #expect(attention.events.isEmpty)
+    }
+
+    @Test func restoredPendingExactReplayCreatesAFreshDecisionChannel() async {
+        defer { Self.resetFeedCoordinatorTestHooks() }
+        let event = WorkstreamEvent(
+            sessionId: "copilot-pending-replay-session",
+            hookEventName: .permissionRequest,
+            source: "copilot",
+            toolName: "shell",
+            requestId: "copilot-pending-replay-request",
+            sourceEventId: "copilot-pending-native-event"
+        )
+        let targetItemId = await MainActor.run {
+            let store = WorkstreamStore(ringCapacity: 10)
+            FeedCoordinator.shared.install(store: store)
+            return store.ingest(event).item.id
+        }
+        await MainActor.run {
+            FeedCoordinatorTestHooks.afterBlockingEventIngested = { _, requestId in
+                guard requestId == "copilot-pending-replay-request-2" else { return }
+                FeedCoordinator.shared.deliverReply(
+                    requestId: "copilot-pending-replay-request-2",
+                    decision: .permission(.once)
+                )
+            }
+        }
+
+        let done = DispatchSemaphore(value: 0)
+        let resultBox = IngestResultBox()
+        DispatchQueue.global(qos: .userInitiated).async {
+            resultBox.value = FeedCoordinator.shared.ingestBlocking(
+                event: WorkstreamEvent(
+                    sessionId: event.sessionId,
+                    hookEventName: event.hookEventName,
+                    source: event.source,
+                    toolName: event.toolName,
+                    requestId: "copilot-pending-replay-request-2",
+                    sourceEventId: event.sourceEventId
+                ),
+                waitTimeout: 1
+            )
+            done.signal()
+        }
+
+        #expect(waitForFeedTestSignal(done, timeout: .now() + 0.5) == .success)
+        guard case .resolved(let itemId, .permission(.once)) = resultBox.value else {
+            Issue.record("expected the replay to receive the existing card's decision")
+            return
+        }
+        #expect(itemId == targetItemId)
+        let (status, requestId) = await MainActor.run {
+            let item = FeedCoordinator.shared.store.items.first
+            let requestId: String?
+            if case .permissionRequest(let value, _, _, _) = item?.payload {
+                requestId = value
+            } else {
+                requestId = nil
+            }
+            return (item?.status, requestId)
+        }
+        guard case .resolved(.permission(.once), _) = status else {
+            Issue.record("expected the restored pending item to resolve")
+            return
+        }
+        #expect(requestId == "copilot-pending-replay-request")
+    }
+
+    @Test func concurrentPendingExactReplayFansOutOneDecision() async {
+        defer { Self.resetFeedCoordinatorTestHooks() }
+        await MainActor.run {
+            FeedCoordinator.shared.install(store: WorkstreamStore(ringCapacity: 10))
+        }
+        let firstAccepted = DispatchSemaphore(value: 0)
+        await MainActor.run {
+            FeedCoordinatorTestHooks.afterBlockingEventIngested = { _, requestId in
+                if requestId == "copilot-fanout-request-1" {
+                    firstAccepted.signal()
+                } else if requestId == "copilot-fanout-request-2" {
+                    FeedCoordinator.shared.deliverReply(
+                        requestId: "copilot-fanout-request-2",
+                        decision: .permission(.once)
+                    )
+                }
+            }
+        }
+        let makeEvent: @Sendable (String) -> WorkstreamEvent = { requestId in
+            WorkstreamEvent(
+                sessionId: "copilot-fanout-session",
+                hookEventName: .permissionRequest,
+                source: "copilot",
+                toolName: "shell",
+                requestId: requestId,
+                sourceEventId: "copilot-fanout-native-event"
+            )
+        }
+
+        let firstDone = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0)
+        let firstResult = IngestResultBox()
+        let secondResult = IngestResultBox()
+        DispatchQueue.global(qos: .userInitiated).async {
+            firstResult.value = FeedCoordinator.shared.ingestBlocking(
+                event: makeEvent("copilot-fanout-request-1"),
+                waitTimeout: 1
+            )
+            firstDone.signal()
+        }
+        #expect(waitForFeedTestSignal(firstAccepted, timeout: .now() + 1) == .success)
+        DispatchQueue.global(qos: .userInitiated).async {
+            secondResult.value = FeedCoordinator.shared.ingestBlocking(
+                event: makeEvent("copilot-fanout-request-2"),
+                waitTimeout: 1
+            )
+            secondDone.signal()
+        }
+
+        #expect(waitForFeedTestSignal(firstDone, timeout: .now() + 1) == .success)
+        #expect(waitForFeedTestSignal(secondDone, timeout: .now() + 1) == .success)
+        guard case .resolved(let firstItemId, .permission(.once)) = firstResult.value,
+              case .resolved(let secondItemId, .permission(.once)) = secondResult.value else {
+            Issue.record("expected both exact-replay hook invocations to receive one decision")
+            return
+        }
+        #expect(firstItemId == secondItemId)
+        let items = await MainActor.run { FeedCoordinator.shared.store.items }
+        #expect(items.count == 1)
+    }
+
     @Test func zeroWaitAcknowledgmentIncludesInsertedItem() async {
         await MainActor.run {
             let store = WorkstreamStore(ringCapacity: 10)

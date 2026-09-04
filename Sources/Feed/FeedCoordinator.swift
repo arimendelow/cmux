@@ -7,7 +7,7 @@ import CmuxSettings
 import CmuxSidebar
 
 private enum FeedEventAcceptance: Sendable {
-    case accepted(event: WorkstreamEvent, itemId: UUID)
+    case accepted(event: WorkstreamEvent, ingestion: WorkstreamIngestResult)
     case notFound
     case unavailable
 }
@@ -105,10 +105,10 @@ final class FeedCoordinator: @unchecked Sendable {
         switch resolveDeliveryTarget(for: [event]) {
         case .accepted(let events):
             guard let revalidatedEvent = events.first,
-                  let itemId = ingestRevalidatedOnMainActor(revalidatedEvent) else {
+                  let ingestion = ingestRevalidatedOnMainActor(revalidatedEvent) else {
                 return .unavailable
             }
-            return .accepted(event: revalidatedEvent, itemId: itemId)
+            return .accepted(event: revalidatedEvent, ingestion: ingestion)
         case .notFound:
             return .notFound
         case .unavailable:
@@ -117,13 +117,13 @@ final class FeedCoordinator: @unchecked Sendable {
     }
 
     @MainActor
-    func ingestRevalidatedOnMainActor(_ event: WorkstreamEvent) -> UUID? {
+    func ingestRevalidatedOnMainActor(_ event: WorkstreamEvent) -> WorkstreamIngestResult? {
         guard let store else { return nil }
-        store.ingest(event)
+        let result = store.ingest(event)
         if let ppid = event.ppid, ppid > 0 {
             armPidWatcher(ppid: ppid)
         }
-        return store.items.last?.id
+        return result
     }
 
     /// Runs synchronous acknowledged ingress on the same ordered lane as zero-wait telemetry.
@@ -212,9 +212,9 @@ final class FeedCoordinator: @unchecked Sendable {
                 return IngestBlockingOutcome(result: .unavailable, authoritativeEvent: nil)
             }
             switch acceptance {
-            case .accepted(let acceptedEvent, let itemId):
+            case .accepted(let acceptedEvent, let ingestion):
                 return IngestBlockingOutcome(
-                    result: .acknowledged(itemId: itemId),
+                    result: .acknowledged(itemId: ingestion.item.id),
                     authoritativeEvent: acceptedEvent
                 )
             case .notFound:
@@ -229,8 +229,7 @@ final class FeedCoordinator: @unchecked Sendable {
         let resolvedAttentionTarget = Self.isBlockingDecisionEvent(event.hookEventName)
             ? Self.resolveAttentionTarget(event: event)
             : nil
-        let semaphore = DispatchSemaphore(value: 0)
-        let waiter = PendingWaiter(semaphore: semaphore)
+        let registrationSlot = PendingWaitRegistrationSlot()
 
         let acceptance = performAcceptedEventDelivery(
             for: [event],
@@ -242,12 +241,27 @@ final class FeedCoordinator: @unchecked Sendable {
                         guard ContinuousClock.now < deliveryDeadline else {
                             return FeedEventAcceptance.unavailable
                         }
-                        // Register in the commit boundary before the store sees
-                        // the event, so a fast reply cannot slip through.
-                        FeedCoordinator.shared.waiterLock.lock()
-                        FeedCoordinator.shared.waiters[requestId] = waiter
-                        FeedCoordinator.shared.waiterLock.unlock()
-                        return FeedCoordinator.shared.acceptOnMainActor(event)
+                        let acceptance = FeedCoordinator.shared.acceptOnMainActor(event)
+                        if case .accepted(_, let ingestion) = acceptance,
+                           ingestion.item.status.isPending {
+                            let canonicalRequestId = FeedCoordinator.requestId(for: ingestion.item) ?? requestId
+                            FeedCoordinator.shared.waiterLock.lock()
+                            let canonicalWaiter = FeedCoordinator.shared.waiters[canonicalRequestId]
+                            let aliasWaiter = FeedCoordinator.shared.waiters[requestId]
+                            let waiter = [canonicalWaiter, aliasWaiter]
+                                .compactMap { $0 }
+                                .first(where: { $0.itemId == ingestion.item.id })
+                                ?? PendingWaiter(
+                                    canonicalRequestId: canonicalRequestId,
+                                    itemId: ingestion.item.id
+                                )
+                            let registration = waiter.register()
+                            FeedCoordinator.shared.waiters[canonicalRequestId] = waiter
+                            FeedCoordinator.shared.waiters[requestId] = waiter
+                            registrationSlot.value = registration
+                            FeedCoordinator.shared.waiterLock.unlock()
+                        }
+                        return acceptance
                     }) else {
                         return nil
                     }
@@ -275,13 +289,20 @@ final class FeedCoordinator: @unchecked Sendable {
                     let attentionTarget = liveWorkspaceId.map {
                         (workspaceId: $0, surfaceId: liveSurfaceId)
                     } ?? resolvedAttentionTarget
-                    if let target = FeedCoordinator.shared.surfaceBlockingDecisionAttention(
-                        event: acceptedEvent,
-                        resolved: attentionTarget
-                    ) {
+                    FeedCoordinator.shared.waiterLock.lock()
+                    let shouldSurfaceAttention = registrationSlot.value.map {
+                        $0.isFirst && $0.waiter.attentionTarget == nil
+                    } ?? false
+                    FeedCoordinator.shared.waiterLock.unlock()
+                    if shouldSurfaceAttention,
+                       let target = FeedCoordinator.shared.surfaceBlockingDecisionAttention(
+                            event: acceptedEvent,
+                            resolved: attentionTarget
+                       ) {
                         var shouldConcludeImmediately = false
                         FeedCoordinator.shared.waiterLock.lock()
-                        if let registeredWaiter = FeedCoordinator.shared.waiters[requestId],
+                        if let registeredWaiter = registrationSlot.value?.waiter,
+                           registeredWaiter.registrationCount > 0,
                            registeredWaiter.decision == nil {
                             registeredWaiter.attentionTarget = target
                         } else {
@@ -306,64 +327,86 @@ final class FeedCoordinator: @unchecked Sendable {
             }
         }
         guard let acceptance else {
-            waiterLock.lock()
-            let attentionTarget = waiters.removeValue(forKey: requestId)?.attentionTarget
-            waiterLock.unlock()
-            concludeAttentionOnMain(attentionTarget)
+            if let registration = registrationSlot.value {
+                let completion = finishWaitRegistration(registration)
+                if completion.isLast {
+                    concludeAttentionOnMain(completion.attentionTarget)
+                }
+            }
             cancelNotification(requestId: requestId)
             return IngestBlockingOutcome(result: .unavailable, authoritativeEvent: nil)
         }
 
-        let accepted: (event: WorkstreamEvent, itemId: UUID)
+        let accepted: (event: WorkstreamEvent, ingestion: WorkstreamIngestResult)
         switch acceptance {
-        case .accepted(let event, let itemId):
-            accepted = (event, itemId)
+        case .accepted(let event, let ingestion):
+            accepted = (event, ingestion)
         case .notFound:
-            waiterLock.lock()
-            waiters.removeValue(forKey: requestId)
-            waiterLock.unlock()
             return IngestBlockingOutcome(result: .notFound, authoritativeEvent: nil)
         case .unavailable:
-            waiterLock.lock()
-            waiters.removeValue(forKey: requestId)
-            waiterLock.unlock()
             return IngestBlockingOutcome(result: .unavailable, authoritativeEvent: nil)
         }
+        if !accepted.ingestion.inserted {
+            let result: IngestBlockingResult
+            switch accepted.ingestion.item.status {
+            case .resolved(let decision, _):
+                result = .resolved(itemId: accepted.ingestion.item.id, decision: decision)
+            case .expired:
+                result = .timedOut(itemId: accepted.ingestion.item.id)
+            case .telemetry:
+                result = .acknowledged(itemId: accepted.ingestion.item.id)
+            case .pending:
+                guard registrationSlot.value != nil else {
+                    return IngestBlockingOutcome(result: .unavailable, authoritativeEvent: accepted.event)
+                }
+                result = .acknowledged(itemId: accepted.ingestion.item.id)
+            }
+            if !accepted.ingestion.item.status.isPending {
+                return IngestBlockingOutcome(result: result, authoritativeEvent: accepted.event)
+            }
+        }
+        guard let registration = registrationSlot.value else {
+            return IngestBlockingOutcome(result: .unavailable, authoritativeEvent: accepted.event)
+        }
+        let decisionRequestId = Self.requestId(for: accepted.ingestion.item) ?? requestId
         // If this is a blocking actionable event and the app window isn't
         // focused, post a native notification banner with inline action
         // buttons so the user can respond without switching windows.
-        postNotificationIfStillAwaiting(event: accepted.event, requestId: requestId)
+        if registration.isFirst {
+            postNotificationIfStillAwaiting(event: accepted.event, requestId: decisionRequestId)
+        }
 
         let remainingDecisionTimeout = Self.remainingIngressTime(until: deliveryDeadline)
         let deadline: DispatchTime = .now() + max(remainingDecisionTimeout, 0)
-        let waitResult = semaphore.wait(timeout: deadline)
-
-        waiterLock.lock()
-        let w = waiters.removeValue(forKey: requestId)
-        waiterLock.unlock()
+        let waitResult = registration.semaphore.wait(timeout: deadline)
+        let completion = finishWaitRegistration(registration)
 
         switch waitResult {
         case .success:
-            if let decision = w?.decision {
+            if let decision = completion.decision {
                 // `deliverReply` concludes the attention overlay on resolve.
                 return IngestBlockingOutcome(
-                    result: .resolved(itemId: accepted.itemId, decision: decision),
+                    result: .resolved(itemId: accepted.ingestion.item.id, decision: decision),
                     authoritativeEvent: accepted.event
                 )
             }
-            cancelNotification(requestId: requestId)
-            concludeAttentionOnMain(w?.attentionTarget)
-            expireTimedOutItem(accepted.itemId)
+            if completion.isLast {
+                cancelNotification(requestId: decisionRequestId)
+                concludeAttentionOnMain(completion.attentionTarget)
+                expireTimedOutItem(accepted.ingestion.item.id)
+            }
             return IngestBlockingOutcome(
-                result: .timedOut(itemId: accepted.itemId),
+                result: .timedOut(itemId: accepted.ingestion.item.id),
                 authoritativeEvent: accepted.event
             )
         case .timedOut:
-            cancelNotification(requestId: requestId)
-            concludeAttentionOnMain(w?.attentionTarget)
-            expireTimedOutItem(accepted.itemId)
+            if completion.isLast {
+                cancelNotification(requestId: decisionRequestId)
+                concludeAttentionOnMain(completion.attentionTarget)
+                expireTimedOutItem(accepted.ingestion.item.id)
+            }
             return IngestBlockingOutcome(
-                result: .timedOut(itemId: accepted.itemId),
+                result: .timedOut(itemId: accepted.ingestion.item.id),
                 authoritativeEvent: accepted.event
             )
         }
@@ -451,10 +494,13 @@ final class FeedCoordinator: @unchecked Sendable {
     /// item resolved on the main-actor store and wakes any waiter.
     func deliverReply(requestId: String, decision: WorkstreamDecision) {
         waiterLock.lock()
-        let attentionTarget = waiters[requestId]?.attentionTarget
-        if let waiter = waiters[requestId] {
+        let waiter = waiters[requestId]
+        let attentionTarget = waiter?.attentionTarget
+        let canonicalRequestId = waiter?.canonicalRequestId ?? requestId
+        let itemId = waiter?.itemId
+        if let waiter {
             waiter.decision = decision
-            waiter.semaphore.signal()
+            waiter.signalAll()
         }
         waiterLock.unlock()
 
@@ -463,12 +509,12 @@ final class FeedCoordinator: @unchecked Sendable {
         // decision on the same panel keeps it lit until it too concludes).
         concludeAttentionOnMain(attentionTarget)
 
-        let resolve: @Sendable () -> Void = { [requestId, decision] in
+        let resolve: @Sendable () -> Void = { [canonicalRequestId, itemId, decision] in
             MainActor.assumeIsolated {
                 let store = FeedCoordinator.shared.store
                 guard let store else { return }
-                if let itemId = Self.findItemId(for: requestId, in: store.items) {
-                    store.markResolved(itemId, decision: decision)
+                if let resolvedItemId = itemId ?? Self.findItemId(for: canonicalRequestId, in: store.items) {
+                    store.markResolved(resolvedItemId, decision: decision)
                 }
             }
         }
@@ -478,7 +524,7 @@ final class FeedCoordinator: @unchecked Sendable {
             DispatchQueue.main.async(execute: resolve)
         }
 
-        cancelNotification(requestId: requestId)
+        cancelNotification(requestId: canonicalRequestId)
     }
 
     fileprivate func isAwaitingDecision(requestId: String) -> Bool {
@@ -493,18 +539,37 @@ final class FeedCoordinator: @unchecked Sendable {
         in items: [WorkstreamItem]
     ) -> UUID? {
         for item in items.reversed() {
-            switch item.payload {
-            case .permissionRequest(let rid, _, _, _) where rid == requestId:
-                return item.id
-            case .exitPlan(let rid, _, _) where rid == requestId:
-                return item.id
-            case .question(let rid, _) where rid == requestId:
-                return item.id
-            default:
-                continue
-            }
+            if Self.requestId(for: item) == requestId { return item.id }
         }
         return nil
+    }
+
+    private static func requestId(for item: WorkstreamItem) -> String? {
+        switch item.payload {
+        case .permissionRequest(let requestId, _, _, _):
+            return requestId
+        case .exitPlan(let requestId, _, _):
+            return requestId
+        case .question(let requestId, _):
+            return requestId
+        default:
+            return nil
+        }
+    }
+
+    private func finishWaitRegistration(
+        _ registration: PendingWaitRegistration
+    ) -> (decision: WorkstreamDecision?, attentionTarget: AttentionTarget?, isLast: Bool) {
+        waiterLock.lock()
+        let waiter = registration.waiter
+        waiter.unregister(registration.id)
+        let isLast = waiter.registrationCount == 0
+        if isLast {
+            waiters = waiters.filter { $0.value !== waiter }
+        }
+        let result = (waiter.decision, waiter.attentionTarget, isLast)
+        waiterLock.unlock()
+        return result
     }
 
     private func expireTimedOutItem(_ itemId: UUID?) {
@@ -763,7 +828,8 @@ private final class AttentionOverlayState {
 }
 
 private final class PendingWaiter: @unchecked Sendable {
-    let semaphore: DispatchSemaphore
+    let canonicalRequestId: String
+    let itemId: UUID
     var decision: WorkstreamDecision?
     /// The attention overlay target for this decision, if one was surfaced.
     /// Set inside the ingest `main.sync` (before the card can render and a
@@ -771,10 +837,48 @@ private final class PendingWaiter: @unchecked Sendable {
     /// needs-input overlay is cleared exactly once. Guarded by
     /// `FeedCoordinator.waiterLock`.
     var attentionTarget: FeedCoordinator.AttentionTarget?
+    private var semaphores: [UUID: DispatchSemaphore] = [:]
 
-    init(semaphore: DispatchSemaphore) {
-        self.semaphore = semaphore
+    var registrationCount: Int { semaphores.count }
+
+    init(canonicalRequestId: String, itemId: UUID) {
+        self.canonicalRequestId = canonicalRequestId
+        self.itemId = itemId
     }
+
+    func register() -> PendingWaitRegistration {
+        let id = UUID()
+        let semaphore = DispatchSemaphore(value: decision == nil ? 0 : 1)
+        let isFirst = semaphores.isEmpty
+        semaphores[id] = semaphore
+        return PendingWaitRegistration(
+            id: id,
+            semaphore: semaphore,
+            waiter: self,
+            isFirst: isFirst
+        )
+    }
+
+    func unregister(_ id: UUID) {
+        semaphores.removeValue(forKey: id)
+    }
+
+    func signalAll() {
+        for semaphore in semaphores.values {
+            semaphore.signal()
+        }
+    }
+}
+
+private struct PendingWaitRegistration: @unchecked Sendable {
+    let id: UUID
+    let semaphore: DispatchSemaphore
+    let waiter: PendingWaiter
+    let isFirst: Bool
+}
+
+private final class PendingWaitRegistrationSlot: @unchecked Sendable {
+    var value: PendingWaitRegistration?
 }
 
 private final class SnapshotSlot: @unchecked Sendable {

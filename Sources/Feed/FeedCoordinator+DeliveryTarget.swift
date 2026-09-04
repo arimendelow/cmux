@@ -86,6 +86,10 @@ extension FeedCoordinator {
             isError: event.isError,
             context: event.context,
             requestId: event.requestId,
+            sourceEventId: event.sourceEventId,
+            sourceRevision: event.sourceRevision,
+            causalChainId: event.causalChainId,
+            actionRequestId: event.actionRequestId,
             ppid: event.ppid,
             receivedAt: event.receivedAt,
             extraFieldsJSON: event.extraFieldsJSON

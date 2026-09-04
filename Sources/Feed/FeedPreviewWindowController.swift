@@ -242,6 +242,10 @@ enum FeedPreviewFixtures {
             toolName: item.title,
             toolInputJSON: nil,
             requestId: item.workstreamId,
+            sourceEventId: item.sourceEventId,
+            sourceRevision: item.sourceRevision,
+            causalChainId: item.causalChainId,
+            actionRequestId: item.actionRequestId,
             ppid: Int(getpid()),
             receivedAt: item.createdAt
         )
