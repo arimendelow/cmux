@@ -51,6 +51,71 @@ struct WorkbenchLocalSupervisionTests {
         )
     }
 
+    @Test func ariAttentionRequiresSummaryAndInvokesTheNativeDispositionHandler() async throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let handled = TestLocked<[WorkbenchSupervisionDispositionResult]>([])
+        let valid = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            dispositionHandler: { _, _, result, _ in
+                handled.withLock { $0.append(result) }
+                return true
+            },
+            runTurn: TurnRecorder(
+                response: #"{"disposition":"ari_attention","summary":"Ari must choose the deployment target."}"#
+            ).turnRunner
+        )
+
+        await valid.processForTesting(
+            event(
+                eventId: "attention-valid",
+                sequence: 1,
+                sourceEventId: "attention-valid",
+                sessionId: "attention-valid"
+            )
+        )
+
+        #expect(handled.withLock { $0.map(\.disposition) } == [.ariAttention])
+        #expect(valid.receiptsForTesting().last?.status == .completed)
+
+        let invalid = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            dispositionHandler: { _, _, _, _ in
+                Issue.record("summary-less Ari attention must not reach the action plane")
+                return true
+            },
+            runTurn: TurnRecorder(response: #"{"disposition":"ari_attention"}"#).turnRunner
+        )
+        await invalid.processForTesting(
+            event(
+                eventId: "attention-invalid",
+                sequence: 2,
+                sourceEventId: "attention-invalid",
+                sessionId: "attention-invalid"
+            )
+        )
+        #expect(invalid.receiptsForTesting().last?.status == .invalid)
+        #expect(invalid.receiptsForTesting().last?.reasonCode == "boss_attention_summary_missing")
+
+        let unroutable = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            dispositionHandler: { _, _, _, _ in false },
+            runTurn: TurnRecorder(
+                response: #"{"disposition":"ari_attention","summary":"Ari must inspect this worker."}"#
+            ).turnRunner
+        )
+        await unroutable.processForTesting(
+            event(
+                eventId: "attention-unroutable",
+                sequence: 3,
+                sourceEventId: "attention-unroutable",
+                sessionId: "attention-unroutable"
+            )
+        )
+        #expect(unroutable.receiptsForTesting().last?.status == .failed)
+        #expect(unroutable.receiptsForTesting().last?.reasonCode == "boss_disposition_route_failed")
+    }
+
     @Test func exactSourceReplayProducesOneIsolatedPassAndContentFreeReceipt() async throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
@@ -186,10 +251,11 @@ struct WorkbenchLocalSupervisionTests {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
         let firstBus = CmuxEventBus(retainedEventLimit: 16)
+        let firstRunner = TurnRecorder(response: #"{"disposition":"no_action"}"#)
         let first = WorkbenchLocalSupervisionCoordinator(
             bus: firstBus,
             defaults: defaults,
-            runTurn: TurnRecorder(response: #"{"disposition":"no_action"}"#).turnRunner
+            runTurn: firstRunner.turnRunner
         )
         first.start()
         firstBus.publish(
@@ -200,8 +266,12 @@ struct WorkbenchLocalSupervisionTests {
             surfaceId: Self.surfaceId,
             payload: payload(sessionId: "copilot-old", sourceEventId: "old")
         )
-        try await waitUntil { first.receiptsForTesting().count == 1 }
-        first.stop()
+        try await waitUntil {
+            first.receiptsForTesting().last?.status == .completed && firstRunner.calls.count == 1
+        }
+        if let stopped = first.stop() {
+            await stopped.value
+        }
 
         let newBus = CmuxEventBus(retainedEventLimit: 16)
         newBus.publish(
@@ -220,7 +290,9 @@ struct WorkbenchLocalSupervisionTests {
         )
         second.start()
         defer { second.stop() }
-        try await waitUntil { second.receiptsForTesting().count == 2 }
+        try await waitUntil {
+            second.receiptsForTesting().count == 2 && newRunner.calls.count == 1
+        }
         #expect(newRunner.calls.count == 1)
     }
 
@@ -491,8 +563,12 @@ struct WorkbenchLocalSupervisionTests {
                 causalChainId: "gap-1"
             )
         )
-        try await waitUntil { first.receiptsForTesting().count == 1 }
-        first.stop()
+        try await waitUntil {
+            first.receiptsForTesting().last?.status == .completed && firstRunner.calls.count == 1
+        }
+        if let stopped = first.stop() {
+            await stopped.value
+        }
 
         for index in 2...3 {
             bus.publish(
@@ -527,7 +603,9 @@ struct WorkbenchLocalSupervisionTests {
         second.start()
         defer { second.stop() }
 
-        try await waitUntil { second.receiptsForTesting().count == 3 }
+        try await waitUntil {
+            second.receiptsForTesting().count == 3 && secondRunner.calls.count == 2
+        }
         #expect(second.gapsForTesting().count == 1)
         #expect(secondRunner.calls.count == 2)
         #expect(second.receiptsForTesting().suffix(2).map(\.sessionId) == ["gap-recovered", "gap-3"])
@@ -537,10 +615,11 @@ struct WorkbenchLocalSupervisionTests {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
         let firstBus = CmuxEventBus(retainedEventLimit: 4)
+        let firstRunner = TurnRecorder(response: #"{"disposition":"no_action"}"#)
         let first = WorkbenchLocalSupervisionCoordinator(
             bus: firstBus,
             defaults: defaults,
-            runTurn: TurnRecorder(response: #"{"disposition":"no_action"}"#).turnRunner
+            runTurn: firstRunner.turnRunner
         )
         first.start()
         firstBus.publish(
@@ -556,8 +635,12 @@ struct WorkbenchLocalSupervisionTests {
                 causalChainId: "old-seen"
             )
         )
-        try await waitUntil { first.receiptsForTesting().count == 1 }
-        first.stop()
+        try await waitUntil {
+            first.receiptsForTesting().last?.status == .completed && firstRunner.calls.count == 1
+        }
+        if let stopped = first.stop() {
+            await stopped.value
+        }
 
         let secondBus = CmuxEventBus(retainedEventLimit: 4)
         secondBus.publish(
@@ -746,6 +829,417 @@ struct WorkbenchLocalSupervisionTests {
             try await clock.sleep(for: .milliseconds(20))
         }
         Issue.record("condition did not become true")
+    }
+}
+
+@Suite("Workbench local actions", .serialized)
+@MainActor
+struct WorkbenchLocalActionTests {
+    @Test func focusIsWriteAheadIdempotentAndRejectsRequestReuse() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let calls = TestLocked(0)
+        let params: [String: Any] = [
+            "request_id": "focus-1",
+            "workspace_id": workspaceId.uuidString,
+            "surface_id": surfaceId.uuidString,
+        ]
+
+        let first = WorkbenchLocalActionRouter.focus(
+            params: params,
+            defaults: defaults,
+            enabled: true,
+            effect: { workspace, surface in
+                calls.withLock { $0 += 1 }
+                return workspace == workspaceId && surface == surfaceId
+            }
+        )
+        let firstPayload = try successPayload(first)
+        #expect(firstPayload["status"] as? String == "completed")
+        #expect(firstPayload["replayed"] as? Bool == false)
+
+        let replay = WorkbenchLocalActionRouter.focus(
+            params: params,
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in
+                Issue.record("an exact replay must not repeat focus")
+                return false
+            }
+        )
+        #expect(try successPayload(replay)["replayed"] as? Bool == true)
+        #expect(calls.withLock { $0 } == 1)
+
+        let conflict = WorkbenchLocalActionRouter.focus(
+            params: params.merging(["surface_id": UUID().uuidString]) { _, new in new },
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in false }
+        )
+        #expect(errorCode(conflict) == "request_conflict")
+
+        let pendingParams = params.merging(["request_id": "focus-pending"]) { _, new in new }
+        _ = WorkbenchLocalActionRouter.focus(
+            params: pendingParams,
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in true }
+        )
+        let receiptData = try #require(defaults.data(forKey: WorkbenchLocalActionRouter.receiptDefaultsKey))
+        var receipts = try JSONDecoder().decode([WorkbenchLocalActionReceipt].self, from: receiptData)
+        let pendingIndex = try #require(receipts.firstIndex(where: { $0.requestId == "focus-pending" }))
+        receipts[pendingIndex].status = .pending
+        defaults.set(try JSONEncoder().encode(receipts), forKey: WorkbenchLocalActionRouter.receiptDefaultsKey)
+        #expect(errorCode(WorkbenchLocalActionRouter.focus(
+            params: pendingParams,
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in
+                Issue.record("an interrupted action must not be retried implicitly")
+                return true
+            }
+        )) == "action_outcome_unknown")
+    }
+
+    @Test func flagForReviewValidatesBoundsPersistsFailureAndReplaysSuccess() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let params: [String: Any] = [
+            "request_id": "review-1",
+            "workspace_id": workspaceId.uuidString,
+            "surface_id": surfaceId.uuidString,
+            "summary": "Ari needs to choose a rollout ring.",
+        ]
+        let notificationId = UUID()
+
+        let first = WorkbenchLocalActionRouter.flagForReview(
+            params: params,
+            defaults: defaults,
+            enabled: true,
+            effect: { requestId, workspace, surface, summary in
+                #expect(requestId == "review-1")
+                #expect(workspace == workspaceId)
+                #expect(surface == surfaceId)
+                #expect(summary == "Ari needs to choose a rollout ring.")
+                return notificationId
+            }
+        )
+        let payload = try successPayload(first)
+        #expect(payload["notification_id"] as? String == notificationId.uuidString)
+
+        let replay = WorkbenchLocalActionRouter.flagForReview(
+            params: params,
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, _, _ in
+                Issue.record("an exact replay must not create another notification")
+                return nil
+            }
+        )
+        #expect(try successPayload(replay)["replayed"] as? Bool == true)
+
+        let invalid = WorkbenchLocalActionRouter.flagForReview(
+            params: params.merging([
+                "summary": String(repeating: "x", count: 501),
+                "unexpected": true,
+            ]) { _, new in new },
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, _, _ in nil }
+        )
+        #expect(errorCode(invalid) == "invalid_params")
+
+        let failed = WorkbenchLocalActionRouter.flagForReview(
+            params: params.merging(["request_id": "review-failed"]) { _, new in new },
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, _, _ in nil }
+        )
+        #expect(errorCode(failed) == "action_failed")
+        let failedReplay = WorkbenchLocalActionRouter.flagForReview(
+            params: params.merging(["request_id": "review-failed"]) { _, new in new },
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, _, _ in
+                Issue.record("a failed durable request must not be retried implicitly")
+                return notificationId
+            }
+        )
+        #expect(errorCode(failedReplay) == "action_failed")
+
+        let workspaceFlag = WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": "review-workspace",
+                "workspace_id": workspaceId.uuidString,
+                "summary": "Workspace-level review.",
+            ],
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, surface, _ in
+                #expect(surface == nil)
+                return UUID()
+            }
+        )
+        #expect(try successPayload(workspaceFlag)["status"] as? String == "completed")
+    }
+
+    @Test func actionPlaneFailsClosedOutsideWorkbenchAndOnCorruptReceipts() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let params: [String: Any] = [
+            "request_id": "focus-closed",
+            "workspace_id": UUID().uuidString,
+            "surface_id": UUID().uuidString,
+        ]
+
+        #expect(errorCode(WorkbenchLocalActionRouter.focus(
+            params: params,
+            defaults: defaults,
+            enabled: false,
+            effect: { _, _ in true }
+        )) == "unsupported")
+        #expect(errorCode(WorkbenchLocalActionRouter.focus(
+            params: params.merging(["unexpected": true]) { _, new in new },
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in true }
+        )) == "invalid_params")
+        #expect(errorCode(WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": "review-closed",
+                "workspace_id": UUID().uuidString,
+                "summary": "Review.",
+            ],
+            defaults: defaults,
+            enabled: false,
+            effect: { _, _, _, _ in UUID() }
+        )) == "unsupported")
+        #expect(errorCode(WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": "review-invalid-surface",
+                "workspace_id": UUID().uuidString,
+                "surface_id": "not-a-uuid",
+                "summary": "Review.",
+            ],
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _, _, _ in UUID() }
+        )) == "invalid_params")
+
+        defaults.set(Data("corrupt".utf8), forKey: WorkbenchLocalActionRouter.receiptDefaultsKey)
+        #expect(errorCode(WorkbenchLocalActionRouter.focus(
+            params: params,
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in true }
+        )) == "receipt_store_unavailable")
+    }
+
+    @Test func liveActionEffectsFocusAndFlagTheExactSurface() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let previousShared = AppDelegate.shared
+        let app = previousShared ?? AppDelegate()
+        let previousManager = app.tabManager
+        let previousStore = app.notificationStore
+        let store = TerminalNotificationStore.shared
+        let manager = TabManager()
+        AppDelegate.shared = app
+        app.tabManager = manager
+        app.notificationStore = store
+        store.replaceNotificationsForTesting([])
+        store.configureNotificationDeliveryHandlerForTesting { _, _ in }
+        defer {
+            store.replaceNotificationsForTesting([])
+            store.resetNotificationDeliveryHandlerForTesting()
+            app.tabManager = previousManager
+            app.notificationStore = previousStore
+            AppDelegate.shared = previousShared
+        }
+        let first = manager.addWorkspace(title: "First", select: true)
+        let target = manager.addWorkspace(title: "Target", select: false)
+        let surfaceId = try #require(target.focusedPanelId)
+        #expect(manager.selectedTabId == first.id)
+
+        let focus = WorkbenchLocalActionRouter.focus(
+            params: [
+                "request_id": "focus-live",
+                "workspace_id": target.id.uuidString,
+                "surface_id": surfaceId.uuidString,
+            ],
+            defaults: defaults,
+            enabled: true
+        )
+        #expect(try successPayload(focus)["status"] as? String == "completed")
+        #expect(manager.selectedTabId == target.id)
+        #expect(target.focusedPanelId == surfaceId)
+
+        let flag = WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": "review-live",
+                "workspace_id": target.id.uuidString,
+                "surface_id": surfaceId.uuidString,
+                "summary": "Ari needs to inspect this worker.",
+            ],
+            defaults: defaults,
+            enabled: true
+        )
+        let notificationIdString = try #require(successPayload(flag)["notification_id"] as? String)
+        let notificationId = try #require(UUID(uuidString: notificationIdString))
+        let notification = try #require(store.notifications.first(where: { $0.id == notificationId }))
+        #expect(notification.tabId == target.id)
+        #expect(notification.surfaceId == surfaceId)
+        #expect(notification.body == "Ari needs to inspect this worker.")
+
+        let missingTarget = WorkbenchLocalActionRouter.focus(
+            params: [
+                "request_id": "focus-missing",
+                "workspace_id": UUID().uuidString,
+                "surface_id": UUID().uuidString,
+            ],
+            defaults: defaults,
+            enabled: true
+        )
+        #expect(errorCode(missingTarget) == "action_failed")
+        let missingReviewTarget = WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": "review-missing",
+                "workspace_id": UUID().uuidString,
+                "summary": "Missing target.",
+            ],
+            defaults: defaults,
+            enabled: true
+        )
+        #expect(errorCode(missingReviewTarget) == "action_failed")
+
+        let existingRequestId = "review-existing"
+        store.addNotification(
+            tabId: target.id,
+            surfaceId: surfaceId,
+            title: "Boss",
+            subtitle: "",
+            body: "Already flagged.",
+            cooldownKey: "workbench-action:\(existingRequestId)",
+            cooldownInterval: .greatestFiniteMagnitude,
+            resolvedHooks: []
+        )
+        let existing = try #require(store.notifications.first(where: {
+            $0.correlationKey == "workbench-action:\(existingRequestId)"
+        }))
+        let existingResult = WorkbenchLocalActionRouter.flagForReview(
+            params: [
+                "request_id": existingRequestId,
+                "workspace_id": target.id.uuidString,
+                "surface_id": surfaceId.uuidString,
+                "summary": "Already flagged.",
+            ],
+            defaults: defaults,
+            enabled: true
+        )
+        #expect(try successPayload(existingResult)["notification_id"] as? String == existing.id.uuidString)
+
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFocus(params: [
+            "request_id": "v2-disabled-focus",
+            "workspace_id": target.id.uuidString,
+            "surface_id": surfaceId.uuidString,
+        ])) == "unsupported")
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFlagForReview(params: [
+            "request_id": "v2-disabled-review",
+            "workspace_id": target.id.uuidString,
+            "summary": "Review.",
+        ])) == "unsupported")
+    }
+
+    @Test func actionReceiptHistoryTrimsOnlyTerminalRecords() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let workspaceId = UUID()
+        var receipts = (0..<256).map { index in
+            WorkbenchLocalActionReceipt(
+                requestId: "old-\(index)",
+                fingerprint: "fingerprint-\(index)",
+                action: .focus,
+                workspaceId: workspaceId,
+                surfaceId: UUID(),
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                status: .completed,
+                resultCode: "focused",
+                notificationId: nil
+            )
+        }
+        receipts.append(
+            WorkbenchLocalActionReceipt(
+                requestId: "pending",
+                fingerprint: "pending-fingerprint",
+                action: .focus,
+                workspaceId: workspaceId,
+                surfaceId: UUID(),
+                createdAt: Date(),
+                status: .pending,
+                resultCode: nil,
+                notificationId: nil
+            )
+        )
+        defaults.set(try JSONEncoder().encode(receipts), forKey: WorkbenchLocalActionRouter.receiptDefaultsKey)
+
+        _ = WorkbenchLocalActionRouter.focus(
+            params: [
+                "request_id": "new",
+                "workspace_id": workspaceId.uuidString,
+                "surface_id": UUID().uuidString,
+            ],
+            defaults: defaults,
+            enabled: true,
+            effect: { _, _ in true }
+        )
+
+        let data = try #require(defaults.data(forKey: WorkbenchLocalActionRouter.receiptDefaultsKey))
+        let trimmed = try JSONDecoder().decode([WorkbenchLocalActionReceipt].self, from: data)
+        #expect(trimmed.count == 256)
+        #expect(trimmed.contains(where: { $0.requestId == "pending" }))
+        #expect(trimmed.contains(where: { $0.requestId == "new" }))
+    }
+
+    private func makeDefaults() throws -> UserDefaults {
+        try #require(UserDefaults(suiteName: "WorkbenchLocalActionTests.\(UUID().uuidString)"))
+    }
+
+    private func clear(_ defaults: UserDefaults) {
+        for key in defaults.dictionaryRepresentation().keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func successPayload(_ result: TerminalController.V2CallResult) throws -> [String: Any] {
+        guard case .ok(let raw) = result else {
+            Issue.record("expected action success, got \(result)")
+            return [:]
+        }
+        return try #require(raw as? [String: Any])
+    }
+
+    private func errorCode(_ result: TerminalController.V2CallResult) -> String? {
+        guard case .err(let code, _, _) = result else { return nil }
+        return code
+    }
+}
+
+private final class TestLocked<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 }
 

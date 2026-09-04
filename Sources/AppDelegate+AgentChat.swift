@@ -1,5 +1,6 @@
 import AppKit
 import CMUXAgentLaunch
+import CmuxSettings
 import Darwin
 import Foundation
 import os
@@ -203,6 +204,25 @@ extension AppDelegate {
         let coordinator = WorkbenchLocalSupervisionCoordinator(
             evidenceProvider: Self.workbenchSupervisionEvidence(for:),
             recoveryProvider: Self.workbenchSupervisionRecoveryEvents,
+            dispositionHandler: { receiptId, envelope, result, policy in
+                guard result.disposition == .ariAttention else { return true }
+                guard policy.notificationMode != .off, let summary = result.summary else { return true }
+                return await MainActor.run {
+                    switch WorkbenchLocalActionRouter.flagForReview(
+                        params: [
+                            "request_id": "workbench-supervision:\(receiptId.uuidString)",
+                            "workspace_id": envelope.workspaceId,
+                            "surface_id": envelope.surfaceId as Any? ?? NSNull(),
+                            "summary": summary,
+                        ]
+                    ) {
+                    case .ok:
+                        return true
+                    case .err:
+                        return false
+                    }
+                }
+            },
             runTurn: { [weak self] requestId, prompt, cwd in
                 guard let self else { throw CancellationError() }
                 return try await self.runWorkbenchHeadlessBossTurn(
@@ -774,6 +794,17 @@ extension AppDelegate {
         ) else {
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }
+        let controlSocketPath = TerminalController.shared.activeSocketPath(
+            preferredPath: SocketControlSettings.socketPath()
+        )
+        let productEnvironment = OuroWorkbenchProduct.agentChatEnvironment(
+            controlSocketPath: controlSocketPath,
+            controlSocketCapability: TerminalController.shared
+                .socketClientCapabilityEnvironment()["CMUX_SOCKET_CAPABILITY"],
+            controlSocketReady: TerminalController.shared
+                .socketListenerHealth(expectedSocketPath: controlSocketPath)
+                .isHealthy
+        )
         guard let pendingProcess = Self.launchDetachedAgentChatStartCommand(
             startCommand,
             currentDirectoryURL: Self.agentChatStartCommandDirectoryURL(for: agentChat),
@@ -782,7 +813,7 @@ extension AppDelegate {
                 "CMUX_AGENT_CHAT_PORT": "0",
                 "CMUX_AGENT_CHAT_STATE_FILE": stateFileURL.path,
                 "CMUX_AGENT_CHAT_LAUNCH_ID": launchId,
-            ].merging(OuroWorkbenchProduct.agentChatEnvironment()) { owned, _ in owned }
+            ].merging(productEnvironment) { owned, _ in owned }
         ) else {
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }

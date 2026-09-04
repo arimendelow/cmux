@@ -104,7 +104,11 @@ enum OuroWorkbenchProduct {
             in: .userDomainMask
         ).first,
         bundleURL: URL = Bundle.main.bundleURL,
+        controlSocketPath: String? = nil,
+        controlSocketCapability: String? = nil,
+        controlSocketReady: Bool = false,
         sourceFilePath: String = #filePath,
+        environment baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> [String: String] {
         guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
@@ -139,8 +143,44 @@ enum OuroWorkbenchProduct {
         if let ouro = ouroCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
             environment["CMUX_AGENT_CHAT_OURO_COMMAND"] = ouro.path
         }
-        let workbenchMCP = bundleURL.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP")
-        if fileManager.isExecutableFile(atPath: workbenchMCP.path) {
+        let bundledCLI = bundleURL.appendingPathComponent("Contents/Resources/bin/cmux")
+        let resolvedBundledCLI = fileManager.isExecutableFile(atPath: bundledCLI.path) ? bundledCLI.path : nil
+        let resolvedControlSocketPath = controlSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedControlSocketCapability = controlSocketCapability?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nvmRoot = homeURL.appendingPathComponent(".nvm/versions/node", isDirectory: true)
+        let nvmBuns = (try? fileManager.contentsOfDirectory(
+            at: nvmRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ))?.sorted {
+            $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending
+        }.map {
+            $0.appendingPathComponent("bin/bun")
+        } ?? []
+        let bunCandidates = [
+            baseEnvironment["BUN_BIN"].map(URL.init(fileURLWithPath:)),
+            homeURL.appendingPathComponent(".bun/bin/bun"),
+            homeURL.appendingPathComponent(".local/bin/bun"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/bun"),
+            URL(fileURLWithPath: "/usr/local/bin/bun"),
+        ].compactMap { $0 } + nvmBuns
+        let resolvedBun = bunCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })?.path
+        let workbenchMCPCandidates = [
+            bundleURL.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP"),
+            sourceRoot.appendingPathComponent("agent-chat/OuroWorkbenchMCP"),
+        ]
+        if controlSocketReady,
+           let resolvedBundledCLI,
+           let resolvedControlSocketPath, !resolvedControlSocketPath.isEmpty,
+           let resolvedControlSocketCapability, !resolvedControlSocketCapability.isEmpty,
+           let resolvedBun,
+           let workbenchMCP = workbenchMCPCandidates.first(where: {
+               fileManager.isExecutableFile(atPath: $0.path)
+           }) {
+            environment["CMUX_BUNDLED_CLI_PATH"] = resolvedBundledCLI
+            environment["CMUX_SOCKET_PATH"] = resolvedControlSocketPath
+            environment["CMUX_SOCKET_CAPABILITY"] = resolvedControlSocketCapability
+            environment["BUN_BIN"] = resolvedBun
             environment["CMUX_AGENT_CHAT_WORKBENCH_MCP"] = workbenchMCP.path
         }
         return environment

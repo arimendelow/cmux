@@ -76,6 +76,15 @@ test("Workbench v1 exposes exactly one selected Ouro Boss", () => {
     description: "Choose one enabled Ouro agent as Boss.",
     unavailableReason: "Choose one enabled Ouro agent as Boss.",
   })]);
+  expect(providerDefinitionsForProductForTest("ouro-workbench-v1", {
+    bossAgent: "slugger",
+    ouroCommand: "/usr/local/bin/ouro",
+  })[0]?.cmd).toEqual([
+    "/usr/local/bin/ouro",
+    "acp-serve",
+    "--agent",
+    "slugger",
+  ]);
   expect(startErrorMessageForTest(
     "ouro-boss",
     new Error("working directory is outside configured roots"),

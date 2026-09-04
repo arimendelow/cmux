@@ -1,0 +1,217 @@
+import { expect, test } from "bun:test";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  callWorkbenchNative,
+  handleWorkbenchMCPRequest,
+  runWorkbenchMCP,
+  workbenchToolDefinitions,
+} from "../workbench-mcp";
+
+test("Workbench MCP exposes only focus and flag-for-review", () => {
+  expect(workbenchToolDefinitions().map((tool) => tool.name)).toEqual([
+    "workbench_focus",
+    "workbench_flag_for_review",
+  ]);
+});
+
+test("Workbench MCP handles its complete protocol surface", async () => {
+  const call = async () => ({});
+  expect((await handleWorkbenchMCPRequest({}, call)).error?.code).toBe(-32600);
+  expect(await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+  }, call)).toBeNull();
+  expect((await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+  }, call)).result?.serverInfo.name).toBe("ouro-workbench-v1");
+  expect((await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+  }, call)).result?.tools).toHaveLength(2);
+  expect((await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "unknown",
+  }, call)).error?.code).toBe(-32601);
+  expect((await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: { name: "unknown", arguments: {} },
+  }, call)).result?.isError).toBe(true);
+});
+
+test("Workbench MCP maps validated tools to exact native action requests", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const call = async (method: string, params: Record<string, unknown>) => {
+    calls.push({ method, params });
+    return { request_id: params.request_id, status: "completed" };
+  };
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const surfaceId = "22222222-2222-4222-8222-222222222222";
+
+  const focus = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "workbench_focus",
+      arguments: { request_id: "focus-1", workspace_id: workspaceId, surface_id: surfaceId },
+    },
+  }, call);
+  expect(focus.result?.isError).toBe(false);
+
+  const flag = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "workbench_flag_for_review",
+      arguments: {
+        request_id: "review-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        summary: "Ari needs to choose a rollout ring.",
+      },
+    },
+  }, call);
+  expect(flag.result?.isError).toBe(false);
+  expect(calls).toEqual([
+    {
+      method: "workbench.focus",
+      params: { request_id: "focus-1", workspace_id: workspaceId, surface_id: surfaceId },
+    },
+    {
+      method: "workbench.flag_for_review",
+      params: {
+        request_id: "review-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        summary: "Ari needs to choose a rollout ring.",
+      },
+    },
+  ]);
+});
+
+test("Workbench MCP rejects malformed action requests before native dispatch", async () => {
+  let calls = 0;
+  const response = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: "bad",
+    method: "tools/call",
+    params: {
+      name: "workbench_flag_for_review",
+      arguments: {
+        request_id: "review-1",
+        workspace_id: "not-a-uuid",
+        summary: "",
+        unexpected: true,
+      },
+    },
+  }, async () => {
+    calls += 1;
+    return {};
+  });
+
+  expect(response.result?.isError).toBe(true);
+  expect(calls).toBe(0);
+});
+
+test("Workbench MCP executable calls the selected cmux socket", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workbench-mcp-"));
+  const cli = join(root, "cmux");
+  const log = join(root, "args.log");
+  await Bun.write(cli, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$WORKBENCH_MCP_ARG_LOG"\nprintf '{"status":"completed"}\\n'\n`);
+  await chmod(cli, 0o755);
+  const process = Bun.spawn([join(import.meta.dir, "../OuroWorkbenchMCP")], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...globalThis.process.env,
+      BUN_BIN: Bun.which("bun") ?? "bun",
+      CMUX_BUNDLED_CLI_PATH: cli,
+      CMUX_SOCKET_PATH: "/tmp/workbench.sock",
+      WORKBENCH_MCP_ARG_LOG: log,
+    },
+  });
+  process.stdin.write(`${JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "workbench_focus",
+      arguments: {
+        request_id: "focus-e2e",
+        workspace_id: "11111111-1111-4111-8111-111111111111",
+        surface_id: "22222222-2222-4222-8222-222222222222",
+      },
+    },
+  })}\n`);
+  process.stdin.end();
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+
+  expect(status).toBe(0);
+  expect(stderr).toBe("");
+  expect(JSON.parse(stdout).result.isError).toBe(false);
+  expect(await readFile(log, "utf8")).toContain("--socket /tmp/workbench.sock rpc workbench.focus");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("Workbench MCP loop translates malformed input", async () => {
+  async function* input() {
+    yield "";
+    yield "not-json";
+    yield JSON.stringify({ jsonrpc: "2.0", id: 1, method: "notifications/initialized" });
+  }
+  const output: string[] = [];
+  await runWorkbenchMCP(input(), (line) => output.push(line), async () => ({}));
+  expect(output.map(JSON.parse)).toEqual([
+    { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+  ]);
+});
+
+test("Workbench native caller reports missing coordinates and CLI failures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workbench-mcp-failure-"));
+  try {
+    const cli = join(root, "cmux");
+    await Bun.write(cli, "#!/bin/sh\nprintf 'native failed\\n' >&2\nexit 9\n");
+    await chmod(cli, 0o755);
+    await expect(callWorkbenchNative("workbench.focus", {}, {})).rejects.toThrow(
+      "Workbench control coordinates are unavailable",
+    );
+    await expect(callWorkbenchNative("workbench.focus", {}, {
+      CMUX_BUNDLED_CLI_PATH: cli,
+      CMUX_SOCKET_PATH: "/tmp/workbench.sock",
+    })).rejects.toThrow("native failed");
+
+    await Bun.write(cli, "#!/bin/sh\nprintf 'not-json\\n'\n");
+    await expect(callWorkbenchNative("workbench.focus", {}, {
+      CMUX_BUNDLED_CLI_PATH: cli,
+      CMUX_SOCKET_PATH: "/tmp/workbench.sock",
+    })).rejects.toThrow();
+
+    await Bun.write(cli, "#!/bin/sh\nexit 7\n");
+    await expect(callWorkbenchNative("workbench.focus", {}, {
+      CMUX_BUNDLED_CLI_PATH: cli,
+      CMUX_SOCKET_PATH: "/tmp/workbench.sock",
+    })).rejects.toThrow("cmux exited 7");
+
+    await Bun.write(cli, "#!/bin/sh\nprintf '{\"status\":\"completed\"}\\n'\n");
+    expect(await callWorkbenchNative("workbench.focus", {}, {
+      CMUX_BUNDLED_CLI_PATH: cli,
+      CMUX_SOCKET_PATH: "/tmp/workbench.sock",
+    })).toEqual({ status: "completed" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

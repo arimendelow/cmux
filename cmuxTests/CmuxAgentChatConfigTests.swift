@@ -70,15 +70,27 @@ struct CmuxAgentChatConfigTests {
         let legacyDirectory = appSupport.appendingPathComponent("OuroWorkbench", isDirectory: true)
         let bundle = root.appendingPathComponent("Ouro Workbench v1 DEV.app", isDirectory: true)
         let workbenchMCP = bundle.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP")
+        let bundledCLI = bundle.appendingPathComponent("Contents/Resources/bin/cmux")
         let ouro = home.appendingPathComponent(".ouro-cli/bin/ouro")
+        let bun = home.appendingPathComponent(".nvm/versions/node/v20.19.5/bin/bun")
+        let olderBun = home.appendingPathComponent(".nvm/versions/node/v9.9.9/bin/bun")
         try fileManager.createDirectory(at: slugger, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: workbenchMCP.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: bundledCLI.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: ouro.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: bun.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: olderBun.deletingLastPathComponent(), withIntermediateDirectories: true)
         #expect(fileManager.createFile(atPath: workbenchMCP.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: bundledCLI.path, contents: Data("#!/bin/sh\n".utf8)))
         #expect(fileManager.createFile(atPath: ouro.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: bun.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: olderBun.path, contents: Data("#!/bin/sh\n".utf8)))
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: workbenchMCP.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledCLI.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ouro.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bun.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: olderBun.path)
         try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
             to: slugger.appendingPathComponent("agent.json"),
             atomically: true,
@@ -101,7 +113,11 @@ struct CmuxAgentChatConfigTests {
             homeURL: home,
             applicationSupportURL: appSupport,
             bundleURL: bundle,
+            controlSocketPath: "/tmp/workbench-control.sock",
+            controlSocketCapability: "capability-token",
+            controlSocketReady: true,
             sourceFilePath: sourceFilePath,
+            environment: [:],
             fileManager: fileManager
         )
         #expect(selected["CMUX_AGENT_CHAT_DEFAULT_PROVIDER"] == "ouro-boss")
@@ -109,6 +125,46 @@ struct CmuxAgentChatConfigTests {
         #expect(selected["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
         #expect(selected["CMUX_AGENT_CHAT_OURO_COMMAND"] == ouro.path)
         #expect(selected["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == workbenchMCP.path)
+        #expect(selected["CMUX_BUNDLED_CLI_PATH"] == bundledCLI.path)
+        #expect(selected["CMUX_SOCKET_PATH"] == "/tmp/workbench-control.sock")
+        #expect(selected["CMUX_SOCKET_CAPABILITY"] == "capability-token")
+        #expect(
+            selected["BUN_BIN"].map {
+                URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
+            } == bun.resolvingSymlinksInPath().path
+        )
+
+        let unavailableActions = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            bundleURL: bundle,
+            controlSocketPath: "/tmp/workbench-control.sock",
+            controlSocketCapability: "capability-token",
+            controlSocketReady: false,
+            sourceFilePath: sourceFilePath,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(unavailableActions["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == nil)
+        #expect(unavailableActions["CMUX_SOCKET_CAPABILITY"] == nil)
+
+        try fileManager.removeItem(at: bun)
+        try fileManager.removeItem(at: olderBun)
+        let missingBun = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            bundleURL: bundle,
+            controlSocketPath: "/tmp/workbench-control.sock",
+            controlSocketCapability: "capability-token",
+            controlSocketReady: true,
+            sourceFilePath: sourceFilePath,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(missingBun["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == nil)
+        #expect(missingBun["CMUX_SOCKET_CAPABILITY"] == nil)
 
         try fileManager.removeItem(at: legacyDirectory.appendingPathComponent("workspace-state.json"))
         let ouroboros = bundles.appendingPathComponent("ouroboros.ouro", isDirectory: true)

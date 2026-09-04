@@ -240,6 +240,12 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
     typealias TurnRunner = @Sendable (_ requestId: String, _ prompt: String, _ cwd: String) async throws -> String
     typealias EvidenceProvider = @Sendable (WorkbenchSupervisionEnvelope) -> WorkbenchSupervisionEvidence?
     typealias RecoveryProvider = @Sendable () -> [[String: Any]]
+    typealias DispositionHandler = @Sendable (
+        _ receiptId: UUID,
+        _ envelope: WorkbenchSupervisionEnvelope,
+        _ result: WorkbenchSupervisionDispositionResult,
+        _ policy: WorkbenchSupervisionPolicy
+    ) async -> Bool
 
     static let receiptDefaultsKey = "workbench.supervision.receipts.v1"
     static let cursorDefaultsKey = "workbench.supervision.cursor.v1"
@@ -446,6 +452,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
     private let runTurn: TurnRunner
     private let evidenceProvider: EvidenceProvider
     private let recoveryProvider: RecoveryProvider
+    private let dispositionHandler: DispositionHandler
     private let clock: @Sendable () -> Date
     private let stateLock = NSLock()
     private var subscription: CmuxEventSubscription?
@@ -460,6 +467,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         clock: @escaping @Sendable () -> Date = { Date() },
         evidenceProvider: @escaping EvidenceProvider = { _ in nil },
         recoveryProvider: @escaping RecoveryProvider = { [] },
+        dispositionHandler: @escaping DispositionHandler = { _, _, _, _ in true },
         runTurn: @escaping TurnRunner
     ) {
         self.bus = bus
@@ -467,6 +475,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         self.clock = clock
         self.evidenceProvider = evidenceProvider
         self.recoveryProvider = recoveryProvider
+        self.dispositionHandler = dispositionHandler
         self.runTurn = runTurn
         var receipts = Self.loadReceipts(defaults: defaults)
         var changed = false
@@ -609,6 +618,24 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
                 envelope.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
             )
             if let result = WorkbenchSupervisionDispositionResult.parse(response) {
+                if result.disposition == .ariAttention, result.summary == nil {
+                    updateReceipt(
+                        id: receiptId,
+                        status: .invalid,
+                        disposition: .hold,
+                        reasonCode: "boss_attention_summary_missing"
+                    )
+                    return true
+                }
+                guard await dispositionHandler(receiptId, envelope, result, policy) else {
+                    updateReceipt(
+                        id: receiptId,
+                        status: .failed,
+                        disposition: .hold,
+                        reasonCode: "boss_disposition_route_failed"
+                    )
+                    return true
+                }
                 updateReceipt(
                     id: receiptId,
                     status: .completed,
@@ -990,7 +1017,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         encoder.outputFormatting = [.sortedKeys]
         let payload = (try? encoder.encode(envelope)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return """
-        You are the Ouro Workbench Boss supervising one local worker observation. This pass is isolated and observe-only. Do not call tools, send input, approve, stop, resume, or mutate anything. Return exactly one JSON object with disposition equal to no_action, ari_attention, or hold, plus optional summary and reason strings. Use ari_attention only when the supplied evidence proves Ari must decide; use hold when evidence or authority is insufficient. Policy version: \(policy.version). Autonomy mode: \(policy.autonomyMode.rawValue). Notification mode: \(policy.notificationMode.rawValue). Human mutation mode: \(policy.humanMutationMode.rawValue). Observation: \(payload)
+        You are the Ouro Workbench Boss supervising one local worker observation. This pass is isolated and observe-only. Do not call tools, send input, approve, stop, resume, or mutate anything. Return exactly one JSON object with disposition equal to no_action, ari_attention, or hold, plus optional summary and reason strings. Use ari_attention only when the supplied evidence proves Ari must decide, and include a concise summary whenever you use it; use hold when evidence or authority is insufficient. Policy version: \(policy.version). Autonomy mode: \(policy.autonomyMode.rawValue). Notification mode: \(policy.notificationMode.rawValue). Human mutation mode: \(policy.humanMutationMode.rawValue). Observation: \(payload)
         """
     }
 
