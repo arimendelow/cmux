@@ -9,6 +9,8 @@ struct AgentChatActionInFlightGate {
         var isRunning = false
         var ownedServerSession: AgentChatOwnedServerSession?
         var sidecarStateFileStore = AgentChatSidecarStateFileStore.live()
+        var bossPanelOwnerWindowId: UUID?
+        var bossPanelId: UUID?
     }
 
     private nonisolated static let lock = OSAllocatedUnfairLock(initialState: State())
@@ -49,6 +51,30 @@ struct AgentChatActionInFlightGate {
     static func sidecarStateFileStore() -> AgentChatSidecarStateFileStore? {
         lock.withLock { state in
             state.sidecarStateFileStore
+        }
+    }
+
+    static func bossPanelLocation() -> (ownerWindowId: UUID, panelId: UUID)? {
+        lock.withLock { state in
+            guard let ownerWindowId = state.bossPanelOwnerWindowId,
+                  let panelId = state.bossPanelId else {
+                return nil
+            }
+            return (ownerWindowId, panelId)
+        }
+    }
+
+    static func updateBossPanel(ownerWindowId: UUID, panelId: UUID) {
+        lock.withLock { state in
+            state.bossPanelOwnerWindowId = ownerWindowId
+            state.bossPanelId = panelId
+        }
+    }
+
+    static func clearBossPanel() {
+        lock.withLock { state in
+            state.bossPanelOwnerWindowId = nil
+            state.bossPanelId = nil
         }
     }
 
@@ -223,10 +249,16 @@ extension AppDelegate {
                 )
                 return
             }
-            guard let workspace = self.openAgentChatWorkspace(
-                tabManager: tabManager,
-                url: browserURL
-            ) else {
+            let workspace: Workspace?
+            let didOpen: Bool
+            if OuroWorkbenchProduct.isCurrentBundle {
+                didOpen = self.openWorkbenchBossPanel(tabManager: tabManager, url: browserURL) != nil
+                workspace = tabManager.selectedWorkspace
+            } else {
+                workspace = self.openAgentChatWorkspace(tabManager: tabManager, url: browserURL)
+                didOpen = workspace != nil
+            }
+            guard didOpen else {
                 NSSound.beep()
                 return
             }
@@ -303,6 +335,123 @@ extension AppDelegate {
             browserPanel?.setOmnibarVisible(false)
         }
         return workspace
+    }
+
+    @discardableResult
+    func openWorkbenchBossPanelForTesting(
+        tabManager: TabManager,
+        url: URL
+    ) -> UUID? {
+        openWorkbenchBossPanel(tabManager: tabManager, url: url)
+    }
+
+    func clearWorkbenchBossPaneForTesting() {
+        AgentChatActionInFlightGate.clearBossPanel()
+    }
+
+    @discardableResult
+    func rehomeWorkbenchBossPanelForTesting(closingWindowId: UUID) -> Bool {
+        guard let context = mainWindowContexts.values.first(where: { $0.windowId == closingWindowId }) else {
+            return false
+        }
+        return rehomeWorkbenchBossPanelIfNeeded(from: context)
+    }
+
+    func workbenchBossPanelID(in dock: DockSplitStore) -> UUID? {
+        guard OuroWorkbenchProduct.isCurrentBundle,
+              let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              location.ownerWindowId == dock.workspaceId,
+              dock.containsPanel(location.panelId) else {
+            return nil
+        }
+        return location.panelId
+    }
+
+    func workbenchBossPanelID(for tabManager: TabManager) -> UUID? {
+        guard let dock = existingWindowDock(for: tabManager) else { return nil }
+        return workbenchBossPanelID(in: dock)
+    }
+
+    @discardableResult
+    func rehomeWorkbenchBossPanelIfNeeded(from closingContext: MainWindowContext) -> Bool {
+        guard !isTerminatingApp,
+              let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              location.ownerWindowId == closingContext.windowId,
+              let sourceDock = closingContext.existingWindowDock(),
+              let sourcePane = sourceDock.paneId(forPanelId: location.panelId),
+              let detached = sourceDock.detachSurface(panelId: location.panelId) else {
+            return false
+        }
+        guard let destination = mainWindowContexts.values.first(where: {
+            $0 !== closingContext && $0.fileExplorerState != nil
+        }) else {
+            _ = sourceDock.attachDetachedSurface(detached, inPane: sourcePane, focus: false)
+            AgentChatActionInFlightGate.clearBossPanel()
+            return false
+        }
+        let destinationDock = destination.windowDockStore()
+        guard let pane = destinationDock.resolvePane(requestedPaneID: nil),
+              destinationDock.attachDetachedSurface(detached, inPane: pane, focus: true) != nil else {
+            _ = sourceDock.attachDetachedSurface(detached, inPane: sourcePane, focus: false)
+            return false
+        }
+        AgentChatActionInFlightGate.updateBossPanel(
+            ownerWindowId: destination.windowId,
+            panelId: location.panelId
+        )
+        revealWorkbenchBossPanel(in: destination, dock: destinationDock, panelId: location.panelId)
+        return true
+    }
+
+    @discardableResult
+    private func openWorkbenchBossPanel(
+        tabManager: TabManager,
+        url: URL
+    ) -> UUID? {
+        if let location = AgentChatActionInFlightGate.bossPanelLocation() {
+            if let owner = mainWindowContexts.values.first(where: { $0.windowId == location.ownerWindowId }),
+               let dock = owner.existingWindowDock(),
+               let panel = dock.browserPanel(for: location.panelId) {
+                panel.setOmnibarVisible(false)
+                panel.navigateSmart(url.absoluteString)
+                revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                return location.panelId
+            }
+            AgentChatActionInFlightGate.clearBossPanel()
+        }
+        guard let context = mainWindowContext(for: tabManager),
+              let sidebar = context.fileExplorerState else {
+            return nil
+        }
+        let dock = context.windowDockStore()
+        guard let pane = dock.resolvePane(requestedPaneID: nil),
+              let panelId = dock.newSurface(
+                kind: .browser,
+                inPane: pane,
+                url: url,
+                focus: true,
+                allowsExternalBrowserFallback: false
+              ),
+              let panel = dock.browserPanel(for: panelId) else {
+            return nil
+        }
+        panel.setOmnibarVisible(false)
+        AgentChatActionInFlightGate.updateBossPanel(ownerWindowId: context.windowId, panelId: panelId)
+        sidebar.mode = .dock
+        sidebar.setVisible(true)
+        revealWorkbenchBossPanel(in: context, dock: dock, panelId: panelId)
+        return panelId
+    }
+
+    private func revealWorkbenchBossPanel(
+        in context: MainWindowContext,
+        dock: DockSplitStore,
+        panelId: UUID
+    ) {
+        context.fileExplorerState?.mode = .dock
+        context.fileExplorerState?.setVisible(true)
+        dock.focusPanel(panelId)
+        context.window?.makeKeyAndOrderFront(nil)
     }
 
 

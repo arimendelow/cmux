@@ -489,6 +489,7 @@ enum RightSidebarBetaFeatureSettings {
     }
 
     nonisolated static func isDockEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if OuroWorkbenchProduct.isCurrentBundle { return true }
         guard defaults.object(forKey: dockEnabledKey) != nil else { return defaultDockEnabled }
         return defaults.bool(forKey: dockEnabledKey)
     }

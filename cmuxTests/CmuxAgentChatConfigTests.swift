@@ -690,4 +690,64 @@ struct CmuxAgentChatConfigTests {
             }
         }
     }
+
+    @MainActor
+    @Test func workbenchBossUsesOneWindowDockPanelAndRehomesIt() throws {
+        let defaults = UserDefaults.standard
+        let previousDock = defaults.object(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let previousAppDelegate = AppDelegate.shared
+        defaults.set(true, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let app = AppDelegate()
+        AppDelegate.shared = app
+        let firstManager = TabManager()
+        let secondManager = TabManager()
+        let firstSidebar = FileExplorerState()
+        let secondSidebar = FileExplorerState()
+        let firstWindowID = app.registerMainWindowContextForTesting(
+            tabManager: firstManager,
+            fileExplorerState: firstSidebar
+        )
+        let secondWindowID = app.registerMainWindowContextForTesting(
+            tabManager: secondManager,
+            fileExplorerState: secondSidebar
+        )
+        defer {
+            app.clearWorkbenchBossPaneForTesting()
+            app.unregisterMainWindowContextForTesting(windowId: firstWindowID)
+            app.unregisterMainWindowContextForTesting(windowId: secondWindowID)
+            AppDelegate.shared = previousAppDelegate
+            if let previousDock {
+                defaults.set(previousDock, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            } else {
+                defaults.removeObject(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            }
+        }
+        let firstWorkspaceCount = firstManager.tabs.count
+        let secondWorkspaceCount = secondManager.tabs.count
+        let firstURL = try #require(URL(string: "http://127.0.0.1:7739/token/"))
+        let secondURL = try #require(URL(string: "http://127.0.0.1:7740/token/"))
+
+        let panelID = try #require(app.openWorkbenchBossPanelForTesting(
+            tabManager: firstManager,
+            url: firstURL
+        ))
+        #expect(firstManager.tabs.count == firstWorkspaceCount)
+        #expect(firstSidebar.isVisible)
+        #expect(firstSidebar.mode == .dock)
+        #expect(app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
+
+        let reusedID = try #require(app.openWorkbenchBossPanelForTesting(
+            tabManager: secondManager,
+            url: secondURL
+        ))
+        #expect(reusedID == panelID)
+        #expect(secondManager.tabs.count == secondWorkspaceCount)
+        #expect(app.existingWindowDock(forWindowId: secondWindowID) == nil)
+
+        #expect(app.rehomeWorkbenchBossPanelForTesting(closingWindowId: firstWindowID))
+        #expect(!app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
+        #expect(app.windowDock(forWindowId: secondWindowID).containsPanel(panelID))
+        #expect(secondSidebar.isVisible)
+        #expect(secondSidebar.mode == .dock)
+    }
 }

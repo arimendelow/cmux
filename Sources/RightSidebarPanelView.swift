@@ -145,7 +145,10 @@ struct RightSidebarPanelView: View {
     }
 
     private var availableModes: [RightSidebarMode] {
-        RightSidebarMode.availableModes(feedEnabled: feedEnabled, dockEnabled: dockEnabled)
+        RightSidebarMode.availableModes(
+            feedEnabled: feedEnabled,
+            dockEnabled: dockEnabled || OuroWorkbenchProduct.isCurrentBundle
+        )
     }
 
     private var modeBarItems: [RightSidebarModeBarItem] {
@@ -173,10 +176,15 @@ struct RightSidebarPanelView: View {
     }
 
     var body: some View {
+        let bossPanelId = fileExplorerState.mode == .dock
+            ? AppDelegate.shared?.workbenchBossPanelID(for: tabManager)
+            : nil
         VStack(spacing: 0) {
-            modeBar
-                .rightSidebarChromeBottomBorder()
-            contentForMode
+            if bossPanelId == nil {
+                modeBar
+                    .rightSidebarChromeBottomBorder()
+            }
+            contentForMode(workbenchBossPanelId: bossPanelId)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .shortcutHintVisibilityAnimation(value: focusShortcutHintAnimationValue)
@@ -375,34 +383,52 @@ struct RightSidebarPanelView: View {
     }
 
     @ViewBuilder
-    private var contentForMode: some View {
+    private func contentForMode(workbenchBossPanelId: UUID?) -> some View {
         if RightSidebarContentMountPolicy.shouldMountContent(isRightSidebarVisible: fileExplorerState.isVisible, hasMountedContent: hasMountedRightSidebarContent) {
-            switch fileExplorerState.mode {
-            case .files:
-                FileExplorerPanelView(
-                    store: fileExplorerStore,
-                    state: fileExplorerState,
-                    onOpenFilePreview: onOpenFilePreview,
-                    presentation: .files
+            if let workbenchBossPanelId,
+               let app = AppDelegate.shared,
+               let dock = app.windowDock(for: tabManager),
+               let panel = dock.browserPanel(for: workbenchBossPanelId),
+               let tabID = dock.surfaceId(forPanelId: workbenchBossPanelId),
+               let paneID = dock.paneId(forPanelId: workbenchBossPanelId) {
+                DockPanelView(
+                    store: dock,
+                    isSidebarVisible: fileExplorerState.isVisible,
+                    mode: fileExplorerState.mode,
+                    rootDirectory: nil,
+                    windowAppearance: windowAppearance,
+                    rightSidebarOwnsInputFocus: fileExplorerState.rightSidebarOwnsInputFocus,
+                    unreadSource: TerminalNotificationStore.shared.sidebarUnread,
+                    chromeLessPanel: (panel, tabID, paneID)
                 )
-            case .find:
-                FileExplorerPanelView(
-                    store: fileExplorerStore,
-                    state: fileExplorerState,
-                    onOpenFilePreview: onOpenFilePreview,
-                    presentation: .find
-                )
-            case .sessions:
-                SessionIndexView(store: sessionIndexStore, onResume: onResumeSession)
-                    .onAppear {
-                        sessionIndexStore.setCurrentDirectoryIfChanged(sessionIndexDirectory)
-                    }
-            case .feed:
-                FeedPanelView()
-            case .dock:
-                dockPanel(windowAppearance: windowAppearance)
-            case .customSidebar:
-                EmptyView()
+            } else {
+                switch fileExplorerState.mode {
+                case .files:
+                    FileExplorerPanelView(
+                        store: fileExplorerStore,
+                        state: fileExplorerState,
+                        onOpenFilePreview: onOpenFilePreview,
+                        presentation: .files
+                    )
+                case .find:
+                    FileExplorerPanelView(
+                        store: fileExplorerStore,
+                        state: fileExplorerState,
+                        onOpenFilePreview: onOpenFilePreview,
+                        presentation: .find
+                    )
+                case .sessions:
+                    SessionIndexView(store: sessionIndexStore, onResume: onResumeSession)
+                        .onAppear {
+                            sessionIndexStore.setCurrentDirectoryIfChanged(sessionIndexDirectory)
+                        }
+                case .feed:
+                    FeedPanelView()
+                case .dock:
+                    dockPanel(windowAppearance: windowAppearance)
+                case .customSidebar:
+                    EmptyView()
+                }
             }
         } else {
             Color.clear

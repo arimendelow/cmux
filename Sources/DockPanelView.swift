@@ -19,6 +19,7 @@ struct DockPanelView: View {
     /// dims its focus ring when false so Dock and main-pane focus are mutually
     /// exclusive (the main pane dims its ring when this is true).
     var rightSidebarOwnsInputFocus: Bool = false
+    var chromeLessPanel: (panel: any Panel, tabID: TabID, paneID: PaneID)?
 
     @State private var appearanceConfig = WorkspaceContentView.resolveGhosttyAppearanceConfig(reason: "dock.initial")
     @State private var appearanceRevision: UInt = 0
@@ -33,7 +34,8 @@ struct DockPanelView: View {
         rootDirectory: String?,
         windowAppearance: WindowAppearanceSnapshot,
         rightSidebarOwnsInputFocus: Bool = false,
-        unreadSource: SidebarUnreadModel
+        unreadSource: SidebarUnreadModel,
+        chromeLessPanel: (panel: any Panel, tabID: TabID, paneID: PaneID)? = nil
     ) {
         self.store = store
         self.isSidebarVisible = isSidebarVisible
@@ -41,6 +43,7 @@ struct DockPanelView: View {
         self.rootDirectory = rootDirectory
         self.windowAppearance = windowAppearance
         self.rightSidebarOwnsInputFocus = rightSidebarOwnsInputFocus
+        self.chromeLessPanel = chromeLessPanel
         _unreadProjection = State(initialValue: DockUnreadPanelProjection(
             source: unreadSource,
             workspaceID: store.workspaceId,
@@ -111,6 +114,19 @@ struct DockPanelView: View {
             }
         } else if let error = store.errorMessage {
             DockErrorView(message: error)
+        } else if let chromeLessPanel {
+            DockSplitPanelContentView(
+                store: store,
+                panel: chromeLessPanel.panel,
+                tabID: chromeLessPanel.tabID,
+                paneID: chromeLessPanel.paneID,
+                appearance: appearance,
+                appearanceRevision: appearanceRevision,
+                windowAppearance: windowAppearance,
+                rightSidebarOwnsInputFocus: rightSidebarOwnsInputFocus,
+                hasUnreadNotification: unreadProjection.unreadPanelIDs.contains(chromeLessPanel.panel.id)
+            )
+            .equatable()
         } else {
             DockSplitContentView(
                 store: store,
