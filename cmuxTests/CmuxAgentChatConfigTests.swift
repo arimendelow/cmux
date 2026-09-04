@@ -73,6 +73,36 @@ struct CmuxAgentChatConfigTests {
         )
         #expect(stockExplicit.startCommand == nil)
         #expect(stockExplicit.serverMode == .explicitURL)
+
+        let stockLocalWithoutPath = CmuxAgentChatConfiguration.resolved(
+            local: CmuxAgentChatConfigDefinition(startCommand: "cmux-chat"),
+            global: nil,
+            localSourcePath: nil,
+            globalSourcePath: nil,
+            productDefaultStartCommand: command,
+            productDefaultIsAuthoritative: false
+        )
+        #expect(stockLocalWithoutPath.source == .defaults)
+
+        let stockGlobalWithoutPath = CmuxAgentChatConfiguration.resolved(
+            local: nil,
+            global: CmuxAgentChatConfigDefinition(startCommand: "cmux-chat"),
+            localSourcePath: nil,
+            globalSourcePath: nil,
+            productDefaultStartCommand: command,
+            productDefaultIsAuthoritative: false
+        )
+        #expect(stockGlobalWithoutPath.source == .defaults)
+
+        let stockInvalidDirectURL = CmuxAgentChatConfiguration.resolved(
+            local: CmuxAgentChatConfigDefinition(url: "http://["),
+            global: nil,
+            localSourcePath: nil,
+            globalSourcePath: nil,
+            productDefaultStartCommand: command,
+            productDefaultIsAuthoritative: false
+        )
+        #expect(stockInvalidDirectURL.url == CmuxAgentChatConfiguration.default.url)
     }
 
     @MainActor

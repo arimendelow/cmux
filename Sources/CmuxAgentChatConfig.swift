@@ -143,14 +143,24 @@ struct CmuxAgentChatConfiguration: Sendable, Hashable {
         global: CmuxAgentChatConfigDefinition?,
         localSourcePath: String?,
         globalSourcePath: String?,
-        productDefaultStartCommand: String? = OuroWorkbenchProduct.currentAgentChatStartCommand
+        productDefaultStartCommand: String? = OuroWorkbenchProduct.currentAgentChatStartCommand,
+        productDefaultIsAuthoritative: Bool = OuroWorkbenchProduct.isCurrentBundle
     ) -> CmuxAgentChatConfiguration {
+        if productDefaultIsAuthoritative, let productDefaultStartCommand {
+            return CmuxAgentChatConfiguration(
+                url: Self.default.url,
+                startCommand: productDefaultStartCommand,
+                source: .defaults,
+                hasExplicitURL: false
+            )
+        }
+
         let definition: CmuxAgentChatConfigDefinition?
         let source: CmuxAgentChatConfigurationSource
         if let local, local.hasServerFields {
             definition = local
             source = localSourcePath.map { .local(path: $0) } ?? .defaults
-        } else if let global {
+        } else if let global, global.hasServerFields {
             definition = global
             source = globalSourcePath.map { .global(path: $0) } ?? .defaults
         } else {

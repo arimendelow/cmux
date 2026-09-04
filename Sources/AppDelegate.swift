@@ -1229,7 +1229,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         )
         super.init(); Self.shared = self
-        mainThreadHangWatchdog.start()
+        if OuroWorkbenchProduct.shouldStartMainThreadHangWatchdog(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) {
+            mainThreadHangWatchdog.start()
+        }
         AgentChatThemeSync.start()
         // Inverts the surface registry's legacy AppDelegate.shared reach-up:
         // the registry asks this delegate (via MainWindowRouteRetiring) to
@@ -1422,9 +1426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
 #if DEBUG
         writeUITestDiagnosticsIfNeeded(stage: "didFinishLaunching")
-        if !OuroWorkbenchProduct.isCurrentBundle {
-            CmuxMainRunLoopStallMonitor.shared.installIfNeeded()
-        }
+        CmuxMainRunLoopStallMonitor.shared.installIfNeeded()
         CmuxMainThreadTurnProfiler.shared.installIfNeeded()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.writeUITestDiagnosticsIfNeeded(stage: "after1s")

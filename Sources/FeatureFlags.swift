@@ -16,6 +16,10 @@ enum OuroWorkbenchProduct {
         isWorkbenchBundleIdentifier(Bundle.main.bundleIdentifier)
     }
 
+    static func shouldStartMainThreadHangWatchdog(bundleIdentifier: String?) -> Bool {
+        !isWorkbenchBundleIdentifier(bundleIdentifier)
+    }
+
     static func agentChatUIEnabled(
         bundleIdentifier: String?,
         upstreamValue: Bool
