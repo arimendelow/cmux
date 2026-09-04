@@ -20,6 +20,8 @@ struct CmuxAgentChatConfigTests {
         #expect(OuroWorkbenchProduct.agentChatActionTitle(bundleIdentifier: bundleIdentifier) == "Open Boss")
         #expect(OuroWorkbenchProduct.agentChatSurfaceTitle(bundleIdentifier: bundleIdentifier) == "Boss")
         #expect(OuroWorkbenchProduct.agentChatSubtitle(bundleIdentifier: bundleIdentifier) == "Workbench boss")
+        #expect(!OuroWorkbenchProduct.shouldStartMainThreadHangWatchdog(bundleIdentifier: bundleIdentifier))
+        #expect(OuroWorkbenchProduct.shouldStartMainThreadHangWatchdog(bundleIdentifier: "com.manaflow.cmux"))
         let command = OuroWorkbenchProduct.agentChatStartCommand(
             bundleIdentifier: bundleIdentifier,
             sourceFilePath: #filePath
@@ -40,15 +42,37 @@ struct CmuxAgentChatConfigTests {
         #expect(resolved.startCommand == command)
         #expect(resolved.serverMode == .appOwned)
 
-        let explicit = CmuxAgentChatConfiguration.resolved(
+        let emptyGlobal = CmuxAgentChatConfiguration.resolved(
+            local: nil,
+            global: CmuxAgentChatConfigDefinition(),
+            localSourcePath: nil,
+            globalSourcePath: "/Users/me/.config/cmux/cmux.json",
+            productDefaultStartCommand: command
+        )
+        #expect(emptyGlobal.startCommand == command)
+        #expect(emptyGlobal.serverMode == .appOwned)
+
+        let productExplicit = CmuxAgentChatConfiguration.resolved(
             local: CmuxAgentChatConfigDefinition(url: "http://127.0.0.1:9000"),
             global: nil,
             localSourcePath: "/repo/cmux.json",
             globalSourcePath: nil,
-            productDefaultStartCommand: command
+            productDefaultStartCommand: command,
+            productDefaultIsAuthoritative: true
         )
-        #expect(explicit.startCommand == nil)
-        #expect(explicit.serverMode == .explicitURL)
+        #expect(productExplicit.startCommand == command)
+        #expect(productExplicit.serverMode == .appOwned)
+
+        let stockExplicit = CmuxAgentChatConfiguration.resolved(
+            local: CmuxAgentChatConfigDefinition(url: "http://127.0.0.1:9000"),
+            global: nil,
+            localSourcePath: "/repo/cmux.json",
+            globalSourcePath: nil,
+            productDefaultStartCommand: command,
+            productDefaultIsAuthoritative: false
+        )
+        #expect(stockExplicit.startCommand == nil)
+        #expect(stockExplicit.serverMode == .explicitURL)
     }
 
     @MainActor
