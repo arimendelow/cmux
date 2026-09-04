@@ -54,6 +54,8 @@ test("ACP stop cancels an active turn and a later prompt still succeeds", async 
     adapter.stop(session);
     await first;
     expect((await readFile(log, "utf8")).trim().split(/\n+/)).toContain("session/cancel");
+    expect(session.events).toContainEqual({ kind: "status", text: "Stopped" });
+    expect(session.events).not.toContainEqual(expect.objectContaining({ kind: "done", stats: "stop: cancelled" }));
     expect(session.status).toBe("idle");
     await adapter.send(session, "later prompt");
     expect(session.events).toContainEqual({ kind: "delta", text: "OK" });

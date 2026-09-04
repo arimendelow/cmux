@@ -37,7 +37,12 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
             sessionId: st.acpSessionId,
             prompt: [{ type: "text", text: prompt }],
           });
-          sess.emit({ kind: "done", stats: res?.stopReason ? `stop: ${res.stopReason}` : undefined, generation } as any);
+          if (res?.stopReason === "cancelled") sess.emit({ kind: "status", text: "Stopped" });
+          sess.emit({
+            kind: "done",
+            stats: res?.stopReason && res.stopReason !== "cancelled" ? `stop: ${res.stopReason}` : undefined,
+            generation,
+          } as any);
         } catch (err) {
           if (/\bcancelled\b/i.test(String(err instanceof Error ? err.message : err))) {
             sess.emit({ kind: "status", text: "Stopped" });
