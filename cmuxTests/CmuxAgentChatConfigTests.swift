@@ -470,6 +470,45 @@ struct CmuxAgentChatConfigTests {
         #expect(store.stateFileURL(launchId: "launch-b").lastPathComponent == "state-launch-b.json")
     }
 
+    @Test func agentChatStateFileWaitPropagatesCancellation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "cmux-agent-chat-cancel-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentChatSidecarStateFileStore(
+            directoryURL: root,
+            fileSystem: AgentChatSidecarFileSystem()
+        )
+        let waiting = Task {
+            await store.waitForSession(
+                token: "token",
+                launchId: "launch",
+                launchDate: Date()
+            )
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        waiting.cancel()
+        let clock = ContinuousClock()
+        let started = clock.now
+        #expect(await waiting.value == nil)
+        #expect(started.duration(to: clock.now) < .seconds(1))
+    }
+
+    @Test func agentChatPendingServerProcessIsTerminatedAndCleared() async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        #expect(AgentChatActionInFlightGate.registerPendingServerProcess(process))
+        #expect(AgentChatActionInFlightGate.hasOwnedServerWork())
+
+        await AgentChatActionInFlightGate.stopPendingServerProcess(matching: process)
+
+        #expect(!process.isRunning)
+        #expect(!AgentChatActionInFlightGate.hasOwnedServerWork())
+    }
+
     @Test func agentChatStateFileStoreSweepsPatternedStaleFiles() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(

@@ -1,5 +1,6 @@
 import AppKit
 import CMUXAgentLaunch
+import Darwin
 import Foundation
 import os
 import Security
@@ -8,6 +9,7 @@ struct AgentChatActionInFlightGate {
     private struct State {
         var isRunning = false
         var ownedServerSession: AgentChatOwnedServerSession?
+        var pendingServerProcess: Process?
         var sidecarStateFileStore = AgentChatSidecarStateFileStore.live()
         var bossPanelOwnerWindowId: UUID?
         var bossPanelId: UUID?
@@ -29,6 +31,14 @@ struct AgentChatActionInFlightGate {
         }
     }
 
+    static func beginWhenAvailable() async throws {
+        while true {
+            try Task.checkCancellation()
+            if begin() { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
     static func ownedServerSession() -> AgentChatOwnedServerSession? {
         lock.withLock { state in
             state.ownedServerSession
@@ -45,6 +55,52 @@ struct AgentChatActionInFlightGate {
         lock.withLock { state in
             if let candidate, state.ownedServerSession != candidate { return }
             state.ownedServerSession = nil
+        }
+    }
+
+    static func registerPendingServerProcess(_ process: Process) -> Bool {
+        lock.withLock { state in
+            guard state.pendingServerProcess?.isRunning != true else { return false }
+            state.pendingServerProcess = process
+            return true
+        }
+    }
+
+    static func clearPendingServerProcess(matching candidate: Process? = nil) {
+        lock.withLock { state in
+            if let candidate, state.pendingServerProcess !== candidate { return }
+            state.pendingServerProcess = nil
+        }
+    }
+
+    static func hasOwnedServerWork() -> Bool {
+        lock.withLock {
+            $0.ownedServerSession != nil || $0.pendingServerProcess?.isRunning == true
+        }
+    }
+
+    static func stopPendingServerProcess(matching candidate: Process? = nil) async {
+        let pending = lock.withLock { state -> Process? in
+            guard let pending = state.pendingServerProcess else { return nil }
+            if let candidate, pending !== candidate { return nil }
+            state.pendingServerProcess = nil
+            return pending
+        }
+        guard let pending else { return }
+        if pending.isRunning {
+            pending.terminate()
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(1))
+            while pending.isRunning, clock.now < deadline {
+                try? await clock.sleep(for: .milliseconds(50))
+            }
+            if pending.isRunning {
+                kill(pending.processIdentifier, SIGKILL)
+                let killDeadline = clock.now.advanced(by: .seconds(1))
+                while pending.isRunning, clock.now < killDeadline {
+                    try? await clock.sleep(for: .milliseconds(50))
+                }
+            }
         }
     }
 
@@ -79,6 +135,7 @@ struct AgentChatActionInFlightGate {
     }
 
     static func stopOwnedServer() async -> Bool {
+        await stopPendingServerProcess()
         guard let session = ownedServerSession() else { return true }
         var request = URLRequest(url: session.shutdownURL)
         request.httpMethod = "POST"
@@ -138,6 +195,161 @@ struct AgentChatServerAvailability: Sendable {
 }
 
 extension AppDelegate {
+    func startWorkbenchLocalSupervisionIfNeeded() {
+        guard OuroWorkbenchProduct.isCurrentBundle,
+              workbenchLocalSupervisionCoordinator == nil else {
+            return
+        }
+        let coordinator = WorkbenchLocalSupervisionCoordinator(
+            evidenceProvider: Self.workbenchSupervisionEvidence(for:),
+            recoveryProvider: Self.workbenchSupervisionRecoveryEvents,
+            runTurn: { [weak self] requestId, prompt, cwd in
+                guard let self else { throw CancellationError() }
+                return try await self.runWorkbenchHeadlessBossTurn(
+                    requestId: requestId,
+                    prompt: prompt,
+                    cwd: cwd
+                )
+            }
+        )
+        workbenchLocalSupervisionCoordinator = coordinator
+        coordinator.start()
+    }
+
+    func stopWorkbenchLocalSupervision() {
+        workbenchSupervisionShutdownTask = workbenchLocalSupervisionCoordinator?.stop()
+        workbenchLocalSupervisionCoordinator = nil
+    }
+
+    private func runWorkbenchHeadlessBossTurn(
+        requestId: String,
+        prompt: String,
+        cwd: String
+    ) async throws -> String {
+        guard OuroWorkbenchProduct.isCurrentBundle,
+              !isTerminatingApp,
+              let context = mainWindowContexts.values.first(where: {
+                  $0.cmuxConfigStore?.agentChat.startCommand != nil
+              }) else {
+            throw WorkbenchLocalSupervisionCoordinator.AgentChatHeadlessTurnError.provider(
+                "Workbench Boss runtime is unavailable"
+            )
+        }
+        try await AgentChatActionInFlightGate.beginWhenAvailable()
+        defer { AgentChatActionInFlightGate.end() }
+        try Task.checkCancellation()
+        guard !isTerminatingApp else { throw CancellationError() }
+        let agentChat = context.cmuxConfigStore?.agentChat ?? .default
+        let availability = await ensureAgentChatServerAvailable(
+            agentChat,
+            globalConfigPath: context.cmuxConfigStore?.globalConfigPath,
+            preferredWindow: resolvedWindow(for: context)
+        )
+        guard availability.isReachable,
+              !isTerminatingApp,
+              let ownedSession = AgentChatActionInFlightGate.ownedServerSession() else {
+            throw WorkbenchLocalSupervisionCoordinator.AgentChatHeadlessTurnError.provider(
+                "Workbench Boss runtime is unavailable"
+            )
+        }
+        return try await WorkbenchLocalSupervisionCoordinator.AgentChatHeadlessTurnClient(
+            ownedSession: ownedSession
+        ).run(
+            requestId: requestId,
+            prompt: prompt,
+            cwd: cwd
+        )
+    }
+
+    nonisolated private static func workbenchSupervisionEvidence(
+        for envelope: WorkbenchSupervisionEnvelope
+    ) -> WorkbenchSupervisionEvidence? {
+        let item = FeedCoordinator.shared.snapshot(pendingOnly: false).reversed().first { item in
+            guard item.source.rawValue == envelope.source,
+                  item.workstreamId == envelope.sessionId else {
+                return false
+            }
+            if let sourceEventId = envelope.sourceEventId,
+               item.sourceEventId != sourceEventId {
+                return false
+            }
+            if let sourceRevision = envelope.sourceRevision,
+               item.sourceRevision != sourceRevision {
+                return false
+            }
+            if let causalChainId = envelope.causalChainId,
+               item.causalChainId != causalChainId {
+                return false
+            }
+            return true
+        }
+        guard let context = item?.context else { return nil }
+        return WorkbenchSupervisionEvidence(
+            lastUserMessage: context.lastUserMessage.map { String($0.prefix(1_000)) },
+            assistantMessage: context.assistantPreamble.map { String($0.prefix(1_000)) }
+        )
+    }
+
+    nonisolated private static func workbenchSupervisionRecoveryEvents() -> [[String: Any]] {
+        var events: [[String: Any]] = []
+        for item in FeedCoordinator.shared.snapshot(pendingOnly: false).reversed() {
+            let hookName: String
+            switch item.kind {
+            case .stop:
+                hookName = "agent.hook.Stop"
+            case .question:
+                hookName = "agent.hook.AskUserQuestion"
+            case .permissionRequest:
+                hookName = "agent.hook.PermissionRequest"
+            case .sessionEnd:
+                hookName = "agent.hook.SessionEnd"
+            case .toolResult:
+                guard case .toolResult(_, _, let isError) = item.payload, isError else { continue }
+                hookName = "agent.hook.Notification"
+            default:
+                continue
+            }
+            let source = item.source.rawValue
+            let prefix = "\(source)-"
+            guard item.workstreamId.hasPrefix(prefix) else { continue }
+            let sourceSessionId = String(item.workstreamId.dropFirst(prefix.count))
+            guard let target = FeedJumpResolver.lookup(agent: source, sessionId: sourceSessionId) else {
+                continue
+            }
+            let eventId = "recovery:\(item.id.uuidString)"
+            events.append(
+                [
+                    "name": hookName,
+                    "id": eventId,
+                    "seq": Int64(0),
+                    "boot_id": "recovery",
+                    "source": source,
+                    "occurred_at": ISO8601DateFormatter().string(from: item.updatedAt),
+                    "workspace_id": target.workspaceId,
+                    "surface_id": target.surfaceId,
+                    "payload": [
+                        "session_id": item.workstreamId,
+                        "workspace_id": target.workspaceId,
+                        "surface_id": target.surfaceId,
+                        "cwd": item.cwd ?? NSNull(),
+                        "tool_name": item.title ?? NSNull(),
+                        "is_error": {
+                            if case .toolResult(_, _, let isError) = item.payload { return isError }
+                            return false
+                        }(),
+                        "_source_event_id": item.sourceEventId ?? NSNull(),
+                        "_source_revision": item.sourceRevision ?? NSNull(),
+                        "_causal_chain_id": item.causalChainId ?? NSNull(),
+                        "_action_request_id": item.actionRequestId ?? NSNull(),
+                        "phase": "received",
+                    ] as [String: Any],
+                ]
+            )
+            if events.count == 64 { break }
+        }
+        return events.reversed()
+    }
+
     func scheduleWorkbenchBossAfterInitialBootstrap(
         tabManager: TabManager,
         windowId: UUID
@@ -507,7 +719,7 @@ extension AppDelegate {
             startCommand,
             currentDirectoryURL: Self.agentChatStartCommandDirectoryURL(for: agentChat),
             environmentOverrides: [:]
-        ) else {
+        ) != nil else {
             return unavailable
         }
         let clock = ContinuousClock()
@@ -539,6 +751,7 @@ extension AppDelegate {
             AgentChatActionInFlightGate.clearOwnedServerSession(matching: session)
             await AgentChatActionInFlightGate.sidecarStateFileStore()?.removeStateFile()
         }
+        await AgentChatActionInFlightGate.stopPendingServerProcess()
 
         let launchId = UUID().uuidString
         guard let token = Self.generateAgentChatToken(),
@@ -561,7 +774,7 @@ extension AppDelegate {
         ) else {
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }
-        guard Self.launchDetachedAgentChatStartCommand(
+        guard let pendingProcess = Self.launchDetachedAgentChatStartCommand(
             startCommand,
             currentDirectoryURL: Self.agentChatStartCommandDirectoryURL(for: agentChat),
             environmentOverrides: [
@@ -573,14 +786,21 @@ extension AppDelegate {
         ) else {
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }
+        guard AgentChatActionInFlightGate.registerPendingServerProcess(pendingProcess) else {
+            pendingProcess.terminate()
+            return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
+        }
 
         guard let session = await stateFileStore.waitForSession(
             token: token,
             launchId: launchId,
             launchDate: launchDate
         ) else {
+            await AgentChatActionInFlightGate.stopPendingServerProcess(matching: pendingProcess)
+            await stateFileStore.removeStateFile(launchId: launchId)
             return AgentChatServerAvailability(isReachable: false, browserURL: agentChat.url)
         }
+        AgentChatActionInFlightGate.clearPendingServerProcess(matching: pendingProcess)
         AgentChatActionInFlightGate.updateOwnedServerSession(session)
         let isHealthy = await Self.agentChatServerIsHealthy(healthURL: session.healthURL, timeout: 1.5)
         return AgentChatServerAvailability(isReachable: isHealthy, browserURL: session.browserURL)
@@ -671,14 +891,14 @@ extension AppDelegate {
         _ command: String,
         currentDirectoryURL: URL,
         environmentOverrides: [String: String]
-    ) -> Bool {
+    ) -> Process? {
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCommand.isEmpty else { return false }
+        guard !trimmedCommand.isEmpty else { return nil }
         let environment = ProcessInfo.processInfo.environment
         guard let shellPath = environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !shellPath.isEmpty else {
             NSLog("[AgentChat] SHELL is not set; cannot launch startCommand")
-            return false
+            return nil
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shellPath)
@@ -690,10 +910,10 @@ extension AppDelegate {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            return true
+            return process
         } catch {
             NSLog("[AgentChat] failed to launch startCommand: %@", String(describing: error))
-            return false
+            return nil
         }
     }
 

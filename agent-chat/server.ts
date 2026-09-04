@@ -312,9 +312,11 @@ interface Session extends SessionCtx {
   adapter: Adapter;
   sockets: Set<Bun.ServerWebSocket<WsData>>;
   createdAt: number;
+  headless: boolean;
 }
 interface WsData {
   subscribed: string | null;
+  closed: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -376,6 +378,10 @@ function sessionSummary(s: Session) {
     createdAt: s.createdAt,
     capabilities: capabilitiesFor(s.provider),
   };
+}
+
+function visibleSessions(): Session[] {
+  return [...sessions.values()].filter((session) => !session.headless);
 }
 
 function capabilitiesFor(provider: string): ProviderCapabilities {
@@ -465,7 +471,7 @@ export function resolveSessionStartForProductForTest(
 function broadcastSessions() {
   const payload = JSON.stringify({
     kind: "sessions",
-    sessions: [...sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary),
+    sessions: visibleSessions().sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary),
   });
   for (const ws of allSockets) ws.send(payload);
 }
@@ -508,6 +514,7 @@ function createSession(
   title: string,
   startOptions: Record<string, OptionValue> = {},
   restored?: { id: string; createdAt: number; providerSessionId: string },
+  headless = false,
 ): Session {
   const adapter = adapters.get(provider);
   if (!adapter) throw new Error(`unknown provider: ${provider}`);
@@ -524,6 +531,7 @@ function createSession(
     events: [],
     internal: {
       ...(PRODUCT_ID ? { productId: PRODUCT_ID } : {}),
+      ...(headless ? { observeOnly: true } : {}),
       ...(restored ? {
         acpResumeSessionId: restored.providerSessionId,
         restoredFromDisk: true,
@@ -532,6 +540,7 @@ function createSession(
     adapter,
     sockets: new Set(),
     createdAt: restored?.createdAt ?? Date.now(),
+    headless,
     emit(evt: AgentEvent) {
       if (evt.kind === "done") {
         emitDoneAfterFiles(sess, evt);
@@ -552,11 +561,11 @@ function createSession(
       sess.status = status;
       const payload = JSON.stringify({ kind: "session-status", sessionId: id, status });
       for (const ws of sess.sockets) ws.send(payload);
-      broadcastSessions();
+      if (!sess.headless) broadcastSessions();
     },
     async invalidatePersistedSession() {
       delete sess.internal.persistedProviderSessionId;
-      if (!SESSION_DIR) return;
+      if (sess.headless || !SESSION_DIR) return;
       try {
         await deletePersistedSession(SESSION_DIR, sess.id);
       } catch (error) {
@@ -565,7 +574,7 @@ function createSession(
     },
   };
   sessions.set(id, sess);
-  broadcastSessions();
+  if (!headless) broadcastSessions();
   return sess;
 }
 
@@ -581,7 +590,7 @@ function emitSessionEvent(sess: Session, evt: AgentEvent) {
 
 function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
   if (evt.kind === "files-changed") recordFileDiffAllowlist(sess, evt.files);
-  if (evt.kind === "meta" && evt.providerSessionId) {
+  if (!sess.headless && evt.kind === "meta" && evt.providerSessionId) {
     sess.internal.persistedProviderSessionId = evt.providerSessionId;
     persistSession(sess).catch((error) => {
       console.error(`[agent-chat] persist session ${sess.id} failed`, error);
@@ -590,6 +599,7 @@ function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
 }
 
 function persistedSession(sess: Session): PersistedAgentChatSession | null {
+  if (sess.headless) return null;
   const providerSessionId = typeof sess.internal.persistedProviderSessionId === "string"
     ? sess.internal.persistedProviderSessionId
     : typeof sess.internal.acpResumeSessionId === "string"
@@ -609,7 +619,7 @@ function persistedSession(sess: Session): PersistedAgentChatSession | null {
 }
 
 async function persistSession(sess: Session) {
-  if (!SESSION_DIR) return;
+  if (sess.headless || !SESSION_DIR) return;
   const record = persistedSession(sess);
   if (record) await writePersistedSession(SESSION_DIR, record);
 }
@@ -746,6 +756,7 @@ function emitDoneAfterFiles(sess: Session, evt: InternalDoneEvent) {
   const publicEvt = publicDoneEvent(evt);
   if (!generation) {
     emitSessionEvent(sess, publicEvt);
+    scheduleHeadlessCleanup(sess);
     return;
   }
   const previousAttribution = sess.internal.filesAttributionRunning as Promise<void> | undefined;
@@ -768,6 +779,7 @@ function emitDoneAfterFiles(sess: Session, evt: InternalDoneEvent) {
     } else {
       broadcastSessionHistory(sess);
     }
+    scheduleHeadlessCleanup(sess);
   })();
   sess.internal.pendingDoneEmit = pending;
   sess.internal.pendingDoneGeneration = generation;
@@ -778,6 +790,31 @@ function emitDoneAfterFiles(sess: Session, evt: InternalDoneEvent) {
     if (sess.internal.pendingDoneGeneration === generation) delete sess.internal.pendingDoneGeneration;
     if (sess.internal.filesAttributionRunning === pending) delete sess.internal.filesAttributionRunning;
   });
+}
+
+function scheduleHeadlessCleanup(sess: Session) {
+  if (!sess.headless) return;
+  setTimeout(() => {
+    disposeHeadlessSession(sess, false);
+  }, 0);
+}
+
+function disposeHeadlessSession(sess: Session, stop: boolean) {
+  if (!sess.headless || sessions.get(sess.id) !== sess) return;
+  const dispose = () => {
+    if (sessions.get(sess.id) !== sess) return;
+    sess.adapter.dispose(sess);
+    sessions.delete(sess.id);
+    for (const ws of sess.sockets) {
+      if (ws.data.subscribed === sess.id) ws.data.subscribed = null;
+    }
+    sess.sockets.clear();
+  };
+  if (!stop) {
+    dispose();
+    return;
+  }
+  Promise.resolve(sess.adapter.stop(sess)).catch(() => {}).finally(dispose);
 }
 
 function sendPrompt(sess: Session, prompt: string) {
@@ -2101,7 +2138,7 @@ async function startServer() {
     if (!url) return new Response("not found", { status: 404 });
     if (url.pathname === "/ws") {
       if (!hasTrustedOrigin(req)) return new Response("forbidden", { status: 403 });
-      return srv.upgrade(req, { data: { subscribed: null } })
+      return srv.upgrade(req, { data: { subscribed: null, closed: false } })
         ? undefined
         : new Response("upgrade failed", { status: 400 });
     }
@@ -2171,12 +2208,13 @@ async function startServer() {
       return Response.json({ id: sess.id, url: `http://127.0.0.1:${server.port}${prefixedPath(`/s/${sess.id}`)}` });
     }
     if (url.pathname === "/api/sessions" && req.method === "GET") {
-      return Response.json([...sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary));
+      return Response.json(visibleSessions().sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary));
     }
     return new Response(renderPage(url), { headers: { "content-type": "text/html; charset=utf-8" } });
     },
     websocket: {
       open(ws) {
+      ws.data.closed = false;
       allSockets.add(ws);
       ws.send(JSON.stringify({
         kind: "hello",
@@ -2189,13 +2227,20 @@ async function startServer() {
       }));
       ws.send(JSON.stringify({
         kind: "sessions",
-        sessions: [...sessions.values()].sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary),
+        sessions: visibleSessions().sort((a, b) => b.createdAt - a.createdAt).map(sessionSummary),
       }));
       },
       close(ws) {
+      ws.data.closed = true;
       allSockets.delete(ws);
       const sid = ws.data.subscribed;
-      if (sid) sessions.get(sid)?.sockets.delete(ws);
+      if (sid) {
+        const sess = sessions.get(sid);
+        sess?.sockets.delete(ws);
+        if (sess?.headless && sess.sockets.size === 0) {
+          disposeHeadlessSession(sess, !sess.events.some((event) => event.kind === "done"));
+        }
+      }
       },
       message(ws, raw) {
       let msg: any;
@@ -2306,26 +2351,35 @@ function sendWsErrorDetails(
 
 function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
   switch (msg.op) {
-    case "start": {
+    case "start":
+    case "headless-start": {
+      const headless = msg.op === "headless-start";
       const prompt = String(msg.prompt ?? "").trim();
       if (!prompt) return;
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const requestedCwd = String(msg.cwd || DEFAULT_CWD);
-      const provider = String(msg.provider);
-      const start = resolveSessionStart(provider, msg.autoApprove);
+      const provider = headless ? "ouro-boss" : String(msg.provider);
+      const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
       const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
       pruneStartRequests();
-      const existing = requestId ? startRequests.get(requestId) : undefined;
-      const startPromise = existing?.promise ?? Promise.resolve(assertCwd(requestedCwd).then(async (cwd) => ({
-        cwd,
-        options: await sanitizeStartOptions(provider, cwd, rawOptions),
-      }))).then(({ cwd, options }) => {
-        const sess = createSession(provider, cwd, start.autoApprove, start.title, options);
-        refreshSession(sess);
-        sendPrompt(sess, prompt);
+      const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
+      const createStart = () => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
+        if (headless && ws.data.closed) throw new Error("headless owner disconnected");
+        const cwd = await assertCwd(requestedCwd);
+        const options = await sanitizeStartOptions(provider, cwd, rawOptions);
+        if (headless && ws.data.closed) throw new Error("headless owner disconnected");
+        return { cwd, options };
+      }).then(({ cwd, options }) => {
+        if (headless && ws.data.closed) throw new Error("headless owner disconnected");
+        const sess = createSession(provider, cwd, start.autoApprove, start.title, options, undefined, headless);
+        if (!headless) {
+          refreshSession(sess);
+          sendPrompt(sess, prompt);
+        }
         return sess;
       });
-      if (requestId && !existing) {
+      const startPromise = existing?.promise ?? createStart();
+      if (!headless && requestId && !existing) {
         startRequests.set(requestId, { createdAt: Date.now(), promise: startPromise });
         startPromise.finally(() => {
           setTimeout(() => {
@@ -2334,8 +2388,16 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         }).catch(() => {});
       }
       startPromise.then((sess) => {
+        if (headless && ws.data.closed) {
+          disposeHeadlessSession(sess, true);
+          throw new Error("headless owner disconnected");
+        }
         subscribe(ws, sess);
         ws.send(JSON.stringify({ kind: "session-created", session: sessionSummary(sess), requestId }));
+        if (headless) {
+          refreshSession(sess);
+          sendPrompt(sess, prompt);
+        }
         if (existing) {
           ws.send(JSON.stringify({
             kind: "history",
@@ -2345,6 +2407,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
           }));
         }
       }).catch((err) => {
+        if (headless && ws.data.closed) return;
         sendWsErrorDetails(ws, "start", err, { provider, requestId });
       });
       break;

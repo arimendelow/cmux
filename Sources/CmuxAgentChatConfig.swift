@@ -194,6 +194,10 @@ struct AgentChatOwnedServerSession: Sendable, Hashable {
         Self.browserURL(port: port, token: token)
     }
 
+    var webSocketURL: URL {
+        URL(string: "ws://127.0.0.1:\(port)/\(token)/ws")!
+    }
+
     var themeURL: URL {
         baseURL
             .appendingPathComponent(token, isDirectory: true)
@@ -317,31 +321,28 @@ struct AgentChatSidecarStateFileStore: Sendable {
     ) async -> AgentChatOwnedServerSession? {
         let stateFileURL = stateFileURL(launchId: launchId)
         let fileSystem = fileSystem
-        return await Task.detached(priority: .utility) { () -> AgentChatOwnedServerSession? in
-            let fileManager = fileSystem.fileManager
-            let clock = ContinuousClock()
-            let deadline = clock.now.advanced(by: .seconds(10))
-            while !Task.isCancelled, clock.now < deadline {
-                if let data = try? Data(contentsOf: stateFileURL),
-                   let stateFile = try? JSONDecoder().decode(AgentChatSidecarStateFile.self, from: data) {
-                    if let session = stateFile.session(token: token, launchId: launchId) {
-                        try? fileManager.removeItem(at: stateFileURL)
-                        return session
-                    }
-                    let values = try? stateFileURL.resourceValues(forKeys: [.contentModificationDateKey])
-                    if (values?.contentModificationDate ?? .distantPast) < launchDate {
-                        try? fileManager.removeItem(at: stateFileURL)
-                    }
+        let fileManager = fileSystem.fileManager
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !Task.isCancelled, clock.now < deadline {
+            if let data = try? Data(contentsOf: stateFileURL),
+               let stateFile = try? JSONDecoder().decode(AgentChatSidecarStateFile.self, from: data) {
+                if let session = stateFile.session(token: token, launchId: launchId) {
+                    try? fileManager.removeItem(at: stateFileURL)
+                    return session
                 }
-                do {
-                    // Bounded, cancellable polling for the sidecar readiness state file.
-                    try await clock.sleep(for: .milliseconds(250))
-                } catch {
-                    return nil
+                let values = try? stateFileURL.resourceValues(forKeys: [.contentModificationDateKey])
+                if (values?.contentModificationDate ?? .distantPast) < launchDate {
+                    try? fileManager.removeItem(at: stateFileURL)
                 }
             }
-            return nil
-        }.value
+            do {
+                try await clock.sleep(for: .milliseconds(250))
+            } catch {
+                return nil
+            }
+        }
+        return nil
     }
 
     private static func sweepStaleStateFiles(

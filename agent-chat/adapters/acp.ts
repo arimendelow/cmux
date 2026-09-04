@@ -224,6 +224,7 @@ function isUnavailableSessionLoad(error: unknown): boolean {
 async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   const spawnModel = effectiveSpawnModel(def, sess.startOptions);
   const cmd = commandForSession(def, sess.startOptions);
+  if (sess.internal.observeOnly === true) cmd.push("--observe-only");
   const autoApprove = typeof sess.startOptions.autoApprove === "boolean" ? sess.startOptions.autoApprove : sess.autoApprove;
   if (autoApprove && def.autoApproveArgs) cmd.push(...def.autoApproveArgs);
   const proc = Bun.spawn(cmd, {

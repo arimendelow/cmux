@@ -775,6 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Combine subscriptions that publish workspace.updated to mobile clients.
     private var mobileWorkspaceListObservers: [ObjectIdentifier: MobileWorkspaceListObserver] = [:]
     private let agentChatTranscriptService = AgentChatTranscriptService()
+    var workbenchLocalSupervisionCoordinator: WorkbenchLocalSupervisionCoordinator?
     /// The app's settings dependency container, handed over by `cmuxApp` via
     /// `configure(...)` before any main window is created. AppKit builds the
     /// main window's `NSHostingView` itself, so it injects this into the
@@ -1094,6 +1095,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var isAwaitingTerminateCleanup = false
     private var terminateOwnedCleanupTask: Task<Void, Never>?
     private var terminateCleanupWatchdogTask: Task<Void, Never>?
+    var workbenchSupervisionShutdownTask: Task<Void, Never>?
     /// Force-exits if AppKit's terminate gauntlet wedges (#6758).
     private let terminationWatchdog = TerminationWatchdog()
     private var activeQuitConfirmationAlertPresenter: QuitConfirmationAlertPresenter?
@@ -1384,6 +1386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         StartupBreadcrumbLog.append("appDelegate.didFinish.feedStore.installed")
         Task { @MainActor in
             await FeedCoordinator.shared.store?.start()
+            startWorkbenchLocalSupervisionIfNeeded()
 #if DEBUG
             setupFeedSidebarUITestIfNeeded()
 #endif
@@ -1932,8 +1935,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func deferTerminateForOwnedCleanup(reason: String) -> Bool {
         let markedForKill = remoteTmuxController.windowsMarkedForKillOnClose()
         let simulatorCleanupTasks = SimulatorPanel.beginApplicationTerminationCleanup()
-        let shouldStopAgentChat = AgentChatActionInFlightGate.ownedServerSession() != nil
-        guard !markedForKill.isEmpty || !simulatorCleanupTasks.isEmpty || shouldStopAgentChat else { return false }
+        let supervisionShutdownTask = workbenchSupervisionShutdownTask
+        let shouldStopAgentChat = AgentChatActionInFlightGate.hasOwnedServerWork()
+        guard !markedForKill.isEmpty
+                || !simulatorCleanupTasks.isEmpty
+                || shouldStopAgentChat
+                || supervisionShutdownTask != nil else {
+            return false
+        }
         if !isAwaitingTerminateCleanup {
             isAwaitingTerminateCleanup = true
             StartupBreadcrumbLog.append(
@@ -1947,6 +1956,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             )
             let cleanupTask = Task { @MainActor [weak self] in
                 guard let self else { return }
+                await supervisionShutdownTask?.value
+                self.workbenchSupervisionShutdownTask = nil
                 if !markedForKill.isEmpty {
                     await self.remoteTmuxController.killMarkedSessionsBeforeTerminate()
                 }
@@ -1955,7 +1966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     await cleanupTask.value
                     guard !Task.isCancelled else { return }
                 }
-                if shouldStopAgentChat {
+                if AgentChatActionInFlightGate.hasOwnedServerWork() {
                     let stopped = await AgentChatActionInFlightGate.stopOwnedServer()
                     StartupBreadcrumbLog.append(
                         "appDelegate.shouldTerminate.agentChat",
@@ -2021,6 +2032,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isTerminatingApp = false
         isQuitWarningConfirmed = false
         replyToTerminateOnce(false)
+        workbenchSupervisionShutdownTask = nil
+        startWorkbenchLocalSupervisionIfNeeded()
 
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -2044,6 +2057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func prepareForConfirmedAppTermination() {
         isTerminatingApp = true
+        stopWorkbenchLocalSupervision()
         _ = saveSessionSnapshotIncludingProcessDetectedIndexes(includeScrollback: true, removeWhenEmpty: false)
         ClosedItemHistoryStore.shared.flushPendingSaves()
         // The hard AppKit watchdog is armed immediately before the terminate
@@ -2191,6 +2205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         GhosttyApp.terminalPasteboard.cleanupAllOwnedTemporaryImageFiles()
         VSCodeServeWebController.shared.stop()
         BrowserProfileStore.shared.flushPendingSaves()
+        stopWorkbenchLocalSupervision()
         ghosttyCrashBreadcrumbTask?.cancel()
         ghosttyCrashBreadcrumbTask = nil
         notificationStore?.clearAll()
@@ -2211,6 +2226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func persistSessionForUpdateRelaunch() {
         isTerminatingApp = true
+        stopWorkbenchLocalSupervision()
         _ = saveSessionSnapshotIncludingProcessDetectedIndexes(includeScrollback: true, removeWhenEmpty: false)
         ClosedItemHistoryStore.shared.flushPendingSaves()
     }
