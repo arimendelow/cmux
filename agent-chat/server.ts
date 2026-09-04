@@ -118,7 +118,7 @@ export async function writeStateFileForTest(path: string, port: number) {
 // Under launchd the PATH is minimal; make sure the agent CLIs resolve.
 {
   const home = process.env.HOME ?? "";
-  const extra = [`${home}/.local/bin`, `${home}/.bun/bin`, "/opt/homebrew/bin", "/usr/local/bin"];
+  const extra = [`${home}/.ouro-cli/bin`, `${home}/.local/bin`, `${home}/.bun/bin`, "/opt/homebrew/bin", "/usr/local/bin"];
   const cur = (process.env.PATH ?? "").split(":");
   process.env.PATH = [...extra.filter((p) => !cur.includes(p)), ...cur].join(":");
 }
@@ -153,13 +153,20 @@ export interface WorkbenchExperience {
   hubUrl: string;
 }
 
+interface WorkbenchBossProviderOptions {
+  bossAgent?: string;
+  bossError?: string;
+  ouroCommand?: string;
+  workbenchMcp?: string;
+}
+
 function workbenchExperience(productId: string, contextLabel: string): WorkbenchExperience | undefined {
   if (productId !== "ouro-workbench-v1") return undefined;
   return {
     productName: "Ouro Workbench v1",
     surfaceName: "Boss",
     ...(contextLabel ? { contextLabel } : {}),
-    defaultProvider: "agency-worker",
+    defaultProvider: "ouro-boss",
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
     hubUrl: "https://aka.ms/agency/hub",
@@ -199,6 +206,32 @@ const AGENCY_COPILOT_BASE_COMMAND = [
   "--no-default-mcps",
   "--no-aec",
 ];
+
+function ouroBossProvider(options: WorkbenchBossProviderOptions = {}): ProviderDef {
+  const bossAgent = options.bossAgent?.trim() ?? "";
+  const safeBoss = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(bossAgent) ? bossAgent : "";
+  const unavailableReason = options.bossError?.trim()
+    || (!safeBoss ? "Choose one enabled Ouro agent as Boss." : undefined);
+  return {
+    id: "ouro-boss",
+    label: safeBoss || "Ouro Boss",
+    description: unavailableReason || "Selected Ouro Boss",
+    role: "boss",
+    adapter: "acp",
+    cmd: [
+      options.ouroCommand?.trim() || "ouro",
+      "acp-serve",
+      "--agent",
+      safeBoss || "unavailable",
+      "--workbench-mcp",
+      ...(options.workbenchMcp?.trim() ? [options.workbenchMcp.trim()] : []),
+    ],
+    defaultAutoApprove: false,
+    probeCatalogs: false,
+    startupTimeoutMs: 90_000,
+    ...(unavailableReason ? { unavailableReason } : {}),
+  };
+}
 
 const ALL_PROVIDERS: ProviderDef[] = [
   {
@@ -245,9 +278,17 @@ const ALL_PROVIDERS: ProviderDef[] = [
   },
 ];
 
-function providerDefinitionsForProduct(productId: string): ProviderDef[] {
+function providerDefinitionsForProduct(
+  productId: string,
+  boss: WorkbenchBossProviderOptions = {
+    bossAgent: process.env.CMUX_AGENT_CHAT_BOSS_AGENT,
+    bossError: process.env.CMUX_AGENT_CHAT_BOSS_ERROR,
+    ouroCommand: process.env.CMUX_AGENT_CHAT_OURO_COMMAND,
+    workbenchMcp: process.env.CMUX_AGENT_CHAT_WORKBENCH_MCP,
+  },
+): ProviderDef[] {
   if (productId !== "ouro-workbench-v1") return ALL_PROVIDERS;
-  return ALL_PROVIDERS.filter((provider) => provider.id === "agency-worker" || provider.id === "copilot");
+  return [ouroBossProvider(boss)];
 }
 
 const PROVIDERS = providerDefinitionsForProduct(PRODUCT_ID);
@@ -354,7 +395,7 @@ function providerInfo(p: ProviderDef) {
     // Bun.which ignores runtime process.env.PATH mutations (it reads the
     // process's original environ), so pass the prepended PATH explicitly or
     // every provider reads as uninstalled under launchd's minimal PATH.
-    installed: Boolean(Bun.which(p.cmd?.[0] ?? p.id, { PATH: process.env.PATH })),
+    installed: !p.unavailableReason && Boolean(Bun.which(p.cmd?.[0] ?? p.id, { PATH: process.env.PATH })),
     installCommand: p.installCommand,
     startupTimeoutMs: p.startupTimeoutMs,
     ...(providerIconInfo.get(p.id) ?? {}),
@@ -364,6 +405,7 @@ function providerInfo(p: ProviderDef) {
 function providerDefinition(provider: string): ProviderDef {
   const definition = PROVIDERS.find((candidate) => candidate.id === provider);
   if (!definition) throw new Error(`unknown provider: ${provider}`);
+  if (definition.unavailableReason) throw new Error(definition.unavailableReason);
   return definition;
 }
 
@@ -386,8 +428,8 @@ export function providerDefinitionsForTest(): ProviderDef[] {
   }));
 }
 
-export function providerDefinitionsForProductForTest(productId: string): ProviderDef[] {
-  return providerDefinitionsForProduct(productId).map((provider) => ({
+export function providerDefinitionsForProductForTest(productId: string, boss?: WorkbenchBossProviderOptions): ProviderDef[] {
+  return providerDefinitionsForProduct(productId, boss).map((provider) => ({
     ...provider,
     cmd: provider.cmd ? [...provider.cmd] : undefined,
   }));
@@ -399,6 +441,25 @@ export function resolveSessionStartForTest(
   requestedAutoApprove: unknown,
 ): { title: string; autoApprove: boolean } {
   return resolveSessionStart(provider, requestedAutoApprove);
+}
+
+export function resolveSessionStartForProductForTest(
+  productId: string,
+  provider: string,
+  requestedAutoApprove: unknown,
+  boss?: WorkbenchBossProviderOptions,
+): { title: string; autoApprove: boolean } {
+  const providers = providerDefinitionsForProduct(productId, boss);
+  const definition = providers.find((candidate) => candidate.id === provider);
+  if (!definition) throw new Error(`unknown provider: ${provider}`);
+  if (definition.unavailableReason) throw new Error(definition.unavailableReason);
+  const experience = workbenchExperience(productId, "");
+  return {
+    title: definition.role === "boss" && experience ? experience.surfaceName : definition.label,
+    autoApprove: typeof requestedAutoApprove === "boolean"
+      ? requestedAutoApprove
+      : definition.defaultAutoApprove ?? true,
+  };
 }
 
 function broadcastSessions() {
@@ -2186,6 +2247,7 @@ function safeReason(err: unknown): string {
   if (text.includes("outside configured roots")) return "working directory is outside the configured roots";
   if (text.includes("working directory") || text.includes("enoent")) return "working directory is unavailable";
   if (text.includes("unknown provider")) return "unknown provider";
+  if (/session.*(?:not found|does not exist|unknown|invalid|expired)/.test(text)) return "saved conversation is unavailable";
   if (text.includes("no session")) return "no session is available";
   if (text.includes("invalid path")) return "invalid path";
   if (text.includes("not reported")) return "file was not reported by this session";
@@ -2206,6 +2268,7 @@ export function isAgentCancellationErrorForTest(err: unknown): boolean {
 
 function providerDisplayLabel(provider: string | undefined, experience = WORKBENCH_EXPERIENCE): string {
   if (!provider) return "agent";
+  if (experience && provider === experience.defaultProvider) return experience.surfaceName;
   const definition = PROVIDERS.find((candidate) => candidate.id === provider);
   if (definition?.role === "boss" && experience) return experience.surfaceName;
   return definition?.label ?? provider;

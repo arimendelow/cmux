@@ -30,10 +30,10 @@ async function waitForMessage(
   throw new Error(`timed out waiting for message: ${JSON.stringify(messages)}`);
 }
 
-async function writeFakeAgency(bin: string, extraArgs = ""): Promise<void> {
-  const agency = join(bin, "agency");
-  await Bun.write(agency, `#!/bin/sh\nexec "$BUN_BIN" "$FAKE_ACP_SCRIPT"${extraArgs ? ` ${extraArgs}` : ""}\n`);
-  await chmod(agency, 0o755);
+async function writeFakeOuro(bin: string, extraArgs = ""): Promise<void> {
+  const ouro = join(bin, "ouro");
+  await Bun.write(ouro, `#!/bin/sh\nexec "$BUN_BIN" "$FAKE_ACP_SCRIPT"${extraArgs ? ` ${extraArgs}` : ""}\n`);
+  await chmod(ouro, 0o755);
 }
 
 test("Workbench root resumes the persisted Boss with a verified recovery event", async () => {
@@ -42,11 +42,11 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
   await mkdir(bin);
-  await writeFakeAgency(bin);
+  await writeFakeOuro(bin);
   await writePersistedSession(sessions, {
     id: "boss-restored",
-    provider: "agency-worker",
-    providerSessionId: "provider-session-1",
+    provider: "ouro-boss",
+    providerSessionId: "boss-restored",
     cwd: root,
     title: "Boss",
     autoApprove: false,
@@ -67,6 +67,7 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
       CMUX_AGENT_CHAT_SESSION_DIR: sessions,
       CMUX_AGENT_CHAT_TOKEN: "recovery-token",
       CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / recovery-fixture",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
       CMUX_AGENT_UI_CWD: root,
@@ -86,7 +87,7 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
     });
     const hello = await waitForMessage(messages, (message) => message.kind === "hello");
     const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
-    expect(hello.providers.map((provider: any) => provider.id)).toEqual(["agency-worker", "copilot"]);
+    expect(hello.providers.map((provider: any) => provider.id)).toEqual(["ouro-boss"]);
     const recovered = pickInitialBossSession(
       listed.sessions,
       hello.experience as WorkbenchExperience,
@@ -120,17 +121,17 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
   }
 });
 
-test("Workbench replaces a stale Boss provider session and rewrites its record", async () => {
+test("Workbench refuses a stale Boss provider session without replacing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "workbench-boss-respawn-"));
   const sessions = join(root, "sessions");
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
   await mkdir(bin);
-  await writeFakeAgency(bin, "--fail-load");
+  await writeFakeOuro(bin, "--fail-load");
   await writePersistedSession(sessions, {
     id: "boss-respawned",
-    provider: "agency-worker",
-    providerSessionId: "missing-provider-session",
+    provider: "ouro-boss",
+    providerSessionId: "boss-respawned",
     cwd: root,
     title: "Boss",
     autoApprove: false,
@@ -151,6 +152,7 @@ test("Workbench replaces a stale Boss provider session and rewrites its record",
       CMUX_AGENT_CHAT_SESSION_DIR: sessions,
       CMUX_AGENT_CHAT_TOKEN: "respawn-token",
       CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / respawn-fixture",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
       CMUX_AGENT_UI_CWD: root,
@@ -175,24 +177,15 @@ test("Workbench replaces a stale Boss provider session and rewrites its record",
       messages.find((message) => message.kind === "hello").experience as WorkbenchExperience,
     );
     socket.send(JSON.stringify({ op: "subscribe", sessionId: recovered!.id }));
-    const recovery = await waitForMessage(
+    const failure = await waitForMessage(
       messages,
       (message) => message.kind === "event"
-        && message.evt?.kind === "recovery"
-        && message.evt.mode === "respawned",
+        && message.evt?.kind === "error",
     );
-    expect(recovery.evt.title).toBe("Started a fresh conversation");
+    expect(failure.evt.message).toContain("saved conversation is unavailable");
     const recordPath = join(sessions, "boss-respawned.json");
-    let rewritten: any = null;
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline) {
-      try {
-        rewritten = JSON.parse(await readFile(recordPath, "utf8"));
-        if (rewritten.providerSessionId === "fake-default") break;
-      } catch {}
-      await Bun.sleep(20);
-    }
-    expect(rewritten?.providerSessionId).toBe("fake-default");
+    const preserved = JSON.parse(await readFile(recordPath, "utf8"));
+    expect(preserved.providerSessionId).toBe("boss-respawned");
   } finally {
     socket?.close();
     process.kill();
@@ -207,7 +200,7 @@ test("Workbench can cancel Boss startup before the session id reaches the browse
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
   await mkdir(bin);
-  await writeFakeAgency(bin, "--startup-delay-ms 1000");
+  await writeFakeOuro(bin, "--startup-delay-ms 1000");
   const process = Bun.spawn(["bun", "server.ts"], {
     cwd: join(import.meta.dir, ".."),
     stdout: "pipe",
@@ -222,6 +215,7 @@ test("Workbench can cancel Boss startup before the session id reaches the browse
       CMUX_AGENT_CHAT_SESSION_DIR: sessions,
       CMUX_AGENT_CHAT_TOKEN: "cancel-token",
       CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / cancel-fixture",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
       CMUX_AGENT_UI_CWD: root,
@@ -243,7 +237,7 @@ test("Workbench can cancel Boss startup before the session id reaches the browse
     socket.send(JSON.stringify({
       op: "start",
       requestId: "cancel-before-created",
-      provider: "agency-worker",
+      provider: "ouro-boss",
       cwd: root,
       prompt: "cancel this startup",
     }));

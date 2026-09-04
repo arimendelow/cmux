@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { shouldShowProviderPicker } from "../src/components/Composer";
 import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 
 test("Workbench header makes local and Hub authority explicit", () => {
@@ -9,7 +10,7 @@ test("Workbench header makes local and Hub authority explicit", () => {
         productName: "Ouro Workbench v1",
         surfaceName: "Boss",
         contextLabel: "Desk / demo-task",
-        defaultProvider: "agency-worker",
+        defaultProvider: "ouro-boss",
         localAuthorityLabel: "Controlled here",
         hubAuthorityLabel: "Controlled in Agency Hub",
         hubUrl: "https://aka.ms/agency/hub",
@@ -25,4 +26,6 @@ test("Workbench header makes local and Hub authority explicit", () => {
   expect(html).toContain("Controlled in Agency Hub");
   expect(html).toContain("href=\"https://aka.ms/agency/hub\"");
   expect(html).toContain("Open Hub");
+  expect(shouldShowProviderPicker(null)).toBe(true);
+  expect(shouldShowProviderPicker({ productName: "Ouro Workbench v1" })).toBe(false);
 });

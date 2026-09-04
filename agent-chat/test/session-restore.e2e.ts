@@ -69,9 +69,9 @@ test("token-authenticated shutdown stops the owned sidecar", async () => {
   const childPidFile = join(root, "child.pid");
   const bin = join(root, "bin");
   await mkdir(bin);
-  const agency = join(bin, "agency");
-  await Bun.write(agency, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\"\n");
-  await chmod(agency, 0o755);
+  const ouro = join(bin, "ouro");
+  await Bun.write(ouro, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\"\n");
+  await chmod(ouro, 0o755);
   const process = Bun.spawn(["bun", "server.ts"], {
     cwd: join(import.meta.dir, ".."),
     stdout: "pipe",
@@ -86,6 +86,7 @@ test("token-authenticated shutdown stops the owned sidecar", async () => {
       CMUX_AGENT_CHAT_STATE_FILE: stateFile,
       CMUX_AGENT_CHAT_TOKEN: "shutdown-token",
       CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
       CMUX_AGENT_UI_CWD: root,
       CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
@@ -102,7 +103,7 @@ test("token-authenticated shutdown stops the owned sidecar", async () => {
     socket.send(JSON.stringify({
       op: "start",
       requestId: "shutdown-child",
-      provider: "agency-worker",
+      provider: "ouro-boss",
       cwd: root,
       prompt: "start child",
     }));

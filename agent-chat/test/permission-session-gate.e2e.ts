@@ -40,9 +40,9 @@ test("only the socket subscribed to a session can answer its permission request"
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
   await mkdir(bin);
-  const agency = join(bin, "agency");
-  await Bun.write(agency, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\" --request-permission\n");
-  await chmod(agency, 0o755);
+  const ouro = join(bin, "ouro");
+  await Bun.write(ouro, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\" --request-permission\n");
+  await chmod(ouro, 0o755);
   const process = Bun.spawn(["bun", "server.ts"], {
     cwd: join(import.meta.dir, ".."),
     stdout: "pipe",
@@ -56,6 +56,7 @@ test("only the socket subscribed to a session can answer its permission request"
       CMUX_AGENT_CHAT_STATE_FILE: stateFile,
       CMUX_AGENT_CHAT_TOKEN: "permission-gate-token",
       CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
       CMUX_AGENT_UI_CWD: root,
       CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
@@ -73,7 +74,7 @@ test("only the socket subscribed to a session can answer its permission request"
     owner.send(JSON.stringify({
       op: "start",
       requestId: "permission-owner",
-      provider: "agency-worker",
+      provider: "ouro-boss",
       cwd: root,
       prompt: "request permission",
     }));

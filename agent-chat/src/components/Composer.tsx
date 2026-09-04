@@ -20,6 +20,10 @@ import {
   withFileTrigger,
 } from "../hooks/useCatalogs";
 
+export function shouldShowProviderPicker(experience: unknown): boolean {
+  return !experience;
+}
+
 const readProviderOptions = readStoredProviderOptions;
 
 export function Composer() {
@@ -154,9 +158,9 @@ export function Composer() {
         </div>
         <StatusRow
           provider={provider}
-          providers={providers}
+          providers={shouldShowProviderPicker(experience) ? providers : undefined}
           allProviderOptions={allProviderOptions}
-          onProviderModelChange={changeProviderModel}
+          onProviderModelChange={shouldShowProviderPicker(experience) ? changeProviderModel : undefined}
           cwd={cwd}
           onCwdChange={changeCwd}
           onCwdCommit={commitCwd}

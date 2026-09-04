@@ -138,6 +138,7 @@ export interface ProviderDef {
   defaultAutoApprove?: boolean;
   probeCatalogs?: boolean;
   startupTimeoutMs?: number;
+  unavailableReason?: string;
   installCommand?: string;
   models?: { value: string; label: string; description?: string }[];
   defaultModel?: string;

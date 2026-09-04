@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForTest, startErrorMessageForTest, workbenchExperienceForTest } from "../server";
+import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForProductForTest, resolveSessionStartForTest, startErrorMessageForTest, workbenchExperienceForTest } from "../server";
 
-test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", () => {
+test("stock Agent Chat keeps its direct provider profiles", () => {
   const providers = providerDefinitionsForTest();
   const copilot = providers.find((provider) => provider.id === "copilot");
   const worker = providers.find((provider) => provider.id === "agency-worker");
@@ -37,35 +37,70 @@ test("Workbench v1 exposes direct Copilot and scoped Agency worker profiles", ()
   expect(worker?.defaultAutoApprove).toBe(false);
 });
 
-test("Workbench v1 advertises its boss-first authority contract", () => {
+test("Workbench v1 exposes exactly one selected Ouro Boss", () => {
   expect(workbenchExperienceForTest("ouro-workbench-v1", "Desk / demo-task")).toEqual({
     productName: "Ouro Workbench v1",
     surfaceName: "Boss",
     contextLabel: "Desk / demo-task",
-    defaultProvider: "agency-worker",
+    defaultProvider: "ouro-boss",
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
     hubUrl: "https://aka.ms/agency/hub",
   });
   expect(workbenchExperienceForTest("", "Desk / demo-task")).toBeUndefined();
-  expect(providerDefinitionsForProductForTest("ouro-workbench-v1").map((provider) => provider.id)).toEqual([
-    "agency-worker",
-    "copilot",
-  ]);
+  expect(providerDefinitionsForProductForTest("ouro-workbench-v1", {
+    bossAgent: "slugger",
+    ouroCommand: "/usr/local/bin/ouro",
+    workbenchMcp: "/Applications/Ouro Workbench.app/Contents/MacOS/OuroWorkbenchMCP",
+  })).toEqual([expect.objectContaining({
+    id: "ouro-boss",
+    label: "slugger",
+    description: "Selected Ouro Boss",
+    role: "boss",
+    adapter: "acp",
+    cmd: [
+      "/usr/local/bin/ouro",
+      "acp-serve",
+      "--agent",
+      "slugger",
+      "--workbench-mcp",
+      "/Applications/Ouro Workbench.app/Contents/MacOS/OuroWorkbenchMCP",
+    ],
+    defaultAutoApprove: false,
+    probeCatalogs: false,
+  })]);
+  expect(providerDefinitionsForProductForTest("ouro-workbench-v1", {
+    bossError: "Choose one enabled Ouro agent as Boss.",
+  })).toEqual([expect.objectContaining({
+    id: "ouro-boss",
+    description: "Choose one enabled Ouro agent as Boss.",
+    unavailableReason: "Choose one enabled Ouro agent as Boss.",
+  })]);
   expect(startErrorMessageForTest(
-    "agency-worker",
+    "ouro-boss",
     new Error("working directory is outside configured roots"),
     "ouro-workbench-v1",
   )).toBe("Failed to start Boss: working directory is outside the configured roots");
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {
+  expect(resolveSessionStartForProductForTest("ouro-workbench-v1", "ouro-boss", undefined, {
+    bossAgent: "slugger",
+  })).toEqual({
+    title: "Boss",
+    autoApprove: false,
+  });
+  expect(resolveSessionStartForProductForTest("ouro-workbench-v1", "ouro-boss", true, {
+    bossAgent: "slugger",
+  })).toEqual({
+    title: "Boss",
+    autoApprove: true,
+  });
+  expect(() => resolveSessionStartForProductForTest("ouro-workbench-v1", "ouro-boss", undefined, {
+    bossError: "Choose one enabled Ouro agent as Boss.",
+  })).toThrow("Choose one enabled Ouro agent as Boss.");
   expect(resolveSessionStartForTest("agency-worker", "secret customer prompt", undefined)).toEqual({
     title: "Agency worker",
     autoApprove: false,
-  });
-  expect(resolveSessionStartForTest("agency-worker", "secret customer prompt", true)).toEqual({
-    title: "Agency worker",
-    autoApprove: true,
   });
 });

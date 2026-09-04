@@ -322,6 +322,12 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     let resumed = false;
     let respawned = false;
     let sessionState: any;
+    const isWorkbench = sess.internal.productId === "ouro-workbench-v1";
+    const newSessionParams = {
+      cwd: sess.cwd,
+      mcpServers: [],
+      ...(isWorkbench ? { sessionId: sess.id } : {}),
+    };
     if (resumeSessionId) {
       try {
         const restoredFromDisk = sess.internal.restoredFromDisk === true;
@@ -336,15 +342,19 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
         resumed = true;
       } catch (error) {
         if (!isUnavailableSessionLoad(error)) throw error;
+        if (isWorkbench) throw error;
         delete sess.internal.acpResumeSessionId;
         delete sess.internal.persistedProviderSessionId;
         await sess.invalidatePersistedSession?.();
-        sessionState = await request("session/new", { cwd: sess.cwd, mcpServers: [] });
+        sessionState = await request("session/new", newSessionParams);
         respawned = true;
       }
 
     } else {
-      sessionState = await request("session/new", { cwd: sess.cwd, mcpServers: [] });
+      sessionState = await request("session/new", newSessionParams);
+    }
+    if (isWorkbench && !resumed && sessionState.sessionId !== sess.id) {
+      throw new Error(`${def.id} returned a mismatched Workbench session id`);
     }
     st.acpSessionId = resumed ? resumeSessionId : sessionState.sessionId;
     sess.internal.acpResumeSessionId = st.acpSessionId;

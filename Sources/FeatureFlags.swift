@@ -6,6 +6,11 @@ import os
 enum OuroWorkbenchProduct {
     private static let bundleIdentifierPrefix = "com.ourostack.workbench"
 
+    enum BossSelection: Equatable {
+        case selected(String)
+        case unavailable(String)
+    }
+
     static func isWorkbenchBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return false }
         return bundleIdentifier == bundleIdentifierPrefix
@@ -70,22 +75,50 @@ enum OuroWorkbenchProduct {
         )
     }
 
-    static func agentChatEnvironment() -> [String: String] {
-        guard isCurrentBundle else { return [:] }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let sourceRoot = developerSourceRoot
-        let appSupport = FileManager.default.urls(
+    static func resolveBossSelection(
+        legacyBossName: String?,
+        usableAgentNames: [String]
+    ) -> BossSelection {
+        let usable = usableAgentNames
+            .filter(isSafeAgentName)
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        if let legacyBossName = legacyBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           isSafeAgentName(legacyBossName),
+           usable.contains(legacyBossName) {
+            return .selected(legacyBossName)
+        }
+        if usable.count == 1 {
+            return .selected(usable[0])
+        }
+        if usable.isEmpty {
+            return .unavailable("No enabled Ouro agents are installed.")
+        }
+        return .unavailable("Choose one Ouro agent as Boss: \(usable.joined(separator: ", ")).")
+    }
+
+    static func agentChatEnvironment(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationSupportURL: URL? = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first ?? home.appendingPathComponent("Library/Application Support")
-        return [
+        ).first,
+        bundleURL: URL = Bundle.main.bundleURL,
+        sourceFilePath: String = #filePath,
+        fileManager: FileManager = .default
+    ) -> [String: String] {
+        guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
+        let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
+        let appSupport = applicationSupportURL
+            ?? homeURL.appendingPathComponent("Library/Application Support")
+        var environment = [
             "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
             "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
-            "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "agency-worker",
+            "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
             "CMUX_AGENT_UI_CWD": sourceRoot.path,
             "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
-                home.appendingPathComponent("code").path,
-                home.appendingPathComponent("ms-desk").path,
+                homeURL.appendingPathComponent("code").path,
+                homeURL.appendingPathComponent("ms-desk").path,
                 sourceRoot.path,
             ].joined(separator: ":"),
             "CMUX_AGENT_CHAT_SESSION_DIR": appSupport
@@ -93,6 +126,69 @@ enum OuroWorkbenchProduct {
                 .path,
             "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
         ]
+        switch currentBossSelection(homeURL: homeURL, applicationSupportURL: appSupport, fileManager: fileManager) {
+        case .selected(let agentName):
+            environment["CMUX_AGENT_CHAT_BOSS_AGENT"] = agentName
+        case .unavailable(let message):
+            environment["CMUX_AGENT_CHAT_BOSS_ERROR"] = message
+        }
+        let ouroCandidates = [
+            homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),
+            homeURL.appendingPathComponent(".local/bin/ouro"),
+        ]
+        if let ouro = ouroCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
+            environment["CMUX_AGENT_CHAT_OURO_COMMAND"] = ouro.path
+        }
+        let workbenchMCP = bundleURL.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP")
+        if fileManager.isExecutableFile(atPath: workbenchMCP.path) {
+            environment["CMUX_AGENT_CHAT_WORKBENCH_MCP"] = workbenchMCP.path
+        }
+        return environment
+    }
+
+    private static func currentBossSelection(
+        homeURL: URL,
+        applicationSupportURL: URL,
+        fileManager: FileManager
+    ) -> BossSelection {
+        let legacyURL = applicationSupportURL
+            .appendingPathComponent("OuroWorkbench", isDirectory: true)
+            .appendingPathComponent("workspace-state.json")
+        let legacyBossName: String? = {
+            guard let data = try? Data(contentsOf: legacyURL),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let boss = root["boss"] as? [String: Any] else {
+                return nil
+            }
+            return boss["agentName"] as? String
+        }()
+        let bundlesURL = homeURL.appendingPathComponent("AgentBundles", isDirectory: true)
+        let usableAgentNames = (try? fileManager.contentsOfDirectory(
+            at: bundlesURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ))?.compactMap { bundleURL -> String? in
+            guard bundleURL.pathExtension == "ouro" else { return nil }
+            let values = try? bundleURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values?.isDirectory == true, values?.isSymbolicLink != true else { return nil }
+            let name = bundleURL.deletingPathExtension().lastPathComponent
+            guard isSafeAgentName(name),
+                  let data = try? Data(contentsOf: bundleURL.appendingPathComponent("agent.json")),
+                  let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  config["enabled"] as? Bool == true,
+                  let humanFacing = config["humanFacing"] as? [String: Any],
+                  let agentFacing = config["agentFacing"] as? [String: Any],
+                  humanFacing["provider"] as? String != nil,
+                  agentFacing["provider"] as? String != nil else {
+                return nil
+            }
+            return name
+        } ?? []
+        return resolveBossSelection(legacyBossName: legacyBossName, usableAgentNames: usableAgentNames)
+    }
+
+    private static func isSafeAgentName(_ name: String) -> Bool {
+        name.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil
     }
 }
 

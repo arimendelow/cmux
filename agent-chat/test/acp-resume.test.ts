@@ -17,7 +17,7 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
   const adapter = makeAcpAdapter(definition);
   const events: AgentEvent[] = [];
   const context: SessionCtx = {
-    id: "resume-session",
+    id: "persisted-session",
     provider: definition.id,
     cwd: `${import.meta.dir}/../scratch`,
     title: "resume",
@@ -71,7 +71,7 @@ test("ACP live reconnect does not append a second copy of the transcript", async
     { kind: "delta", text: "previous answer" },
   ];
   const context: SessionCtx = {
-    id: "live-reconnect-session",
+    id: "persisted-session",
     provider: definition.id,
     cwd: `${import.meta.dir}/../scratch`,
     title: "live reconnect",
@@ -103,7 +103,42 @@ test("ACP live reconnect does not append a second copy of the transcript", async
   }
 });
 
-test("ACP replaces an unloadable persisted session with an honest fresh conversation", async () => {
+test("Workbench starts a new Ouro session with the host session id", async () => {
+  const definition: ProviderDef = {
+    id: "ouro-boss",
+    label: "Boss",
+    adapter: "acp",
+    cmd: ["bun", `${import.meta.dir}/fake-acp.ts`],
+  };
+  const adapter = makeAcpAdapter(definition);
+  const context: SessionCtx = {
+    id: "boss-session",
+    provider: definition.id,
+    cwd: `${import.meta.dir}/../scratch`,
+    title: "Boss",
+    autoApprove: false,
+    startOptions: {},
+    status: "idle",
+    events: [],
+    internal: { productId: "ouro-workbench-v1" },
+    emit(event) {
+      this.events.push(event);
+    },
+    setStatus(status: SessionStatus) {
+      this.status = status;
+    },
+  };
+
+  try {
+    await adapter.refreshOptions?.(context);
+    expect(context.internal.acpResumeSessionId).toBe("boss-session");
+    expect(context.events).toContainEqual({ kind: "meta", providerSessionId: "boss-session" });
+  } finally {
+    adapter.dispose(context);
+  }
+});
+
+test("Workbench refuses an unloadable persisted Ouro session without replacing it", async () => {
   const log = `${import.meta.dir}/../scratch/fake-acp-respawn-methods.log`;
   await writeFile(log, "");
   const previous = process.env.FAKE_ACP_METHOD_LOG;
@@ -139,23 +174,60 @@ test("ACP replaces an unloadable persisted session with an honest fresh conversa
   };
 
   try {
-    await adapter.refreshOptions?.(context);
+    await expect(adapter.refreshOptions?.(context)).rejects.toThrow("session not found");
     expect((await readFile(log, "utf8")).trim().split(/\n+/)).toEqual([
       "initialize",
       "session/load",
-      "session/new",
     ]);
-    expect(invalidations).toBe(1);
-    expect(context.internal.acpResumeSessionId).toBe("fake-default");
-    expect(events).toContainEqual({
-      kind: "recovery",
-      mode: "respawned",
-      title: "Started a fresh conversation",
-      message: "The previous provider session could not be loaded.",
-    });
+    expect(invalidations).toBe(0);
+    expect(context.internal.acpResumeSessionId).toBe("missing-session");
   } finally {
     adapter.dispose(context);
     if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;
     else process.env.FAKE_ACP_METHOD_LOG = previous;
+  }
+});
+
+test("generic ACP replaces an unloadable persisted session with an honest fresh conversation", async () => {
+  const definition: ProviderDef = {
+    id: "respawn-acp",
+    label: "Respawn ACP",
+    adapter: "acp",
+    cmd: ["bun", `${import.meta.dir}/fake-acp.ts`, "--fail-load"],
+  };
+  const adapter = makeAcpAdapter(definition);
+  const events: AgentEvent[] = [];
+  let invalidations = 0;
+  const context: SessionCtx = {
+    id: "respawn-session",
+    provider: definition.id,
+    cwd: `${import.meta.dir}/../scratch`,
+    title: "respawn",
+    autoApprove: false,
+    startOptions: {},
+    status: "idle",
+    events,
+    internal: { acpResumeSessionId: "missing-session" },
+    emit(event) {
+      events.push(event);
+    },
+    setStatus(status: SessionStatus) {
+      this.status = status;
+    },
+    async invalidatePersistedSession() {
+      invalidations += 1;
+    },
+  };
+
+  try {
+    await adapter.refreshOptions?.(context);
+    expect(invalidations).toBe(1);
+    expect(context.internal.acpResumeSessionId).toBe("fake-default");
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "recovery",
+      mode: "respawned",
+    }));
+  } finally {
+    adapter.dispose(context);
   }
 });

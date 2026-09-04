@@ -34,7 +34,7 @@ for await (const line of rl) {
     if (startupDelayMs > 0) await Bun.sleep(startupDelayMs);
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
   } else if (msg.method === "session/new") {
-    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: `fake-${model || "default"}` } });
+    send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params?.sessionId ?? `fake-${model || "default"}` } });
   } else if (msg.method === "session/load") {
     if (failLoad) {
       send({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "session not found" } });

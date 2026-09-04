@@ -33,22 +33,21 @@ if (consumeOptimisticUserEcho(optimistic, "same")) {
 }
 
 const providers = [
-  { id: "copilot", label: "GitHub Copilot" },
-  { id: "agency-worker", label: "Agency worker", role: "boss" as const },
+  { id: "ouro-boss", label: "slugger", role: "boss" as const },
 ];
-if (resolveProviderSelection(providers, "", "agency-worker") !== "agency-worker") {
+if (resolveProviderSelection(providers, "", "ouro-boss") !== "ouro-boss") {
   throw new Error("a clean Workbench composer should select the configured boss");
 }
-if (resolveProviderSelection(providers, "copilot", "agency-worker") !== "copilot") {
-  throw new Error("an installed user-selected provider should be preserved");
+if (resolveProviderSelection(providers, "copilot", "ouro-boss") !== "ouro-boss") {
+  throw new Error("a stale provider selection should collapse to the selected Ouro Boss");
 }
 const recoveredBoss = pickInitialBossSession([
-  { id: "copilot-newer", provider: "copilot", cwd: "/tmp", title: "GitHub Copilot", status: "idle", createdAt: 20 },
-  { id: "boss-older", provider: "agency-worker", cwd: "/tmp", title: "Boss", status: "idle", createdAt: 10 },
+  { id: "stale-newer", provider: "copilot", cwd: "/tmp", title: "GitHub Copilot", status: "idle", createdAt: 20 },
+  { id: "boss-older", provider: "ouro-boss", cwd: "/tmp", title: "Boss", status: "idle", createdAt: 10 },
 ], {
   productName: "Ouro Workbench v1",
   surfaceName: "Boss",
-  defaultProvider: "agency-worker",
+  defaultProvider: "ouro-boss",
   localAuthorityLabel: "Controlled here",
   hubAuthorityLabel: "Controlled in Agency Hub",
   hubUrl: "https://aka.ms/agency/hub",
@@ -59,13 +58,13 @@ if (recoveredBoss?.id !== "boss-older") {
 if (pickInitialBossSession([], null) !== null) {
   throw new Error("generic Agent Chat should not auto-resume a Workbench Boss");
 }
-if (providerSessionTitle(providers, "agency-worker") !== "Agency worker") {
+if (providerSessionTitle(providers, "ouro-boss") !== "slugger") {
   throw new Error("session title should use the provider label");
 }
-if (providerSessionTitle(providers, "agency-worker", {
+if (providerSessionTitle(providers, "ouro-boss", {
   productName: "Ouro Workbench v1",
   surfaceName: "Boss",
-  defaultProvider: "agency-worker",
+  defaultProvider: "ouro-boss",
   localAuthorityLabel: "Controlled here",
   hubAuthorityLabel: "Controlled in Agency Hub",
   hubUrl: "https://aka.ms/agency/hub",
@@ -75,7 +74,7 @@ if (providerSessionTitle(providers, "agency-worker", {
 if (providerSessionTitle(providers, "missing") !== "Agent") {
   throw new Error("unknown provider title should be neutral");
 }
-if (providerStartTimeoutMs([{ id: "agency-worker", label: "Agency worker", startupTimeoutMs: 90_000 }], "agency-worker") !== 90_000) {
+if (providerStartTimeoutMs([{ id: "ouro-boss", label: "slugger", startupTimeoutMs: 90_000 }], "ouro-boss") !== 90_000) {
   throw new Error("provider startup timeout should reach the browser client");
 }
 if (providerStartTimeoutMs(providers, "missing") !== 30_000) {

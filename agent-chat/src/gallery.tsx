@@ -287,7 +287,7 @@ export function GalleryApp() {
                 productName: "Ouro Workbench v1",
                 surfaceName: "Boss",
                 contextLabel: "Desk / demo-task",
-                defaultProvider: "agency-worker",
+                defaultProvider: "ouro-boss",
                 localAuthorityLabel: "Controlled here",
                 hubAuthorityLabel: "Controlled in Agency Hub",
                 hubUrl: "https://aka.ms/agency/hub",

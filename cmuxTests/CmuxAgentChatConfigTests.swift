@@ -29,6 +29,107 @@ struct CmuxAgentChatConfigTests {
         #expect(command?.contains("/agent-chat/cmux-chat") == true)
     }
 
+    @Test func ouroWorkbenchBossSelectionPreservesValidLegacyThenFallsBackOnlyWhenUnique() {
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: "slugger",
+            usableAgentNames: ["ouroboros", "slugger"]
+        ) == .selected("slugger"))
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: "missing",
+            usableAgentNames: ["ouroboros"]
+        ) == .selected("ouroboros"))
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: nil,
+            usableAgentNames: []
+        ) == .unavailable("No enabled Ouro agents are installed."))
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: nil,
+            usableAgentNames: ["ouroboros", "slugger"]
+        ) == .unavailable("Choose one Ouro agent as Boss: ouroboros, slugger."))
+    }
+
+    @Test func ouroWorkbenchBossSelectionRejectsUnsafeOrDisabledNames() {
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: "../slugger",
+            usableAgentNames: ["../slugger"]
+        ) == .unavailable("No enabled Ouro agents are installed."))
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            legacyBossName: "disabled",
+            usableAgentNames: ["ouroboros"]
+        ) == .selected("ouroboros"))
+    }
+
+    @Test func ouroWorkbenchEnvironmentCarriesTheResolvedBossOrExactSetupError() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-boss-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let bundles = home.appendingPathComponent("AgentBundles", isDirectory: true)
+        let slugger = bundles.appendingPathComponent("slugger.ouro", isDirectory: true)
+        let legacyDirectory = appSupport.appendingPathComponent("OuroWorkbench", isDirectory: true)
+        let bundle = root.appendingPathComponent("Ouro Workbench v1 DEV.app", isDirectory: true)
+        let workbenchMCP = bundle.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP")
+        let ouro = home.appendingPathComponent(".ouro-cli/bin/ouro")
+        try fileManager.createDirectory(at: slugger, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: workbenchMCP.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: ouro.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #expect(fileManager.createFile(atPath: workbenchMCP.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: ouro.path, contents: Data("#!/bin/sh\n".utf8)))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: workbenchMCP.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ouro.path)
+        try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
+            to: slugger.appendingPathComponent("agent.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try #"{"boss":{"agentName":"slugger"}}"#.write(
+            to: legacyDirectory.appendingPathComponent("workspace-state.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        defer { try? fileManager.removeItem(at: root) }
+        let sourceFilePath = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/FeatureFlags.swift")
+            .path
+
+        let selected = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            bundleURL: bundle,
+            sourceFilePath: sourceFilePath,
+            fileManager: fileManager
+        )
+        #expect(selected["CMUX_AGENT_CHAT_DEFAULT_PROVIDER"] == "ouro-boss")
+        #expect(selected["CMUX_AGENT_CHAT_BOSS_AGENT"] == "slugger")
+        #expect(selected["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
+        #expect(selected["CMUX_AGENT_CHAT_OURO_COMMAND"] == ouro.path)
+        #expect(selected["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == workbenchMCP.path)
+
+        try fileManager.removeItem(at: legacyDirectory.appendingPathComponent("workspace-state.json"))
+        let ouroboros = bundles.appendingPathComponent("ouroboros.ouro", isDirectory: true)
+        try fileManager.createDirectory(at: ouroboros, withIntermediateDirectories: true)
+        try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
+            to: ouroboros.appendingPathComponent("agent.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let ambiguous = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            bundleURL: bundle,
+            sourceFilePath: sourceFilePath,
+            fileManager: fileManager
+        )
+        #expect(ambiguous["CMUX_AGENT_CHAT_BOSS_AGENT"] == nil)
+        #expect(ambiguous["CMUX_AGENT_CHAT_BOSS_ERROR"] == "Choose one Ouro agent as Boss: ouroboros, slugger.")
+    }
+
     @Test func ouroWorkbenchDefaultUsesItsSourceOwnedAgentChatHelper() {
         let command = "'/repo/agent-chat/cmux-chat' --no-open"
         let resolved = CmuxAgentChatConfiguration.resolved(
