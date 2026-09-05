@@ -43,6 +43,15 @@ struct AgentChatActionInFlightGate {
         }
     }
 
+    @MainActor
+    static func runReservedAction(
+        _ action: @MainActor () async -> Bool
+    ) async -> Bool? {
+        guard begin() else { return nil }
+        defer { end() }
+        return await action()
+    }
+
     static func ownedServerSession() -> AgentChatOwnedServerSession? {
         lock.withLock { state in
             state.ownedServerSession
@@ -475,19 +484,29 @@ extension AppDelegate {
             )
             return
         }
+        guard prepareNewAgentChatAction() else { return }
         Task { @MainActor [weak self, weak tabManager] in
             guard let self, let tabManager else { return }
-            if AgentChatActionInFlightGate.hasOwnedServerWork(),
-               !(await AgentChatActionInFlightGate.stopOwnedServer()) {
-                restoreWorkbenchBossSelection(choice.previousAgentName)
-                presentWorkbenchBossSwitchFailure(preferredWindow: preferredWindow)
-                return
+            let result = await AgentChatActionInFlightGate.runReservedAction {
+                if AgentChatActionInFlightGate.hasOwnedServerWork(),
+                   !(await AgentChatActionInFlightGate.stopOwnedServer()) {
+                    self.restoreWorkbenchBossSelection(choice.previousAgentName)
+                    self.presentWorkbenchBossSwitchFailure(preferredWindow: preferredWindow)
+                    return false
+                }
+                guard let context = self.mainWindowContext(for: tabManager) else {
+                    NSSound.beep()
+                    return false
+                }
+                return await self.completeNewAgentChatAction(
+                    tabManager: tabManager,
+                    agentChat: context.cmuxConfigStore?.agentChat ?? .default,
+                    globalConfigPath: context.cmuxConfigStore?.globalConfigPath,
+                    preferredWindow: self.resolvedWindow(for: context) ?? preferredWindow
+                )
             }
-            if !executeConfiguredCmuxAction(
-                id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID,
-                tabManager: tabManager,
-                preferredWindow: preferredWindow
-            ) {
+            if result == nil {
+                restoreWorkbenchBossSelection(choice.previousAgentName)
                 NSSound.beep()
             }
         }
@@ -653,6 +672,26 @@ extension AppDelegate {
         preferredWindow: NSWindow?,
         onExecuted: (() -> Void)? = nil
     ) -> Bool {
+        guard prepareNewAgentChatAction() else { return false }
+        guard AgentChatActionInFlightGate.begin() else {
+            NSSound.beep()
+            return false
+        }
+        Task { @MainActor [weak self, weak tabManager] in
+            defer { AgentChatActionInFlightGate.end() }
+            guard let self, let tabManager else { return }
+            _ = await self.completeNewAgentChatAction(
+                tabManager: tabManager,
+                agentChat: agentChat,
+                globalConfigPath: globalConfigPath,
+                preferredWindow: preferredWindow,
+                onExecuted: onExecuted
+            )
+        }
+        return true
+    }
+
+    private func prepareNewAgentChatAction() -> Bool {
         guard CmuxFeatureFlags.shared.isAgentChatUIEnabled else {
             NSSound.beep()
             return false
@@ -662,49 +701,50 @@ extension AppDelegate {
             return false
         }
         AgentChatThemeSync.start()
-        guard AgentChatActionInFlightGate.begin() else {
+        return true
+    }
+
+    private func completeNewAgentChatAction(
+        tabManager: TabManager,
+        agentChat: CmuxAgentChatConfiguration,
+        globalConfigPath: String?,
+        preferredWindow: NSWindow?,
+        onExecuted: (() -> Void)? = nil
+    ) async -> Bool {
+        let availability = await ensureAgentChatServerAvailable(
+            agentChat,
+            globalConfigPath: globalConfigPath,
+            preferredWindow: preferredWindow
+        )
+        AgentChatThemeSync.syncNow(agentChat: agentChat)
+        guard let browserURL = availability.browserURL else {
+            NSSound.beep()
+            postAgentChatServerUnavailableNotification(
+                workspace: nil,
+                agentChat: agentChat
+            )
+            return false
+        }
+        let workspace: Workspace?
+        let didOpen: Bool
+        if OuroWorkbenchProduct.isCurrentBundle {
+            didOpen = openWorkbenchBossPanel(tabManager: tabManager, url: browserURL) != nil
+            workspace = tabManager.selectedWorkspace
+        } else {
+            workspace = openAgentChatWorkspace(tabManager: tabManager, url: browserURL)
+            didOpen = workspace != nil
+        }
+        guard didOpen else {
             NSSound.beep()
             return false
         }
-        Task { @MainActor [weak self, weak tabManager] in
-            defer { AgentChatActionInFlightGate.end() }
-            guard let self else { return }
-            let availability = await self.ensureAgentChatServerAvailable(
-                agentChat,
-                globalConfigPath: globalConfigPath,
-                preferredWindow: preferredWindow
+        if !availability.isReachable {
+            postAgentChatServerUnavailableNotification(
+                workspace: workspace,
+                agentChat: agentChat
             )
-            AgentChatThemeSync.syncNow(agentChat: agentChat)
-            guard let tabManager else { return }
-            guard let browserURL = availability.browserURL else {
-                NSSound.beep()
-                self.postAgentChatServerUnavailableNotification(
-                    workspace: nil,
-                    agentChat: agentChat
-                )
-                return
-            }
-            let workspace: Workspace?
-            let didOpen: Bool
-            if OuroWorkbenchProduct.isCurrentBundle {
-                didOpen = self.openWorkbenchBossPanel(tabManager: tabManager, url: browserURL) != nil
-                workspace = tabManager.selectedWorkspace
-            } else {
-                workspace = self.openAgentChatWorkspace(tabManager: tabManager, url: browserURL)
-                didOpen = workspace != nil
-            }
-            guard didOpen else {
-                NSSound.beep()
-                return
-            }
-            if !availability.isReachable {
-                self.postAgentChatServerUnavailableNotification(
-                    workspace: workspace,
-                    agentChat: agentChat
-                )
-            }
-            onExecuted?()
         }
+        onExecuted?()
         return true
     }
 

@@ -794,6 +794,36 @@ struct CmuxAgentChatConfigTests {
         }
     }
 
+    @MainActor
+    @Test func agentChatReservedActionBlocksConcurrentStartsUntilCompletion() async {
+        let (enteredStream, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (releaseStream, releaseContinuation) = AsyncStream<Void>.makeStream()
+        let reserved = Task { @MainActor in
+            await AgentChatActionInFlightGate.runReservedAction {
+                enteredContinuation.yield()
+                for await _ in releaseStream {
+                    break
+                }
+                return true
+            }
+        }
+
+        for await _ in enteredStream {
+            break
+        }
+        #expect(!AgentChatActionInFlightGate.begin())
+        releaseContinuation.yield()
+        releaseContinuation.finish()
+        #expect(await reserved.value == true)
+
+        let nextBegin = AgentChatActionInFlightGate.begin()
+        #expect(nextBegin)
+        if nextBegin {
+            AgentChatActionInFlightGate.end()
+        }
+        enteredContinuation.finish()
+    }
+
     @Test func agentChatThemePayloadUsesResolvedGhosttyConfigFields() throws {
         var config = GhosttyConfig()
         config.backgroundColor = try #require(NSColor(hex: "#102030"))
