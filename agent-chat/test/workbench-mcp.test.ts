@@ -24,9 +24,12 @@ function inspectResponse(
   return response;
 }
 
-test("Workbench MCP exposes only focus and flag-for-review", () => {
+test("Workbench MCP exposes bounded inspection and safe local actions", () => {
   expect(workbenchToolDefinitions().map((tool) => tool.name)).toEqual([
+    "workbench_list",
+    "workbench_inspect",
     "workbench_focus",
+    "workbench_send_guidance",
     "workbench_flag_for_review",
   ]);
 });
@@ -47,7 +50,7 @@ test("Workbench MCP handles its complete protocol surface", async () => {
     jsonrpc: "2.0",
     id: 2,
     method: "tools/list",
-  }, call))?.result?.tools).toHaveLength(2);
+  }, call))?.result?.tools).toHaveLength(5);
   expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 3,
@@ -70,9 +73,31 @@ test("Workbench MCP maps validated tools to exact native action requests", async
   const workspaceId = "11111111-1111-4111-8111-111111111111";
   const surfaceId = "22222222-2222-4222-8222-222222222222";
 
-  const focus = await handleWorkbenchMCPRequest({
+  const list = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 0,
+    method: "tools/call",
+    params: {
+      name: "workbench_list",
+      arguments: {},
+    },
+  }, call);
+  expect(inspectResponse(list)?.result?.isError).toBe(false);
+
+  const inspect = await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 1,
+    method: "tools/call",
+    params: {
+      name: "workbench_inspect",
+      arguments: { workspace_id: workspaceId, surface_id: surfaceId },
+    },
+  }, call);
+  expect(inspectResponse(inspect)?.result?.isError).toBe(false);
+
+  const focus = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 2,
     method: "tools/call",
     params: {
       name: "workbench_focus",
@@ -83,7 +108,7 @@ test("Workbench MCP maps validated tools to exact native action requests", async
 
   const flag = await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
-    id: 2,
+    id: 3,
     method: "tools/call",
     params: {
       name: "workbench_flag_for_review",
@@ -96,7 +121,34 @@ test("Workbench MCP maps validated tools to exact native action requests", async
     },
   }, call);
   expect(inspectResponse(flag)?.result?.isError).toBe(false);
+
+  const guidance = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "workbench_send_guidance",
+      arguments: {
+        request_id: "guidance-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: 4,
+        text: "Use the shared helper and continue.",
+      },
+    },
+  }, call);
+  expect(inspectResponse(guidance)?.result?.isError).toBe(false);
   expect(calls).toEqual([
+    {
+      method: "workbench.list",
+      params: {},
+    },
+    {
+      method: "workbench.inspect",
+      params: { workspace_id: workspaceId, surface_id: surfaceId },
+    },
     {
       method: "workbench.focus",
       params: { request_id: "focus-1", workspace_id: workspaceId, surface_id: surfaceId },
@@ -108,6 +160,18 @@ test("Workbench MCP maps validated tools to exact native action requests", async
         workspace_id: workspaceId,
         surface_id: surfaceId,
         summary: "Ari needs to choose a rollout ring.",
+      },
+    },
+    {
+      method: "workbench.send_guidance",
+      params: {
+        request_id: "guidance-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: 4,
+        text: "Use the shared helper and continue.",
       },
     },
   ]);
@@ -134,6 +198,27 @@ test("Workbench MCP rejects malformed action requests before native dispatch", a
   });
 
   expect(inspectResponse(response)?.result?.isError).toBe(true);
+  const guidance = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: "bad-guidance",
+    method: "tools/call",
+    params: {
+      name: "workbench_send_guidance",
+      arguments: {
+        request_id: "guidance-1",
+        workspace_id: "11111111-1111-4111-8111-111111111111",
+        surface_id: "22222222-2222-4222-8222-222222222222",
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: -1,
+        text: "line one\nline two",
+      },
+    },
+  }, async () => {
+    calls += 1;
+    return {};
+  });
+  expect(inspectResponse(guidance)?.result?.isError).toBe(true);
   expect(calls).toBe(0);
 });
 

@@ -34,6 +34,16 @@ struct WorkbenchLocalSupervisionTests {
             forKey: WorkbenchSupervisionPolicy.defaultsKey
         )
         #expect(WorkbenchSupervisionPolicy.load(defaults: defaults) == .failClosed)
+
+        var policy = WorkbenchSupervisionPolicy.dogfoodDefault
+        policy.autonomyMode = .routine
+        policy.humanMutationMode = .whenUnfocused
+        #expect(!policy.allowsAutomatedLocalMutation(appIsActive: true))
+        #expect(policy.allowsAutomatedLocalMutation(appIsActive: false))
+        policy.humanMutationMode = .allowed
+        #expect(policy.allowsAutomatedLocalMutation(appIsActive: true))
+        policy.autonomyMode = .observeOnly
+        #expect(!policy.allowsAutomatedLocalMutation(appIsActive: false))
     }
 
     @Test func strictDispositionParsingRejectsProseAndBoundsFields() {
@@ -49,6 +59,358 @@ struct WorkbenchLocalSupervisionTests {
                 #"{"disposition":"unknown"}"#
             ) == nil
         )
+        let guidance = WorkbenchSupervisionDispositionResult.parse(
+            #"{"disposition":"draft_guidance","guidance":"continue with the shared helper"}"#
+        )
+        #expect(guidance?.disposition == .draftGuidance)
+        #expect(guidance?.guidance == "continue with the shared helper")
+        #expect(
+            WorkbenchSupervisionDispositionResult.parse(
+                #"{"disposition":"draft_guidance"}"#
+            ) == nil
+        )
+    }
+
+    @Test func localSessionProjectionTracksYieldedRevisionBoundedEvidenceAndInputEpoch() async throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let store = WorkbenchLocalSessionStateStore()
+        let coordinator = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            evidenceProvider: { _ in
+                WorkbenchSupervisionEvidence(
+                    lastUserMessage: String(repeating: "u", count: 1_500),
+                    assistantMessage: String(repeating: "a", count: 1_500)
+                )
+            },
+            sessionStateStore: store,
+            runTurn: TurnRecorder(response: #"{"disposition":"no_action"}"#).turnRunner
+        )
+        let workspaceId = try #require(UUID(uuidString: Self.workspaceId))
+        let surfaceId = try #require(UUID(uuidString: Self.surfaceId))
+        store.recordInput(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            recordedAt: .distantPast
+        )
+
+        await coordinator.processForTesting(
+            event(
+                eventId: "yielded",
+                sequence: 1,
+                sourceEventId: "yielded",
+                sourceRevision: "revision-yielded"
+            )
+        )
+
+        let yielded = try #require(store.snapshot(workspaceId: workspaceId, surfaceId: surfaceId))
+        #expect(yielded.phase == .yielded)
+        #expect(yielded.sourceRevision == "revision-yielded")
+        #expect(yielded.inputEpoch == 1)
+        #expect(yielded.mutationEligible)
+        #expect(yielded.evidence?.lastUserMessage?.count == 1_000)
+        #expect(yielded.evidence?.assistantMessage?.count == 1_000)
+        let draft = WorkbenchGuidanceDraft(
+            requestId: "draft",
+            sourceRevision: "revision-yielded",
+            inputEpoch: 1,
+            text: "continue"
+        )
+        #expect(
+            store.storeGuidance(
+                draft,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session"
+            )
+        )
+        await coordinator.processForTesting(
+            event(
+                eventId: "yielded-replay",
+                sequence: 2,
+                sourceEventId: "yielded",
+                sourceRevision: "revision-yielded"
+            )
+        )
+        #expect(
+            store.snapshot(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )?.pendingGuidance == draft
+        )
+
+        await coordinator.processForTesting(
+            event(
+                name: "agent.hook.UserPromptSubmit",
+                eventId: "active",
+                sequence: 3,
+                sourceEventId: "active",
+                sourceRevision: "revision-active"
+            )
+        )
+
+        let active = try #require(store.snapshot(workspaceId: workspaceId, surfaceId: surfaceId))
+        #expect(active.phase == .active)
+        #expect(active.sourceRevision == "revision-active")
+        #expect(active.inputEpoch == 1)
+    }
+
+    @Test func recoveryHydratesReadOnlyProjectionBeforeReceiptDedupe() async throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let event = event(
+            eventId: "recoverable",
+            sequence: 1,
+            sourceEventId: "recoverable",
+            sourceRevision: "revision-recoverable"
+        )
+        let original = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            runTurn: TurnRecorder(response: #"{"disposition":"no_action"}"#).turnRunner
+        )
+        await original.processForTesting(event)
+        #expect(original.receiptsForTesting().count == 1)
+
+        let recoveredStore = WorkbenchLocalSessionStateStore()
+        let recovered = WorkbenchLocalSupervisionCoordinator(
+            defaults: defaults,
+            sessionStateStore: recoveredStore,
+            runTurn: { _, _, _ in
+                Issue.record("persisted receipt dedupe must not rerun the Boss turn")
+                return ""
+            }
+        )
+        await recovered.processForTesting(
+            event,
+            mutationEligible: false
+        )
+        let workspaceId = try #require(UUID(uuidString: Self.workspaceId))
+        let surfaceId = try #require(UUID(uuidString: Self.surfaceId))
+        let projection = try #require(
+            recoveredStore.snapshot(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )
+        )
+        #expect(projection.sourceRevision == "revision-recoverable")
+        #expect(!projection.mutationEligible)
+    }
+
+    @Test func compareAndActClaimsRejectEveryStaleOrAmbiguousStateAndStayBounded() throws {
+        let store = WorkbenchLocalSessionStateStore()
+        let workspaceId = try #require(UUID(uuidString: Self.workspaceId))
+        let surfaceId = try #require(UUID(uuidString: Self.surfaceId))
+
+        #expect(
+            store.claimMutation(
+                requestId: "missing",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session",
+                sourceRevision: "revision-1",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.targetUnavailable)
+        )
+
+        let recoveredSurfaceId = UUID()
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "recovered",
+                eventId: "recovered",
+                eventSequence: 0,
+                source: "copilot",
+                sessionId: "recovered-session",
+                workspaceId: workspaceId.uuidString,
+                surfaceId: recoveredSurfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "recovered-native",
+                sourceRevision: "recovered-revision",
+                causalChainId: "recovered-turn",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00Z",
+                evidence: nil
+            ),
+            mutationEligible: false
+        )
+        #expect(
+            store.claimMutation(
+                requestId: "recovered",
+                workspaceId: workspaceId,
+                surfaceId: recoveredSurfaceId,
+                sessionId: "recovered-session",
+                sourceRevision: "recovered-revision",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.sourceStale)
+        )
+
+        let lateInputSurfaceId = UUID()
+        store.recordInput(
+            workspaceId: workspaceId,
+            surfaceId: lateInputSurfaceId,
+            recordedAt: .distantFuture
+        )
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "late-input",
+                eventId: "late-input",
+                eventSequence: 1,
+                source: "copilot",
+                sessionId: "late-input-session",
+                workspaceId: workspaceId.uuidString,
+                surfaceId: lateInputSurfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "late-input-native",
+                sourceRevision: "late-input-revision",
+                causalChainId: "late-input-turn",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00Z",
+                evidence: WorkbenchSupervisionEvidence(
+                    lastUserMessage: "next",
+                    assistantMessage: "waiting"
+                )
+            )
+        )
+        #expect(
+            store.claimMutation(
+                requestId: "late-input",
+                workspaceId: workspaceId,
+                surfaceId: lateInputSurfaceId,
+                sessionId: "late-input-session",
+                sourceRevision: "late-input-revision",
+                inputEpoch: 1,
+                requiredPhase: .yielded,
+                requiresVerifiedEvidence: true
+            ) == .failure(.sourceStale)
+        )
+
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "yielded",
+                eventId: "yielded",
+                eventSequence: 1,
+                source: "copilot",
+                sessionId: "copilot-session",
+                workspaceId: workspaceId.uuidString,
+                surfaceId: surfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "native-yielded",
+                sourceRevision: "revision-1",
+                causalChainId: "turn-1",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00Z",
+                evidence: nil
+            )
+        )
+        #expect(
+            store.claimMutation(
+                requestId: "wrong-session",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "other-session",
+                sourceRevision: "revision-1",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.sessionMismatch)
+        )
+        #expect(
+            store.claimMutation(
+                requestId: "stale",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session",
+                sourceRevision: "revision-stale",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.sourceStale)
+        )
+
+        let first = try store.claimMutation(
+            requestId: "claim-1",
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            sessionId: "copilot-session",
+            sourceRevision: "revision-1",
+            inputEpoch: 0,
+            requiredPhase: .yielded
+        ).get()
+        #expect(
+            store.claimMutation(
+                requestId: "claim-2",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session",
+                sourceRevision: "revision-1",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.actionInFlight)
+        )
+        store.release(first)
+        store.recordInput(workspaceId: workspaceId, surfaceId: surfaceId)
+        #expect(
+            store.claimMutation(
+                requestId: "input-changed",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session",
+                sourceRevision: "revision-1",
+                inputEpoch: 0,
+                requiredPhase: .yielded
+            ) == .failure(.inputChanged)
+        )
+
+        store.observeLifecycleEvent(
+            event(
+                name: "agent.hook.UserPromptSubmit",
+                eventId: "active",
+                sequence: 2,
+                sourceEventId: "active",
+                sourceRevision: "revision-2"
+            )
+        )
+        #expect(
+            store.claimMutation(
+                requestId: "active",
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: "copilot-session",
+                sourceRevision: "revision-2",
+                inputEpoch: 1,
+                requiredPhase: .yielded
+            ) == .failure(.sessionNotYielded)
+        )
+
+        for index in 3...260 {
+            let surface = UUID()
+            store.observe(
+                WorkbenchSupervisionEnvelope(
+                    id: "bounded-\(index)",
+                    eventId: "bounded-\(index)",
+                    eventSequence: Int64(index),
+                    source: "copilot",
+                    sessionId: "session-\(index)",
+                    workspaceId: workspaceId.uuidString,
+                    surfaceId: surface.uuidString,
+                    cwd: "/tmp",
+                    observation: .turnYielded,
+                    sourceEventId: "native-\(index)",
+                    sourceRevision: "revision-\(index)",
+                    causalChainId: "turn-\(index)",
+                    actionRequestId: nil,
+                    toolName: nil,
+                    occurredAt: "2026-09-05T00:00:00Z",
+                    evidence: nil
+                )
+            )
+        }
+        #expect(store.snapshots().count == 256)
     }
 
     @Test func ariAttentionRequiresSummaryAndInvokesTheNativeDispositionHandler() async throws {
@@ -835,6 +1197,272 @@ struct WorkbenchLocalSupervisionTests {
 @Suite("Workbench local actions", .serialized)
 @MainActor
 struct WorkbenchLocalActionTests {
+    @Test func inspectAndGuidanceUseExactRevisionEpochAuthorityAndIdempotency() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let sessionId = "copilot-session"
+        let store = WorkbenchLocalSessionStateStore()
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "yielded",
+                eventId: "yielded",
+                eventSequence: 1,
+                source: "copilot",
+                sessionId: sessionId,
+                workspaceId: workspaceId.uuidString,
+                surfaceId: surfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "native-yielded",
+                sourceRevision: "revision-1",
+                causalChainId: "turn-1",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00Z",
+                evidence: WorkbenchSupervisionEvidence(
+                    lastUserMessage: "continue?",
+                    assistantMessage: "I need the shared helper."
+                )
+            )
+        )
+
+        let inspect = WorkbenchLocalActionRouter.inspect(
+            params: [
+                "workspace_id": workspaceId.uuidString,
+                "surface_id": surfaceId.uuidString,
+            ],
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere }
+        )
+        let inspected = try successPayload(inspect)
+        #expect(inspected["session_id"] as? String == sessionId)
+        #expect(inspected["phase"] as? String == "yielded")
+        #expect(inspected["source_revision"] as? String == "revision-1")
+        #expect(inspected["input_epoch"] as? UInt64 == 0)
+        #expect(inspected["authority"] as? String == "controlledHere")
+
+        let draft = WorkbenchGuidanceDraft(
+            requestId: "guidance-1",
+            sourceRevision: "revision-1",
+            inputEpoch: 0,
+            text: "Use the shared helper and continue."
+        )
+        #expect(
+            store.storeGuidance(
+                draft,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: sessionId
+            )
+        )
+        let drafted = try successPayload(
+            WorkbenchLocalActionRouter.inspect(
+                params: [
+                    "workspace_id": workspaceId.uuidString,
+                    "surface_id": surfaceId.uuidString,
+                ],
+                stateStore: store,
+                enabled: true,
+                authority: { _, _, _ in .controlledHere }
+            )
+        )
+        #expect(drafted["pending_guidance"] as? String == draft.text)
+
+        let listed = WorkbenchLocalActionRouter.list(
+            params: [:],
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere }
+        )
+        let listPayload = try successPayload(listed)
+        let listedSessions = try #require(listPayload["sessions"] as? [[String: Any]])
+        #expect(listedSessions.count == 1)
+        #expect(listedSessions[0]["has_pending_guidance"] as? Bool == true)
+        #expect(listedSessions[0]["pending_guidance"] == nil)
+
+        let calls = TestLocked(0)
+        let params: [String: Any] = [
+            "request_id": "guidance-1",
+            "workspace_id": workspaceId.uuidString,
+            "surface_id": surfaceId.uuidString,
+            "session_id": sessionId,
+            "expected_source_revision": "revision-1",
+            "expected_input_epoch": UInt64(0),
+            "text": "Use the shared helper and continue.",
+        ]
+        #expect(errorCode(WorkbenchLocalActionRouter.sendGuidance(
+            params: params,
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in
+                Issue.record("observe-only policy must block automated input")
+                return true
+            }
+        )) == "policy_denied")
+        var policy = WorkbenchSupervisionPolicy.dogfoodDefault
+        policy.autonomyMode = .routine
+        policy.humanMutationMode = .allowed
+        policy.save(defaults: defaults)
+
+        let sent = WorkbenchLocalActionRouter.sendGuidance(
+            params: params,
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { workspace, surface, text in
+                #expect(workspace == workspaceId)
+                #expect(surface == surfaceId)
+                #expect(text == "Use the shared helper and continue.")
+                calls.withLock { $0 += 1 }
+                store.recordInput(workspaceId: workspaceId, surfaceId: surfaceId)
+                return true
+            }
+        )
+        let sentPayload = try successPayload(sent)
+        #expect(sentPayload["result_code"] as? String == "guidance_sent")
+        #expect(sentPayload["input_epoch"] as? UInt64 == 1)
+        let afterSend = try successPayload(
+            WorkbenchLocalActionRouter.inspect(
+                params: [
+                    "workspace_id": workspaceId.uuidString,
+                    "surface_id": surfaceId.uuidString,
+                ],
+                stateStore: store,
+                enabled: true,
+                authority: { _, _, _ in .controlledHere }
+            )
+        )
+        #expect(afterSend["pending_guidance"] is NSNull)
+
+        policy.autonomyMode = .observeOnly
+        policy.humanMutationMode = .never
+        policy.save(defaults: defaults)
+        let replay = WorkbenchLocalActionRouter.sendGuidance(
+            params: params,
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in
+                Issue.record("an exact replay must not send guidance twice")
+                return false
+            }
+        )
+        #expect(try successPayload(replay)["replayed"] as? Bool == true)
+        #expect(calls.withLock { $0 } == 1)
+        policy.autonomyMode = .routine
+        policy.humanMutationMode = .allowed
+        policy.save(defaults: defaults)
+
+        let stale = WorkbenchLocalActionRouter.sendGuidance(
+            params: params.merging(["request_id": "guidance-stale"]) { _, new in new },
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in false }
+        )
+        #expect(errorPayload(stale)["result_code"] as? String == "input_changed")
+
+        let staleRevision = WorkbenchLocalActionRouter.sendGuidance(
+            params: params.merging([
+                "request_id": "guidance-stale-revision",
+                "expected_source_revision": "revision-stale",
+                "expected_input_epoch": UInt64(1),
+            ]) { _, new in new },
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in false }
+        )
+        #expect(errorPayload(staleRevision)["result_code"] as? String == "source_stale")
+
+        let hub = WorkbenchLocalActionRouter.sendGuidance(
+            params: params.merging([
+                "request_id": "guidance-hub",
+                "expected_input_epoch": UInt64(1),
+            ]) { _, new in new },
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledInAgencyHub },
+            effect: { _, _, _ in false }
+        )
+        #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
+
+        let noEvidenceSurfaceId = UUID()
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "no-evidence",
+                eventId: "no-evidence",
+                eventSequence: 2,
+                source: "copilot",
+                sessionId: "no-evidence-session",
+                workspaceId: workspaceId.uuidString,
+                surfaceId: noEvidenceSurfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "no-evidence-native",
+                sourceRevision: "no-evidence-revision",
+                causalChainId: "no-evidence-turn",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00Z",
+                evidence: nil
+            )
+        )
+        let noEvidence = WorkbenchLocalActionRouter.sendGuidance(
+            params: [
+                "request_id": "guidance-no-evidence",
+                "workspace_id": workspaceId.uuidString,
+                "surface_id": noEvidenceSurfaceId.uuidString,
+                "session_id": "no-evidence-session",
+                "expected_source_revision": "no-evidence-revision",
+                "expected_input_epoch": UInt64(0),
+                "text": "continue",
+            ],
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in false }
+        )
+        #expect(errorPayload(noEvidence)["result_code"] as? String == "evidence_unavailable")
+
+        let deliveryFailed = WorkbenchLocalActionRouter.sendGuidance(
+            params: params.merging([
+                "request_id": "guidance-delivery-failed",
+                "expected_input_epoch": UInt64(1),
+            ]) { _, new in new },
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in false }
+        )
+        #expect(errorPayload(deliveryFailed)["result_code"] as? String == "delivery_failed")
+
+        let readbackFailed = WorkbenchLocalActionRouter.sendGuidance(
+            params: params.merging([
+                "request_id": "guidance-readback-failed",
+                "expected_input_epoch": UInt64(1),
+            ]) { _, new in new },
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in true }
+        )
+        #expect(errorPayload(readbackFailed)["result_code"] as? String == "readback_failed")
+    }
+
     @Test func focusIsWriteAheadIdempotentAndRejectsRequestReuse() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
@@ -1002,6 +1630,22 @@ struct WorkbenchLocalActionTests {
             enabled: false,
             effect: { _, _ in true }
         )) == "unsupported")
+
+        #expect(errorCode(WorkbenchLocalActionRouter.list(
+            params: ["unexpected": true],
+            stateStore: WorkbenchLocalSessionStateStore(),
+            enabled: true,
+            authority: { _, _, _ in .controlledHere }
+        )) == "invalid_params")
+        #expect(errorCode(WorkbenchLocalActionRouter.inspect(
+            params: [
+                "workspace_id": UUID().uuidString,
+                "surface_id": UUID().uuidString,
+            ],
+            stateStore: WorkbenchLocalSessionStateStore(),
+            enabled: true,
+            authority: { _, _, _ in .controlledHere }
+        )) == "target_unavailable")
         #expect(errorCode(WorkbenchLocalActionRouter.focus(
             params: params.merging(["unexpected": true]) { _, new in new },
             defaults: defaults,
@@ -1116,6 +1760,23 @@ struct WorkbenchLocalActionTests {
         )
         #expect(errorCode(missingReviewTarget) == "action_failed")
 
+        let completedSessionId = "completed-session"
+        target.restoredAgentSnapshotsByPanelId[surfaceId] = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: completedSessionId,
+            workingDirectory: "/tmp",
+            launchCommand: nil,
+            workbenchAuthority: .controlledHere
+        )
+        target.restoredAgentResumeStatesByPanelId[surfaceId] = .completedAgentExit
+        #expect(
+            WorkbenchLocalActionRouter.liveAuthorityForTesting(
+                workspaceId: target.id,
+                surfaceId: surfaceId,
+                sessionId: completedSessionId
+            ) == nil
+        )
+
         let existingRequestId = "review-existing"
         store.addNotification(
             tabId: target.id,
@@ -1225,6 +1886,14 @@ struct WorkbenchLocalActionTests {
     private func errorCode(_ result: TerminalController.V2CallResult) -> String? {
         guard case .err(let code, _, _) = result else { return nil }
         return code
+    }
+
+    private func errorPayload(_ result: TerminalController.V2CallResult) -> [String: Any] {
+        guard case .err(_, _, let raw) = result else {
+            Issue.record("expected action failure, got \(result)")
+            return [:]
+        }
+        return (raw as? [String: Any]) ?? [:]
     }
 }
 
