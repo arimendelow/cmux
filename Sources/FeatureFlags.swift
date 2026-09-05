@@ -5,6 +5,8 @@ import os
 
 enum OuroWorkbenchProduct {
     private static let bundleIdentifierPrefix = "com.ourostack.workbench"
+    private static let copilotHookInstallStarted = OSAllocatedUnfairLock(initialState: false)
+    static let selectedBossDefaultsKey = "ouroWorkbench.selectedBossAgent"
 
     enum BossSelection: Equatable {
         case selected(String)
@@ -59,12 +61,19 @@ enum OuroWorkbenchProduct {
 
     static func agentChatStartCommand(
         bundleIdentifier: String?,
-        sourceFilePath: String
+        bundleURL: URL = Bundle.main.bundleURL,
+        sourceFilePath: String,
+        fileManager: FileManager = .default
     ) -> String? {
         guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return nil }
-        let script = repositoryRoot(sourceFilePath: sourceFilePath)
-            .appendingPathComponent("agent-chat/cmux-chat")
-        guard FileManager.default.isExecutableFile(atPath: script.path) else { return nil }
+        let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
+        let scripts = [
+            bundleURL.appendingPathComponent("Contents/Resources/agent-chat/cmux-chat"),
+            sourceRoot.appendingPathComponent("agent-chat/cmux-chat"),
+        ]
+        guard let script = scripts.first(where: {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }) else { return nil }
         return "BUN_BIN=\"$(command -v bun)\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
     }
 
@@ -75,13 +84,112 @@ enum OuroWorkbenchProduct {
         )
     }
 
+    static func scheduleCopilotHookInstallation() {
+        let shouldStart = copilotHookInstallStarted.withLock { started in
+            guard !started else { return false }
+            started = true
+            return true
+        }
+        guard shouldStart else { return }
+        Task.detached(priority: .utility) {
+            if !installCopilotHooksIfNeeded() {
+                Logger(
+                    subsystem: Bundle.main.bundleIdentifier ?? "com.ourostack.workbench",
+                    category: "copilot-hooks"
+                ).error("Workbench could not install Copilot lifecycle hooks")
+            }
+        }
+    }
+
+    static func installCopilotHooksIfNeeded(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        bundleURL: URL = Bundle.main.bundleURL,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default,
+        run: (URL, [String], [String: String]) -> Bool = runCopilotHookInstaller
+    ) -> Bool {
+        guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return false }
+        let hookURL = homeURL.appendingPathComponent(".copilot/hooks/cmux.json")
+        func isInstalled() -> Bool {
+            guard let data = fileManager.contents(atPath: hookURL.path),
+                  let content = String(data: data, encoding: .utf8) else {
+                return false
+            }
+            return content.contains("hooks copilot")
+        }
+        if isInstalled() { return true }
+
+        let cli = bundleURL.appendingPathComponent("Contents/Resources/bin/cmux")
+        guard fileManager.isExecutableFile(atPath: cli.path) else { return false }
+        let versions = homeURL.appendingPathComponent(".copilot-cli", isDirectory: true)
+        let versionedCopilots = (try? fileManager.contentsOfDirectory(
+            at: versions,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ))?.sorted {
+            $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending
+        }.map {
+            $0.appendingPathComponent("copilot")
+        } ?? []
+        let copilotCandidates = versionedCopilots + [
+            homeURL.appendingPathComponent(".local/bin/copilot"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/copilot"),
+            URL(fileURLWithPath: "/usr/local/bin/copilot"),
+        ]
+        guard let copilot = copilotCandidates.first(where: {
+            fileManager.isExecutableFile(atPath: $0.path)
+        }) else { return false }
+        var installEnvironment = environment
+        let existingPath = installEnvironment["PATH"]?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        installEnvironment["PATH"] = [
+            copilot.deletingLastPathComponent().path,
+            cli.deletingLastPathComponent().path,
+            existingPath,
+        ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ":")
+        guard run(
+            cli,
+            ["hooks", "setup", "--agent", "copilot", "--yes"],
+            installEnvironment
+        ) else { return false }
+        return isInstalled()
+    }
+
+    private static func runCopilotHookInstaller(
+        executable: URL,
+        arguments: [String],
+        environment: [String: String]
+    ) -> Bool {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
     static func resolveBossSelection(
+        selectedBossName: String? = nil,
         legacyBossName: String?,
         usableAgentNames: [String]
     ) -> BossSelection {
         let usable = usableAgentNames
             .filter(isSafeAgentName)
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        if let selectedBossName = selectedBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           isSafeAgentName(selectedBossName),
+           usable.contains(selectedBossName) {
+            return .selected(selectedBossName)
+        }
         if let legacyBossName = legacyBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
            isSafeAgentName(legacyBossName),
            usable.contains(legacyBossName) {
@@ -96,114 +204,12 @@ enum OuroWorkbenchProduct {
         return .unavailable("Choose one Ouro agent as Boss: \(usable.joined(separator: ", ")).")
     }
 
-    static func agentChatEnvironment(
-        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+    static func usableBossAgentNames(
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
-        applicationSupportURL: URL? = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first,
-        bundleURL: URL = Bundle.main.bundleURL,
-        controlSocketPath: String? = nil,
-        controlSocketCapability: String? = nil,
-        controlSocketReady: Bool = false,
-        sourceFilePath: String = #filePath,
-        environment baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
-    ) -> [String: String] {
-        guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
-        let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
-        let appSupport = applicationSupportURL
-            ?? homeURL.appendingPathComponent("Library/Application Support")
-        var environment = [
-            "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
-            "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
-            "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
-            "CMUX_AGENT_UI_CWD": sourceRoot.path,
-            "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
-                homeURL.appendingPathComponent("code").path,
-                homeURL.appendingPathComponent("ms-desk").path,
-                sourceRoot.path,
-            ].joined(separator: ":"),
-            "CMUX_AGENT_CHAT_SESSION_DIR": appSupport
-                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
-                .path,
-            "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
-        ]
-        switch currentBossSelection(homeURL: homeURL, applicationSupportURL: appSupport, fileManager: fileManager) {
-        case .selected(let agentName):
-            environment["CMUX_AGENT_CHAT_BOSS_AGENT"] = agentName
-        case .unavailable(let message):
-            environment["CMUX_AGENT_CHAT_BOSS_ERROR"] = message
-        }
-        let ouroCandidates = [
-            homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),
-            homeURL.appendingPathComponent(".local/bin/ouro"),
-        ]
-        if let ouro = ouroCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
-            environment["CMUX_AGENT_CHAT_OURO_COMMAND"] = ouro.path
-        }
-        let bundledCLI = bundleURL.appendingPathComponent("Contents/Resources/bin/cmux")
-        let resolvedBundledCLI = fileManager.isExecutableFile(atPath: bundledCLI.path) ? bundledCLI.path : nil
-        let resolvedControlSocketPath = controlSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedControlSocketCapability = controlSocketCapability?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nvmRoot = homeURL.appendingPathComponent(".nvm/versions/node", isDirectory: true)
-        let nvmBuns = (try? fileManager.contentsOfDirectory(
-            at: nvmRoot,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ))?.sorted {
-            $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending
-        }.map {
-            $0.appendingPathComponent("bin/bun")
-        } ?? []
-        let bunCandidates = [
-            baseEnvironment["BUN_BIN"].map(URL.init(fileURLWithPath:)),
-            homeURL.appendingPathComponent(".bun/bin/bun"),
-            homeURL.appendingPathComponent(".local/bin/bun"),
-            URL(fileURLWithPath: "/opt/homebrew/bin/bun"),
-            URL(fileURLWithPath: "/usr/local/bin/bun"),
-        ].compactMap { $0 } + nvmBuns
-        let resolvedBun = bunCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })?.path
-        let workbenchMCPCandidates = [
-            bundleURL.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP"),
-            sourceRoot.appendingPathComponent("agent-chat/OuroWorkbenchMCP"),
-        ]
-        if controlSocketReady,
-           let resolvedBundledCLI,
-           let resolvedControlSocketPath, !resolvedControlSocketPath.isEmpty,
-           let resolvedControlSocketCapability, !resolvedControlSocketCapability.isEmpty,
-           let resolvedBun,
-           let workbenchMCP = workbenchMCPCandidates.first(where: {
-               fileManager.isExecutableFile(atPath: $0.path)
-           }) {
-            environment["CMUX_BUNDLED_CLI_PATH"] = resolvedBundledCLI
-            environment["CMUX_SOCKET_PATH"] = resolvedControlSocketPath
-            environment["CMUX_SOCKET_CAPABILITY"] = resolvedControlSocketCapability
-            environment["BUN_BIN"] = resolvedBun
-            environment["CMUX_AGENT_CHAT_WORKBENCH_MCP"] = workbenchMCP.path
-        }
-        return environment
-    }
-
-    private static func currentBossSelection(
-        homeURL: URL,
-        applicationSupportURL: URL,
-        fileManager: FileManager
-    ) -> BossSelection {
-        let legacyURL = applicationSupportURL
-            .appendingPathComponent("OuroWorkbench", isDirectory: true)
-            .appendingPathComponent("workspace-state.json")
-        let legacyBossName: String? = {
-            guard let data = try? Data(contentsOf: legacyURL),
-                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let boss = root["boss"] as? [String: Any] else {
-                return nil
-            }
-            return boss["agentName"] as? String
-        }()
+    ) -> [String] {
         let bundlesURL = homeURL.appendingPathComponent("AgentBundles", isDirectory: true)
-        let usableAgentNames = (try? fileManager.contentsOfDirectory(
+        return ((try? fileManager.contentsOfDirectory(
             at: bundlesURL,
             includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
@@ -223,8 +229,170 @@ enum OuroWorkbenchProduct {
                 return nil
             }
             return name
+        } ?? []).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    @discardableResult
+    static func selectBossAgent(
+        _ agentName: String,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard usableBossAgentNames(homeURL: homeURL, fileManager: fileManager).contains(agentName) else {
+            return false
+        }
+        defaults.set(agentName, forKey: selectedBossDefaultsKey)
+        return true
+    }
+
+    static func agentChatEnvironment(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        bundleURL: URL = Bundle.main.bundleURL,
+        controlSocketPath: String? = nil,
+        controlSocketCapability: String? = nil,
+        controlSocketReady: Bool = false,
+        sourceFilePath: String = #filePath,
+        defaults: UserDefaults = .standard,
+        environment baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> [String: String] {
+        guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
+        let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
+        let deskRoot = homeURL.appendingPathComponent("ms-desk", isDirectory: true)
+        let appSupport = applicationSupportURL
+            ?? homeURL.appendingPathComponent("Library/Application Support")
+        var environment = [
+            "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
+            "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
+            "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
+            "CMUX_AGENT_UI_CWD": deskRoot.path,
+            "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
+                homeURL.appendingPathComponent("code").path,
+                deskRoot.path,
+                sourceRoot.path,
+            ].joined(separator: ":"),
+            "CMUX_AGENT_CHAT_SESSION_DIR": appSupport
+                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
+                .path,
+            "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
+        ]
+        switch currentBossSelection(
+            homeURL: homeURL,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            fileManager: fileManager
+        ) {
+        case .selected(let agentName):
+            environment["CMUX_AGENT_CHAT_BOSS_AGENT"] = agentName
+            environment["CMUX_AGENT_CHAT_SESSION_DIR"] = appSupport
+                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
+                .appendingPathComponent(agentName, isDirectory: true)
+                .path
+        case .unavailable(let message):
+            environment["CMUX_AGENT_CHAT_BOSS_ERROR"] = message
+        }
+        let ouroCandidates = [
+            homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),
+            homeURL.appendingPathComponent(".local/bin/ouro"),
+        ]
+        if let ouro = ouroCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) }) {
+            environment["CMUX_AGENT_CHAT_OURO_COMMAND"] = ouro.path
+        }
+        let bundledCLI = bundleURL.appendingPathComponent("Contents/Resources/bin/cmux")
+        let resolvedBundledCLI = fileManager.isExecutableFile(atPath: bundledCLI.path) ? bundledCLI.path : nil
+        let resolvedControlSocketPath = controlSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedControlSocketCapability = controlSocketCapability?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nvmRoot = homeURL.appendingPathComponent(".nvm/versions/node", isDirectory: true)
+        let nvmVersions = (try? fileManager.contentsOfDirectory(
+            at: nvmRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ))?.sorted {
+            $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending
         } ?? []
-        return resolveBossSelection(legacyBossName: legacyBossName, usableAgentNames: usableAgentNames)
+        let nvmBuns = nvmVersions.map {
+            $0.appendingPathComponent("bin/bun")
+        }
+        if let node = nvmVersions.first(where: {
+            guard let major = Int($0.lastPathComponent.drop(while: { $0 == "v" }).split(separator: ".").first ?? ""),
+                  major >= 22 else {
+                return false
+            }
+            return fileManager.isExecutableFile(atPath: $0.appendingPathComponent("bin/node").path)
+        })?.appendingPathComponent("bin") {
+            environment["PATH"] = [
+                node.path,
+                baseEnvironment["PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ":")
+        }
+        let bunCandidates = [
+            baseEnvironment["BUN_BIN"].map(URL.init(fileURLWithPath:)),
+            homeURL.appendingPathComponent(".bun/bin/bun"),
+            homeURL.appendingPathComponent(".local/bin/bun"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/bun"),
+            URL(fileURLWithPath: "/usr/local/bin/bun"),
+        ].compactMap { $0 } + nvmBuns
+        let resolvedBun = bunCandidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })?.path
+        let workbenchMCPCandidates = [
+            bundleURL.appendingPathComponent(
+                "Contents/Resources/agent-chat/OuroWorkbenchMCP"
+            ),
+            sourceRoot.appendingPathComponent("agent-chat/OuroWorkbenchMCP"),
+        ]
+        if controlSocketReady,
+           let resolvedBundledCLI,
+           let resolvedControlSocketPath, !resolvedControlSocketPath.isEmpty,
+           let resolvedControlSocketCapability, !resolvedControlSocketCapability.isEmpty,
+           let resolvedBun,
+           let workbenchMCP = workbenchMCPCandidates.first(where: {
+               fileManager.isExecutableFile(atPath: $0.path)
+           }) {
+            environment["CMUX_BUNDLED_CLI_PATH"] = resolvedBundledCLI
+            environment["CMUX_SOCKET_PATH"] = resolvedControlSocketPath
+            environment["CMUX_SOCKET_CAPABILITY"] = resolvedControlSocketCapability
+            environment["BUN_BIN"] = resolvedBun
+            environment["CMUX_AGENT_CHAT_WORKBENCH_MCP"] = workbenchMCP.path
+        }
+        return environment
+    }
+
+    static func currentBossSelection(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> BossSelection {
+        let appSupport = applicationSupportURL
+            ?? homeURL.appendingPathComponent("Library/Application Support")
+        let legacyURL = appSupport
+            .appendingPathComponent("OuroWorkbench", isDirectory: true)
+            .appendingPathComponent("workspace-state.json")
+        let legacyBossName: String? = {
+            guard let data = try? Data(contentsOf: legacyURL),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let boss = root["boss"] as? [String: Any] else {
+                return nil
+            }
+            return boss["agentName"] as? String
+        }()
+        let selection = resolveBossSelection(
+            selectedBossName: defaults.string(forKey: selectedBossDefaultsKey),
+            legacyBossName: legacyBossName,
+            usableAgentNames: usableBossAgentNames(homeURL: homeURL, fileManager: fileManager)
+        )
+        if case .selected(let agentName) = selection {
+            defaults.set(agentName, forKey: selectedBossDefaultsKey)
+        }
+        return selection
     }
 
     private static func isSafeAgentName(_ name: String) -> Bool {

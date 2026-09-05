@@ -7971,6 +7971,7 @@ C0DE71B10000000000000002 /* AppDelegate+AgentChatNotifications.swift */ = {isa =
 				D1FF50000000000000000001 /* Build Diff Sidecar */,
 				C0DEFF100000000000000003 /* Build Command Palette Nucleo FFI */,
 				A5001300A1B2C3D4E5F60719 /* ShellScript */,
+				A9E040000000000000000009 /* Package Workbench Agent Chat */,
 				A9E030000000000000000009 /* Reject Bundled Provider Binaries */,
 
 			);
@@ -8397,6 +8398,27 @@ C0DE71B10000000000000002 /* AppDelegate+AgentChatNotifications.swift */ = {isa =
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -euo pipefail\nBIN_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/bin\"\nPROVIDERS=\"codex claude opencode pi\"\nfor provider in $PROVIDERS; do\n  if [ -e \"${SRCROOT}/Resources/bin/${provider}\" ]; then\n    echo \"error: provider executable must not be checked in at Resources/bin/${provider}\" >&2\n    exit 1\n  fi\n  if [ -e \"${BIN_DIR}/${provider}\" ]; then\n    rm -rf \"${BIN_DIR:?}/${provider}\"\n  fi\n  if [ -e \"${BIN_DIR}/${provider}\" ]; then\n    echo \"error: provider executable must not be bundled at ${BIN_DIR}/${provider}\" >&2\n    exit 1\n  fi\ndone\n";
+		};
+		A9E040000000000000000009 /* Package Workbench Agent Chat */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/package-workbench-agent-chat.sh",
+			);
+			name = "Package Workbench Agent Chat";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/agent-chat/cmux-chat",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/package-workbench-agent-chat.sh\" \"${SRCROOT}/agent-chat\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/agent-chat\" \"${PRODUCT_BUNDLE_IDENTIFIER}\"\n";
 		};
 		D3664003D3664003D3664003 /* Compress Markdown Viewer Assets */ = {
 			isa = PBXShellScriptBuildPhase;

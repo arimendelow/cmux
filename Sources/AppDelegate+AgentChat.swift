@@ -7,6 +7,9 @@ import os
 import Security
 
 struct AgentChatActionInFlightGate {
+    static let bossStableSurfaceDefaultsKey = "ouroWorkbench.bossStableSurfaceID"
+    private static let legacyBossPanelDefaultsKey = "ouroWorkbench.bossPanelID"
+
     private struct State {
         var isRunning = false
         var ownedServerSession: AgentChatOwnedServerSession?
@@ -121,11 +124,12 @@ struct AgentChatActionInFlightGate {
         }
     }
 
-    static func updateBossPanel(ownerWindowId: UUID, panelId: UUID) {
+    static func updateBossPanel(ownerWindowId: UUID, panelId: UUID, stableSurfaceId: UUID) {
         lock.withLock { state in
             state.bossPanelOwnerWindowId = ownerWindowId
             state.bossPanelId = panelId
         }
+        persistBossStableSurfaceID(stableSurfaceId)
     }
 
     static func clearBossPanel() {
@@ -133,6 +137,21 @@ struct AgentChatActionInFlightGate {
             state.bossPanelOwnerWindowId = nil
             state.bossPanelId = nil
         }
+        UserDefaults.standard.removeObject(forKey: bossStableSurfaceDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: legacyBossPanelDefaultsKey)
+    }
+
+    static func persistedBossStableSurfaceID(defaults: UserDefaults = .standard) -> UUID? {
+        guard let rawValue = defaults.string(forKey: bossStableSurfaceDefaultsKey) else { return nil }
+        guard let stableSurfaceID = UUID(uuidString: rawValue) else {
+            defaults.removeObject(forKey: bossStableSurfaceDefaultsKey)
+            return nil
+        }
+        return stableSurfaceID
+    }
+
+    static func persistBossStableSurfaceID(_ stableSurfaceID: UUID, defaults: UserDefaults = .standard) {
+        defaults.set(stableSurfaceID.uuidString, forKey: bossStableSurfaceDefaultsKey)
     }
 
     static func stopOwnedServer() async -> Bool {
@@ -196,6 +215,15 @@ struct AgentChatServerAvailability: Sendable {
 }
 
 extension AppDelegate {
+    private struct WorkbenchBossChoice {
+        var agentName: String
+        var previousAgentName: String?
+
+        var changed: Bool {
+            agentName != previousAgentName
+        }
+    }
+
     func startWorkbenchLocalSupervisionIfNeeded() {
         guard OuroWorkbenchProduct.isCurrentBundle,
               workbenchLocalSupervisionCoordinator == nil else {
@@ -374,26 +402,199 @@ extension AppDelegate {
         tabManager: TabManager,
         windowId: UUID
     ) {
-        guard OuroWorkbenchProduct.isCurrentBundle,
-              let context = mainWindowContext(for: tabManager),
+        guard OuroWorkbenchProduct.isCurrentBundle else { return }
+        OuroWorkbenchProduct.scheduleCopilotHookInstallation()
+        guard didAttemptStartupSessionRestore, !isApplyingSessionRestore else {
+            workbenchBossBootstrapPending = true
+            return
+        }
+        workbenchBossBootstrapPending = false
+        guard let context = mainWindowContext(for: tabManager),
               context.cmuxConfigStore?.agentChat.startCommand != nil else {
             return
         }
         DispatchQueue.main.async { [weak self, weak tabManager] in
             guard let self,
                   let tabManager,
-                  let context = self.mainWindowContext(for: tabManager),
-                  let action = context.cmuxConfigStore?.resolvedAction(
-                    id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID
-                  ) else {
+                  let context = self.mainWindowContext(for: tabManager) else {
                 return
             }
-            _ = self.executeConfiguredCmuxAction(
-                action,
-                context: context,
-                preferredWindow: self.mainWindow(for: windowId)
+            let preferredWindow = self.mainWindow(for: windowId)
+            let openBoss = { [weak self, weak context] in
+                guard let self,
+                      let context,
+                      let action = context.cmuxConfigStore?.resolvedAction(
+                        id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID
+                      ) else {
+                    return
+                }
+                _ = self.executeConfiguredCmuxAction(
+                    action,
+                    context: context,
+                    preferredWindow: preferredWindow
+                )
+            }
+            if !self.presentWorkbenchBossSelectionSheetIfNeeded(
+                preferredWindow: preferredWindow,
+                completion: openBoss
+            ) {
+                openBoss()
+            }
+        }
+    }
+
+    func resumePendingWorkbenchBossBootstrapAfterSessionRestore() {
+        guard OuroWorkbenchProduct.isCurrentBundle,
+              workbenchBossBootstrapPending,
+              let context = mainWindowContexts.values.first(where: {
+                  $0.cmuxConfigStore?.agentChat.startCommand != nil
+              }) else {
+            return
+        }
+        scheduleWorkbenchBossAfterInitialBootstrap(
+            tabManager: context.tabManager,
+            windowId: context.windowId
+        )
+    }
+
+    func chooseWorkbenchBoss(
+        tabManager: TabManager,
+        preferredWindow: NSWindow?
+    ) {
+        guard let choice = presentWorkbenchBossSelection(
+            preferredWindow: preferredWindow,
+            force: true
+        ) else {
+            return
+        }
+        guard choice.changed else {
+            _ = executeConfiguredCmuxAction(
+                id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID,
+                tabManager: tabManager,
+                preferredWindow: preferredWindow
+            )
+            return
+        }
+        Task { @MainActor [weak self, weak tabManager] in
+            guard let self, let tabManager else { return }
+            if AgentChatActionInFlightGate.hasOwnedServerWork(),
+               !(await AgentChatActionInFlightGate.stopOwnedServer()) {
+                restoreWorkbenchBossSelection(choice.previousAgentName)
+                presentWorkbenchBossSwitchFailure(preferredWindow: preferredWindow)
+                return
+            }
+            if !executeConfiguredCmuxAction(
+                id: CmuxSurfaceTabBarBuiltInAction.newAgentChat.configID,
+                tabManager: tabManager,
+                preferredWindow: preferredWindow
+            ) {
+                NSSound.beep()
+            }
+        }
+    }
+
+    private func presentWorkbenchBossSelection(
+        preferredWindow: NSWindow?,
+        force: Bool
+    ) -> WorkbenchBossChoice? {
+        let candidates = OuroWorkbenchProduct.usableBossAgentNames()
+        let currentAgentName: String? = {
+            guard case .selected(let agentName) = OuroWorkbenchProduct.currentBossSelection() else {
+                return nil
+            }
+            return agentName
+        }()
+        if !force, let currentAgentName {
+            return WorkbenchBossChoice(
+                agentName: currentAgentName,
+                previousAgentName: currentAgentName
             )
         }
+        guard !candidates.isEmpty else { return nil }
+
+        let (alert, popup) = workbenchBossSelectionAlert(
+            candidates: candidates,
+            currentAgentName: currentAgentName
+        )
+        guard alert.runCmuxModal(presentingWindow: preferredWindow) == .alertFirstButtonReturn,
+              let selectedAgentName = popup.titleOfSelectedItem,
+              OuroWorkbenchProduct.selectBossAgent(selectedAgentName) else {
+            return nil
+        }
+        return WorkbenchBossChoice(
+            agentName: selectedAgentName,
+            previousAgentName: currentAgentName
+        )
+    }
+
+    private func presentWorkbenchBossSelectionSheetIfNeeded(
+        preferredWindow: NSWindow?,
+        completion: @escaping @MainActor () -> Void
+    ) -> Bool {
+        if case .selected = OuroWorkbenchProduct.currentBossSelection() {
+            return false
+        }
+        let candidates = OuroWorkbenchProduct.usableBossAgentNames()
+        guard !candidates.isEmpty, let preferredWindow else { return false }
+        let (alert, popup) = workbenchBossSelectionAlert(
+            candidates: candidates,
+            currentAgentName: nil
+        )
+        preferredWindow.makeKeyAndOrderFront(nil)
+        NSRunningApplication.current.activate(
+            options: [.activateAllWindows, .activateIgnoringOtherApps]
+        )
+        DispatchQueue.main.async {
+            alert.beginSheetModal(for: preferredWindow) { response in
+                if response == .alertFirstButtonReturn,
+                   let selectedAgentName = popup.titleOfSelectedItem {
+                    _ = OuroWorkbenchProduct.selectBossAgent(selectedAgentName)
+                }
+                completion()
+            }
+        }
+        return true
+    }
+
+    private func workbenchBossSelectionAlert(
+        candidates: [String],
+        currentAgentName: String?
+    ) -> (NSAlert, NSPopUpButton) {
+        let popup = NSPopUpButton(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 28),
+            pullsDown: false
+        )
+        popup.addItems(withTitles: candidates)
+        if let currentAgentName {
+            popup.selectItem(withTitle: currentAgentName)
+        }
+        popup.setAccessibilityLabel("Boss agent")
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Choose your Boss"
+        alert.informativeText = "Boss keeps the cross-workspace picture and coordinates your agents. Each Ouro agent keeps its own provider, identity, and conversation history."
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Use as Boss")
+        alert.addButton(withTitle: "Not Now")
+        return (alert, popup)
+    }
+
+    private func restoreWorkbenchBossSelection(_ agentName: String?) {
+        if let agentName {
+            _ = OuroWorkbenchProduct.selectBossAgent(agentName)
+        } else {
+            UserDefaults.standard.removeObject(forKey: OuroWorkbenchProduct.selectedBossDefaultsKey)
+        }
+    }
+
+    private func presentWorkbenchBossSwitchFailure(preferredWindow: NSWindow?) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not switch Boss"
+        alert.informativeText = "The current Boss runtime did not stop cleanly, so Workbench kept the existing selection."
+        alert.addButton(withTitle: "OK")
+        _ = alert.runCmuxModal(presentingWindow: preferredWindow)
     }
 
     /// Workstream feed title mapping extracted because `AppDelegate.swift`
@@ -432,7 +633,9 @@ extension AppDelegate {
         preferredWindow: NSWindow? = nil
     ) -> Bool {
         guard let context = mainWindowContext(for: tabManager),
-              let action = context.cmuxConfigStore?.resolvedAction(id: actionID) else {
+                  let action = context.cmuxConfigStore?.resolvedAction(
+                    id: actionID
+                  ) else {
             return false
         }
         return executeConfiguredCmuxAction(
@@ -623,13 +826,15 @@ extension AppDelegate {
         }
         let destinationDock = destination.windowDockStore()
         guard let pane = destinationDock.resolvePane(requestedPaneID: nil),
-              destinationDock.attachDetachedSurface(detached, inPane: pane, focus: true) != nil else {
+              destinationDock.attachDetachedSurface(detached, inPane: pane, focus: true) != nil,
+              let panel = destinationDock.browserPanel(for: location.panelId) else {
             _ = sourceDock.attachDetachedSurface(detached, inPane: sourcePane, focus: false)
             return false
         }
         AgentChatActionInFlightGate.updateBossPanel(
             ownerWindowId: destination.windowId,
-            panelId: location.panelId
+            panelId: location.panelId,
+            stableSurfaceId: panel.stableSurfaceId
         )
         revealWorkbenchBossPanel(in: destination, dock: destinationDock, panelId: location.panelId)
         return true
@@ -640,6 +845,14 @@ extension AppDelegate {
         tabManager: TabManager,
         url: URL
     ) -> UUID? {
+        if AgentChatActionInFlightGate.bossPanelLocation() == nil,
+           AgentChatActionInFlightGate.persistedBossStableSurfaceID() != nil,
+           !restorePersistedWorkbenchBossPanel() {
+            guard didAttemptStartupSessionRestore, !isApplyingSessionRestore else {
+                return nil
+            }
+            AgentChatActionInFlightGate.clearBossPanel()
+        }
         if let location = AgentChatActionInFlightGate.bossPanelLocation() {
             if let owner = mainWindowContexts.values.first(where: { $0.windowId == location.ownerWindowId }),
                let dock = owner.existingWindowDock(),
@@ -668,11 +881,35 @@ extension AppDelegate {
             return nil
         }
         panel.setOmnibarVisible(false)
-        AgentChatActionInFlightGate.updateBossPanel(ownerWindowId: context.windowId, panelId: panelId)
+        AgentChatActionInFlightGate.updateBossPanel(
+            ownerWindowId: context.windowId,
+            panelId: panelId,
+            stableSurfaceId: panel.stableSurfaceId
+        )
         sidebar.mode = .dock
         sidebar.setVisible(true)
         revealWorkbenchBossPanel(in: context, dock: dock, panelId: panelId)
         return panelId
+    }
+
+    private func restorePersistedWorkbenchBossPanel() -> Bool {
+        guard let stableSurfaceID = AgentChatActionInFlightGate.persistedBossStableSurfaceID() else {
+            return false
+        }
+        for context in mainWindowContexts.values {
+            guard let dock = context.existingWindowDock() else { continue }
+            guard let match = dock.panels.first(where: {
+                $0.value.stableSurfaceId == stableSurfaceID && $0.value is BrowserPanel
+            }), let panel = match.value as? BrowserPanel else { continue }
+            panel.setOmnibarVisible(false)
+            AgentChatActionInFlightGate.updateBossPanel(
+                ownerWindowId: context.windowId,
+                panelId: match.key,
+                stableSurfaceId: stableSurfaceID
+            )
+            return true
+        }
+        return false
     }
 
     private func revealWorkbenchBossPanel(

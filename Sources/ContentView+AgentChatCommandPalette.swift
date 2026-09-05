@@ -21,15 +21,27 @@ extension ContentView {
         }
     }
 
-    static func commandPaletteNewAgentChatContributions() -> [CommandPaletteCommandContribution] {
+    static func commandPaletteNewAgentChatContributions(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> [CommandPaletteCommandContribution] {
         guard CmuxFeatureFlags.shared.isAgentChatUIEnabled else { return [] }
-        return [CommandPaletteCommandContribution(
+        var contributions = [CommandPaletteCommandContribution(
             commandId: "palette.newAgentChat",
             title: { _ in OuroWorkbenchProduct.agentChatActionTitle() },
             subtitle: { _ in OuroWorkbenchProduct.agentChatSubtitle() },
             keywords: ["create", "new", "agent", "chat", "boss", "copilot", "agency"],
             when: { !$0.bool(CommandPaletteContextKeys.browserDisabled) }
         )]
+        if OuroWorkbenchProduct.isWorkbenchBundleIdentifier(bundleIdentifier) {
+            contributions.append(CommandPaletteCommandContribution(
+                commandId: "palette.chooseWorkbenchBoss",
+                title: { _ in "Choose Workbench Boss..." },
+                subtitle: { _ in "Select the Ouro agent that supervises Workbench" },
+                keywords: ["choose", "change", "select", "ouro", "boss"],
+                when: { _ in true }
+            ))
+        }
+        return contributions
     }
 
     func registerAgentChatCommandPaletteHandler(_ registry: inout CommandPaletteHandlerRegistry) {
@@ -49,6 +61,17 @@ extension ContentView {
             ) {
                 NSSound.beep()
             }
+        }
+        registry.register(commandId: "palette.chooseWorkbenchBoss") {
+            guard OuroWorkbenchProduct.isCurrentBundle,
+                  let appDelegate = AppDelegate.shared else {
+                NSSound.beep()
+                return
+            }
+            appDelegate.chooseWorkbenchBoss(
+                tabManager: tabManager,
+                preferredWindow: appDelegate.mainWindow(for: windowId)
+            )
         }
     }
 }

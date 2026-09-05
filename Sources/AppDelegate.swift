@@ -1082,6 +1082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var didScheduleInitialMainWindowBootstrap = false
     var shouldDeferInitialMainWindowBootstrapForExternalConfirmation = false
     private var didBootstrapInitialMainWindow = false
+    var workbenchBossBootstrapPending = false
     var isTerminatingApp = false
     private var closedWindowHistorySuppressedWindowIds: Set<UUID> = []
 #if DEBUG
@@ -3634,6 +3635,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             scheduleScreenChangeReconcileWhenIdle()
         }
         flushPendingStartupNavigationURLRequests()
+        resumePendingWorkbenchBossBootstrapAfterSessionRestore()
         if Self.shouldSaveSessionSnapshotOnRestoreCompletion(isManualReopen: isManualReopen) {
             // Auto-resume input can be queued before tmux has spawned; preserve
             // restored process-detected bindings until a later live scan.
@@ -8389,6 +8391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // Explicit open intent cancels restore; deferred links cannot gain targets.
             flushPendingStartupNavigationURLRequests()
         }
+        resumePendingWorkbenchBossBootstrapAfterSessionRestore()
     }
 
     private func externalOpenDirectories(from urls: [URL]) -> [String] {

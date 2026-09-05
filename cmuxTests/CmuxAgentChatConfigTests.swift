@@ -29,8 +29,112 @@ struct CmuxAgentChatConfigTests {
         #expect(command?.contains("/agent-chat/cmux-chat") == true)
     }
 
+    @Test func ouroWorkbenchPrefersThePackagedAgentChatRuntime() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-packaged-agent-chat-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("Ouro Workbench.app")
+        let packaged = bundle.appendingPathComponent("Contents/Resources/agent-chat/cmux-chat")
+        try fileManager.createDirectory(
+            at: packaged.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        #expect(fileManager.createFile(atPath: packaged.path, contents: Data("#!/bin/sh\n".utf8)))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: packaged.path)
+
+        let command = OuroWorkbenchProduct.agentChatStartCommand(
+            bundleIdentifier: "com.ourostack.workbench.v1",
+            bundleURL: bundle,
+            sourceFilePath: "/missing/Sources/FeatureFlags.swift",
+            fileManager: fileManager
+        )
+
+        #expect(command?.contains(packaged.path) == true)
+        #expect(command?.contains("/missing/agent-chat") == false)
+    }
+
+    @Test func ouroWorkbenchInstallsCopilotHooksBesideAgencyHooks() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-copilot-hooks-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let bundle = root.appendingPathComponent("Ouro Workbench.app")
+        let cli = bundle.appendingPathComponent("Contents/Resources/bin/cmux")
+        let copilot = home.appendingPathComponent(".copilot-cli/1.0.82/copilot")
+        let hooks = home.appendingPathComponent(".copilot/hooks")
+        let agencyHook = hooks.appendingPathComponent("agency.json")
+        let cmuxHook = hooks.appendingPathComponent("cmux.json")
+        try fileManager.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: copilot.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: hooks, withIntermediateDirectories: true)
+        #expect(fileManager.createFile(atPath: cli.path, contents: Data()))
+        #expect(fileManager.createFile(atPath: copilot.path, contents: Data()))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copilot.path)
+        try "agency-hook".write(to: agencyHook, atomically: true, encoding: .utf8)
+        var calls = 0
+
+        let installed = OuroWorkbenchProduct.installCopilotHooksIfNeeded(
+            bundleIdentifier: "com.ourostack.workbench.v1",
+            homeURL: home,
+            bundleURL: bundle,
+            environment: ["PATH": "/usr/bin:/bin"],
+            fileManager: fileManager
+        ) { executable, arguments, environment in
+            calls += 1
+            #expect(executable == cli)
+            #expect(arguments == ["hooks", "setup", "--agent", "copilot", "--yes"])
+            #expect(
+                environment["PATH"]?.split(separator: ":").first.map {
+                    URL(fileURLWithPath: String($0)).resolvingSymlinksInPath().path
+                } == copilot.deletingLastPathComponent().resolvingSymlinksInPath().path
+            )
+            try? #"{"hooks":{"sessionStart":[{"command":"\"$cmux_cli\" hooks copilot session-start"}]}}"#
+                .write(to: cmuxHook, atomically: true, encoding: .utf8)
+            return true
+        }
+
+        #expect(installed)
+        #expect(calls == 1)
+        #expect(try String(contentsOf: agencyHook, encoding: .utf8) == "agency-hook")
+        #expect(OuroWorkbenchProduct.installCopilotHooksIfNeeded(
+            bundleIdentifier: "com.ourostack.workbench.v1",
+            homeURL: home,
+            bundleURL: bundle,
+            environment: [:],
+            fileManager: fileManager
+        ) { _, _, _ in
+            calls += 1
+            return false
+        })
+        #expect(calls == 1)
+
+        try fileManager.removeItem(at: cmuxHook)
+        try """
+        #!/bin/sh
+        mkdir -p "$HOME/.copilot/hooks"
+        printf '%s\n' '{"command":"cmux hooks copilot session-start"}' > "$HOME/.copilot/hooks/cmux.json"
+        """.write(to: cli, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        #expect(OuroWorkbenchProduct.installCopilotHooksIfNeeded(
+            bundleIdentifier: "com.ourostack.workbench.v1",
+            homeURL: home,
+            bundleURL: bundle,
+            environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"],
+            fileManager: fileManager
+        ))
+    }
+
     @Test func ouroWorkbenchBossSelectionPreservesValidLegacyThenFallsBackOnlyWhenUnique() {
         #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: "ouroboros",
+            legacyBossName: "slugger",
+            usableAgentNames: ["ouroboros", "slugger"]
+        ) == .selected("ouroboros"))
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: "missing",
             legacyBossName: "slugger",
             usableAgentNames: ["ouroboros", "slugger"]
         ) == .selected("slugger"))
@@ -59,6 +163,59 @@ struct CmuxAgentChatConfigTests {
         ) == .selected("ouroboros"))
     }
 
+    @Test func ouroWorkbenchPersistsExplicitBossSelectionAndScopesItsSessions() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-boss-selection-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let bundles = home.appendingPathComponent("AgentBundles", isDirectory: true)
+        for name in ["ouroboros", "slugger"] {
+            let bundle = bundles.appendingPathComponent("\(name).ouro", isDirectory: true)
+            try fileManager.createDirectory(at: bundle, withIntermediateDirectories: true)
+            try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
+                to: bundle.appendingPathComponent("agent.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let defaultsName = "CmuxAgentChatConfigTests.bossSelection.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+
+        #expect(OuroWorkbenchProduct.selectBossAgent(
+            "slugger",
+            homeURL: home,
+            defaults: defaults,
+            fileManager: fileManager
+        ))
+        #expect(defaults.string(forKey: OuroWorkbenchProduct.selectedBossDefaultsKey) == "slugger")
+        #expect(!OuroWorkbenchProduct.selectBossAgent(
+            "missing",
+            homeURL: home,
+            defaults: defaults,
+            fileManager: fileManager
+        ))
+        let environment = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+
+        #expect(environment["CMUX_AGENT_CHAT_BOSS_AGENT"] == "slugger")
+        #expect(environment["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
+        #expect(
+            environment["CMUX_AGENT_CHAT_SESSION_DIR"]
+                == appSupport.appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions/slugger").path
+        )
+    }
+
     @Test func ouroWorkbenchEnvironmentCarriesTheResolvedBossOrExactSetupError() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
@@ -69,27 +226,38 @@ struct CmuxAgentChatConfigTests {
         let slugger = bundles.appendingPathComponent("slugger.ouro", isDirectory: true)
         let legacyDirectory = appSupport.appendingPathComponent("OuroWorkbench", isDirectory: true)
         let bundle = root.appendingPathComponent("Ouro Workbench v1 DEV.app", isDirectory: true)
-        let workbenchMCP = bundle.appendingPathComponent("Contents/MacOS/OuroWorkbenchMCP")
+        let workbenchMCP = bundle.appendingPathComponent(
+            "Contents/Resources/agent-chat/OuroWorkbenchMCP"
+        )
         let bundledCLI = bundle.appendingPathComponent("Contents/Resources/bin/cmux")
         let ouro = home.appendingPathComponent(".ouro-cli/bin/ouro")
         let bun = home.appendingPathComponent(".nvm/versions/node/v20.19.5/bin/bun")
+        let node20 = home.appendingPathComponent(".nvm/versions/node/v20.19.5/bin/node")
+        let node22 = home.appendingPathComponent(".nvm/versions/node/v22.14.0/bin/node")
         let olderBun = home.appendingPathComponent(".nvm/versions/node/v9.9.9/bin/bun")
+        let defaultsName = "CmuxAgentChatConfigTests.environmentBoss.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
         try fileManager.createDirectory(at: slugger, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: workbenchMCP.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: bundledCLI.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: ouro.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: bun.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: node22.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: olderBun.deletingLastPathComponent(), withIntermediateDirectories: true)
         #expect(fileManager.createFile(atPath: workbenchMCP.path, contents: Data("#!/bin/sh\n".utf8)))
         #expect(fileManager.createFile(atPath: bundledCLI.path, contents: Data("#!/bin/sh\n".utf8)))
         #expect(fileManager.createFile(atPath: ouro.path, contents: Data("#!/bin/sh\n".utf8)))
         #expect(fileManager.createFile(atPath: bun.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: node20.path, contents: Data("#!/bin/sh\n".utf8)))
+        #expect(fileManager.createFile(atPath: node22.path, contents: Data("#!/bin/sh\n".utf8)))
         #expect(fileManager.createFile(atPath: olderBun.path, contents: Data("#!/bin/sh\n".utf8)))
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: workbenchMCP.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledCLI.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ouro.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bun.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node20.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node22.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: olderBun.path)
         try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
             to: slugger.appendingPathComponent("agent.json"),
@@ -101,7 +269,10 @@ struct CmuxAgentChatConfigTests {
             atomically: true,
             encoding: .utf8
         )
-        defer { try? fileManager.removeItem(at: root) }
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
         let sourceFilePath = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -117,7 +288,8 @@ struct CmuxAgentChatConfigTests {
             controlSocketCapability: "capability-token",
             controlSocketReady: true,
             sourceFilePath: sourceFilePath,
-            environment: [:],
+            defaults: defaults,
+            environment: ["PATH": "/usr/bin"],
             fileManager: fileManager
         )
         #expect(selected["CMUX_AGENT_CHAT_DEFAULT_PROVIDER"] == "ouro-boss")
@@ -125,9 +297,16 @@ struct CmuxAgentChatConfigTests {
         #expect(selected["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
         #expect(selected["CMUX_AGENT_CHAT_OURO_COMMAND"] == ouro.path)
         #expect(selected["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == workbenchMCP.path)
+        #expect(selected["CMUX_AGENT_UI_CWD"] == home.appendingPathComponent("ms-desk").path)
         #expect(selected["CMUX_BUNDLED_CLI_PATH"] == bundledCLI.path)
         #expect(selected["CMUX_SOCKET_PATH"] == "/tmp/workbench-control.sock")
         #expect(selected["CMUX_SOCKET_CAPABILITY"] == "capability-token")
+        let selectedPath = try #require(selected["PATH"]?.split(separator: ":"))
+        #expect(
+            URL(fileURLWithPath: String(selectedPath[0])).resolvingSymlinksInPath().path
+                == node22.deletingLastPathComponent().resolvingSymlinksInPath().path
+        )
+        #expect(selectedPath.dropFirst().map(String.init) == ["/usr/bin"])
         #expect(
             selected["BUN_BIN"].map {
                 URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
@@ -143,6 +322,7 @@ struct CmuxAgentChatConfigTests {
             controlSocketCapability: "capability-token",
             controlSocketReady: false,
             sourceFilePath: sourceFilePath,
+            defaults: defaults,
             environment: [:],
             fileManager: fileManager
         )
@@ -160,6 +340,7 @@ struct CmuxAgentChatConfigTests {
             controlSocketCapability: "capability-token",
             controlSocketReady: true,
             sourceFilePath: sourceFilePath,
+            defaults: defaults,
             environment: [:],
             fileManager: fileManager
         )
@@ -174,12 +355,14 @@ struct CmuxAgentChatConfigTests {
             atomically: true,
             encoding: .utf8
         )
+        defaults.removeObject(forKey: OuroWorkbenchProduct.selectedBossDefaultsKey)
         let ambiguous = OuroWorkbenchProduct.agentChatEnvironment(
             bundleIdentifier: "com.ourostack.workbench.v1.debug",
             homeURL: home,
             applicationSupportURL: appSupport,
             bundleURL: bundle,
             sourceFilePath: sourceFilePath,
+            defaults: defaults,
             fileManager: fileManager
         )
         #expect(ambiguous["CMUX_AGENT_CHAT_BOSS_AGENT"] == nil)
@@ -736,12 +919,21 @@ struct CmuxAgentChatConfigTests {
     @MainActor
     @Test func commandPaletteNewAgentChatContributionFollowsFeatureFlag() throws {
         try withAgentChatUIFlag(false) {
-            #expect(ContentView.commandPaletteNewAgentChatContributions().isEmpty)
+            #expect(ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.cmuxterm.app"
+            ).isEmpty)
         }
 
         try withAgentChatUIFlag(true) {
-            let contributions = ContentView.commandPaletteNewAgentChatContributions()
-            #expect(contributions.map(\.commandId) == ["palette.newAgentChat"])
+            #expect(ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.cmuxterm.app"
+            ).map(\.commandId) == ["palette.newAgentChat"])
+            #expect(ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug"
+            ).map(\.commandId) == [
+                "palette.newAgentChat",
+                "palette.chooseWorkbenchBoss",
+            ])
         }
     }
 
@@ -784,6 +976,134 @@ struct CmuxAgentChatConfigTests {
                 #expect(!didStart)
             }
         }
+    }
+
+    @MainActor
+    @Test func workbenchBossWaitsForPendingSessionRestoreBeforeReplacingPersistedPanel() throws {
+        let defaults = UserDefaults.standard
+        let persistedKey = AgentChatActionInFlightGate.bossStableSurfaceDefaultsKey
+        let previousPersistedPanel = defaults.object(forKey: persistedKey)
+        let previousDock = defaults.object(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let previousAppDelegate = AppDelegate.shared
+        defaults.set(true, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let app = AppDelegate()
+        AppDelegate.shared = app
+        let manager = TabManager()
+        let sidebar = FileExplorerState()
+        let windowID = app.registerMainWindowContextForTesting(
+            tabManager: manager,
+            fileExplorerState: sidebar
+        )
+        defer {
+            app.didAttemptStartupSessionRestore = true
+            app.isApplyingSessionRestore = false
+            app.clearWorkbenchBossPaneForTesting()
+            app.unregisterMainWindowContextForTesting(windowId: windowID)
+            AppDelegate.shared = previousAppDelegate
+            if let previousPersistedPanel {
+                defaults.set(previousPersistedPanel, forKey: persistedKey)
+            } else {
+                defaults.removeObject(forKey: persistedKey)
+            }
+            if let previousDock {
+                defaults.set(previousDock, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            } else {
+                defaults.removeObject(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            }
+        }
+        app.clearWorkbenchBossPaneForTesting()
+        let persistedStableSurfaceID = UUID()
+        AgentChatActionInFlightGate.persistBossStableSurfaceID(
+            persistedStableSurfaceID,
+            defaults: defaults
+        )
+        app.didAttemptStartupSessionRestore = false
+        app.isApplyingSessionRestore = true
+
+        let panelID = app.openWorkbenchBossPanelForTesting(
+            tabManager: manager,
+            url: try #require(URL(string: "http://127.0.0.1:7739/token/"))
+        )
+
+        #expect(panelID == nil)
+        #expect(
+            AgentChatActionInFlightGate.persistedBossStableSurfaceID(defaults: defaults)
+                == persistedStableSurfaceID
+        )
+        #expect(app.existingWindowDock(forWindowId: windowID) == nil)
+    }
+
+    @MainActor
+    @Test func workbenchBossRebindsPersistedDockPanelAfterRestart() throws {
+        let defaults = UserDefaults.standard
+        let persistedKey = AgentChatActionInFlightGate.bossStableSurfaceDefaultsKey
+        let previousPersistedPanel = defaults.object(forKey: persistedKey)
+        let previousDock = defaults.object(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let previousAppDelegate = AppDelegate.shared
+        defaults.set(true, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+        let app = AppDelegate()
+        AppDelegate.shared = app
+        let manager = TabManager()
+        let sidebar = FileExplorerState()
+        let windowID = app.registerMainWindowContextForTesting(
+            tabManager: manager,
+            fileExplorerState: sidebar
+        )
+        defer {
+            app.clearWorkbenchBossPaneForTesting()
+            app.unregisterMainWindowContextForTesting(windowId: windowID)
+            AppDelegate.shared = previousAppDelegate
+            if let previousPersistedPanel {
+                defaults.set(previousPersistedPanel, forKey: persistedKey)
+            } else {
+                defaults.removeObject(forKey: persistedKey)
+            }
+            if let previousDock {
+                defaults.set(previousDock, forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            } else {
+                defaults.removeObject(forKey: RightSidebarBetaFeatureSettings.dockEnabledKey)
+            }
+        }
+        app.clearWorkbenchBossPaneForTesting()
+        let dock = app.windowDock(forWindowId: windowID)
+        let pane = try #require(dock.resolvePane(requestedPaneID: nil))
+        let restoredURL = try #require(URL(string: "http://127.0.0.1:7739/old-token/"))
+        let restoredPanelID = try #require(dock.newSurface(
+            kind: .browser,
+            inPane: pane,
+            url: restoredURL,
+            focus: false
+        ))
+        let restoredStableSurfaceID = try #require(
+            dock.browserPanel(for: restoredPanelID)?.stableSurfaceId
+        )
+        AgentChatActionInFlightGate.persistBossStableSurfaceID(
+            restoredStableSurfaceID,
+            defaults: defaults
+        )
+        let panelCountBeforeRebind = dock.panels.count
+        let currentURL = try #require(URL(string: "http://127.0.0.1:7740/new-token/"))
+
+        let reboundPanelID = try #require(app.openWorkbenchBossPanelForTesting(
+            tabManager: manager,
+            url: currentURL
+        ))
+
+        #expect(reboundPanelID == restoredPanelID)
+        #expect(dock.panels.count == panelCountBeforeRebind)
+        #expect(dock.browserPanel(for: restoredPanelID)?.currentURL == currentURL)
+        #expect(sidebar.isVisible)
+        #expect(sidebar.mode == .dock)
+    }
+
+    @Test func workbenchBossPersistenceRejectsMalformedPanelID() throws {
+        let defaultsName = "CmuxAgentChatConfigTests.bossPanel.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        defaults.set("not-a-uuid", forKey: AgentChatActionInFlightGate.bossStableSurfaceDefaultsKey)
+
+        #expect(AgentChatActionInFlightGate.persistedBossStableSurfaceID(defaults: defaults) == nil)
+        #expect(defaults.object(forKey: AgentChatActionInFlightGate.bossStableSurfaceDefaultsKey) == nil)
     }
 
     @MainActor
