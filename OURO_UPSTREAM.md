@@ -18,6 +18,6 @@ After the Copilot CLI integration is validated inside Workbench v1, generally us
 ## Exclusions
 
 - No Workbench v0 production code port by default.
-- No Ghostty divergence.
+- No Ghostty divergence beyond the one owner-authored environment-lifetime patch carried while `manaflow-ai/ghostty` lacks a compatible reachable revision.
 - No Herdr dependency.
 - No Manaflow cloud, mobile, auth, push, or update-service dependency without an explicit supported arrangement.

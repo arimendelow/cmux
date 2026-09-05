@@ -1,30 +1,24 @@
-# Ghostty Fork Changes (manaflow-ai/ghostty)
+# Ghostty Fork Changes
 
-This repo uses a fork of Ghostty for local patches that aren't upstream yet.
-When we change the fork, update this document and the parent submodule SHA.
+This repo normally follows `manaflow-ai/ghostty`. Workbench v1 temporarily pins `arimendelow/ghostty` only for the owner-authored embedded-helper environment lifetime fix while the upstream fork has no compatible reachable revision.
 
 ## Fork update checklist
 
 1) Make changes in `ghostty/`.
-2) Commit and push to `manaflow-ai/ghostty`.
+2) Commit and push to the submodule remote declared in `.gitmodules`.
 3) Update this file with the new change summary + conflict notes.
 4) In the parent repo: `git add ghostty` and commit the submodule SHA.
 
 ## Current fork changes
 
-The submodule pinned by this branch is `88357634c`, the fork-main merge of
-https://github.com/manaflow-ai/ghostty/pull/175. It combines the initial cmux
-theme-picker render fix at `5068b3a37` with terminal-owned semantic-prompt row
-lifecycle enforcement through `2d6e944e3` from
-https://github.com/manaflow-ai/ghostty/pull/176.
-The earlier integration combines the hidden-renderer reclamation and
-retry-deadline line through `4d6f0014f` with the resolved font-binding action
-callbacks originally ending at `80d7fb35a`.
-https://github.com/manaflow-ai/ghostty/pull/171 reapplied the font callback
-commits on current fork main and clarified the callback's non-reentrant
-contract. PR 172 then recorded the original font branch as ancestry without
-changing the integrated tree, so the final pin descends from both former
-gitlinks (`cd1f8e012` and `80d7fb35a`).
+The Workbench v1 downstream pins `f88eb4130` from `arimendelow/ghostty:user/arimendelow/workbench-v1-embedded-env-lifetime`. It is the existing Workbench Ghostty revision `6143bac77` plus two commits authored by a `manaflow-ai/ghostty` owner:
+
+- `9fe36c618` — regression coverage proving that replacing `GHOSTTY_BIN` invalidates a retained directory slice.
+- `f88eb4130` — stores `GHOSTTY_BIN_DIR` before replacing `GHOSTTY_BIN`, then reads the stable map-owned directory value for PATH construction.
+
+Drop this temporary fork and return `.gitmodules` to `https://github.com/manaflow-ai/ghostty.git` as soon as an equivalent fix is reachable from a compatible upstream line.
+
+The previous documented fork pin was `88357634c`, the fork-main merge of https://github.com/manaflow-ai/ghostty/pull/175. It combines the initial cmux theme-picker render fix at `5068b3a37` with terminal-owned semantic-prompt row lifecycle enforcement through `2d6e944e3` from https://github.com/manaflow-ai/ghostty/pull/176. The earlier integration combines the hidden-renderer reclamation and retry-deadline line through `4d6f0014f` with the resolved font-binding action callbacks originally ending at `80d7fb35a`. https://github.com/manaflow-ai/ghostty/pull/171 reapplied the font callback commits on current fork main and clarified the callback's non-reentrant contract. PR 172 then recorded the original font branch as ancestry without changing the integrated tree, so the final pin descends from both former gitlinks (`cd1f8e012` and `80d7fb35a`).
 
 The renderer line was reviewed in
 https://github.com/manaflow-ai/ghostty/pull/168, following the merged
