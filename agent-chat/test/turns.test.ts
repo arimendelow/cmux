@@ -46,6 +46,15 @@ if (groups[0].assistant?.text !== "done") {
   throw new Error("single-segment turn lost its primary assistant");
 }
 
+const internalDelivery = groupTurns([
+  { kind: "user", text: "reply directly" },
+  { kind: "tool", toolId: "settle", name: "settle", detail: "answer=READY", status: "ok" },
+  { kind: "assistant", text: "READY", open: false },
+], "idle");
+if (internalDelivery[0].activity.length !== 0) {
+  throw new Error("internal settle delivery should not appear as user-visible command activity");
+}
+
 const multiSegment = groupTurns([
   { kind: "user", text: "inspect" },
   { kind: "assistant", text: "I'll inspect the files first.", open: false },

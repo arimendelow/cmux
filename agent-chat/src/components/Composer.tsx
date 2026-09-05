@@ -158,7 +158,7 @@ export function Composer() {
         </div>
         <StatusRow
           provider={provider}
-          providers={shouldShowProviderPicker(experience) ? providers : undefined}
+          providers={providers}
           allProviderOptions={allProviderOptions}
           onProviderModelChange={shouldShowProviderPicker(experience) ? changeProviderModel : undefined}
           cwd={cwd}

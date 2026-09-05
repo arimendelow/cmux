@@ -41,6 +41,12 @@ export function groupTurns(blocks: Block[], status?: string): TurnGroup[] {
       pendingAssistantIndex = current.activity.length;
     } else if (block.kind === "footer") {
       current.footer = block;
+    } else if (
+      block.kind === "tool"
+      && block.status === "ok"
+      && ["settle", "speak"].includes(block.name.trim().toLowerCase())
+    ) {
+      continue;
     } else {
       current.activity.push(block);
     }

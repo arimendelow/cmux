@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { shouldShowProviderPicker } from "../src/components/Composer";
+import { providerInfoForStatusRow } from "../src/components/StatusRow";
 import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 
 test("Workbench header makes local and Hub authority explicit", () => {
@@ -39,4 +40,15 @@ test("Workbench authority stays readable in a narrow pane", () => {
   expect(css).toContain("@media (max-width: 420px)");
   expect(css).toContain(".authority-remote { flex-direction: column; align-items: flex-start; gap: 2px; }");
   expect(css).toContain(".authority-hub > span:first-child { flex-basis: 100%; }");
+});
+
+test("Workbench composer shows the selected Boss name instead of its internal provider id", () => {
+  const composerSource = readFileSync(join(import.meta.dir, "../src/components/Composer.tsx"), "utf8");
+  const provider = providerInfoForStatusRow(
+    "ouro-boss",
+    [{ id: "ouro-boss", label: "ouroboros", role: "boss", installed: true }],
+  );
+
+  expect(composerSource).toContain("providers={providers}");
+  expect(provider.label).toBe("ouroboros");
 });

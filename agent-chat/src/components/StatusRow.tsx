@@ -189,6 +189,10 @@ function usePickerTypeToSearch(open: boolean, ref: RefObject<HTMLInputElement | 
   }, [open, ref, setQuery]);
 }
 
+export function providerInfoForStatusRow(provider: string, providers?: Provider[]): Provider {
+  return providers?.find((candidate) => candidate.id === provider) ?? { id: provider, label: provider };
+}
+
 function useBoundedActiveIndex(open: boolean, key: string, count: number) {
   const [active, setActive] = useState(0);
   useLayoutEffect(() => {
@@ -522,7 +526,7 @@ export function StatusRow({
   const mode = options.find((o) => (o.id === "mode" || o.id === "permissionMode") && o.kind === "select");
   const overflow = options.filter((o) => !isInlineOption(o));
   const modeLabel = mode && !["", "default", "build"].includes(String(mode.value)) ? prettyValue(mode) : "";
-  const providerInfo = providers?.find((p) => p.id === provider) ?? { id: provider, label: provider };
+  const providerInfo = providerInfoForStatusRow(provider, providers);
   return (
     <div className="status-row">
       {providers && onProviderModelChange
