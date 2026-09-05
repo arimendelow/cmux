@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Regression coverage for Ghostty SSH wrappers in embedded app bundles.
+"""Regression coverage for Ghostty helper paths in embedded app bundles.
 
 The terminal host owns the exact CLI executable path. Shell integration must
-invoke that path directly instead of rebuilding ``<gui executable dir>/ghostty``.
+repair stale directory metadata from that path and invoke the helper directly.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 ZSH_INTEGRATION = ROOT / "ghostty/src/shell-integration/zsh/ghostty-integration"
 BASH_INTEGRATION = ROOT / "ghostty/src/shell-integration/bash/ghostty.bash"
+CMUX_ZSH_INTEGRATION = ROOT / "Resources/shell-integration/cmux-zsh-integration.zsh"
+CMUX_BASH_INTEGRATION = ROOT / "Resources/shell-integration/cmux-bash-integration.bash"
 FISH_INTEGRATION = (
     ROOT
     / "ghostty/src/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"
@@ -99,6 +101,52 @@ def _run_wrapper(
         )
 
 
+def _run_path_repair(shell: str, integration: Path, helper: Path, tmp: Path) -> None:
+    stale_dir = tmp / f"{shell}-stale-bin"
+    env = os.environ.copy()
+    env.update(
+        {
+            "GHOSTTY_BIN": str(helper),
+            "GHOSTTY_BIN_DIR": str(stale_dir),
+            "PATH": f"/usr/bin:/bin:{stale_dir}",
+        }
+    )
+    if shell == "zsh":
+        command = [
+            "zsh",
+            "-dfc",
+            'source "$1"; _cmux_fix_path; print -r -- "$GHOSTTY_BIN_DIR"; print -r -- "$PATH"',
+            "zsh",
+            str(integration),
+        ]
+    else:
+        command = [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            'source "$1"; _cmux_fix_path; printf "%s\\n%s\\n" "$GHOSTTY_BIN_DIR" "$PATH"',
+            "bash",
+            str(integration),
+        ]
+    result = subprocess.run(command, env=env, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise AssertionError(f"{shell} path repair failed: {result.stderr}")
+    actual_dir, actual_path = result.stdout.strip().splitlines()[-2:]
+    expected_dir = str(helper.parent)
+    path_entries = actual_path.split(":")
+    if (
+        actual_dir != expected_dir
+        or expected_dir not in path_entries
+        or str(stale_dir) in path_entries
+        or path_entries.index(expected_dir) > path_entries.index("/usr/bin")
+    ):
+        raise AssertionError(
+            f"{shell} path repair retained stale Ghostty state: "
+            f"dir={actual_dir!r} path={actual_path!r}"
+        )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="cmux-issue-8093-") as raw_tmp:
         tmp = Path(raw_tmp)
@@ -108,6 +156,12 @@ def main() -> None:
         (contents / "MacOS").mkdir(parents=True)
         helper.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$GHOSTTY_TEST_LOG"\n')
         helper.chmod(0o755)
+
+        for shell, integration in (
+            ("zsh", CMUX_ZSH_INTEGRATION),
+            ("bash", CMUX_BASH_INTEGRATION),
+        ):
+            _run_path_repair(shell, integration, helper, tmp)
 
         for shell, integration in (
             ("zsh", ZSH_INTEGRATION),
