@@ -348,7 +348,12 @@ extension DockSplitStore {
         )
         let observed = restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .completedAgentExit
             ? nil
-            : observation?.snapshot
+            : (observation?.snapshot).map {
+                WorkbenchSessionAuthority.preservingExplicitLocalAuthority(
+                    observed: $0,
+                    current: restoredAgentLifecycle.snapshotsByPanelId[panelId]
+                )
+            }
         let requiresCurrentManagedSession =
             invalidatedCachedTransferAgentSessionPanelIds.contains(panelId)
         let agentCompatibilityBinding = managedResumeBinding ?? resumeBinding

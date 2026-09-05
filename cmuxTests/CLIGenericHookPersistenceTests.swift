@@ -171,13 +171,15 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "gpt-5.4",
                     "--resume=old-session",
                     "--allow-all-tools",
+                    "--ui-server",
                     "-i",
                     "old prompt",
                     "initial prompt should not persist"
                 ],
                 extraEnvironment: [
                     "COPILOT_HOME": "/tmp/copilot home",
-                    "COPILOT_GITHUB_TOKEN": "secret"
+                    "COPILOT_GITHUB_TOKEN": "secret",
+                    "MSFT_AGENCY": "true"
                 ],
                 expectedArguments: [
                     "/tmp/cmux-agent-upstreams/copilot-install/bin/copilot",
@@ -185,7 +187,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "gpt-5.4",
                     "--allow-all-tools"
                 ],
-                expectedEnvironment: ["COPILOT_HOME": "/tmp/copilot home"]
+                expectedEnvironment: [
+                    "CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub",
+                    "COPILOT_HOME": "/tmp/copilot home"
+                ]
             ),
             GenericHookPersistenceScenario(
                 agent: "codebuddy",

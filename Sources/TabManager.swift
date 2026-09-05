@@ -5773,13 +5773,17 @@ extension TabManager {
                     notificationStore?.notifications(forTabId: workspace.id, surfaceId: panelId) ?? [],
                     into: &hasher
                 )
-                Self.hashRestorableAgentSnapshot(
-                    restorableAgentIndex.snapshot(
-                        workspaceId: workspace.id,
-                        panelId: panelId
-                    ),
-                    into: &hasher
-                )
+                let currentRestorableAgent = workspace.restoredAgentSnapshotsByPanelId[panelId]
+                let effectiveRestorableAgent = restorableAgentIndex.snapshot(
+                    workspaceId: workspace.id,
+                    panelId: panelId
+                ).map {
+                    WorkbenchSessionAuthority.preservingExplicitLocalAuthority(
+                        observed: $0,
+                        current: currentRestorableAgent
+                    )
+                } ?? currentRestorableAgent
+                Self.hashRestorableAgentSnapshot(effectiveRestorableAgent, into: &hasher)
                 hasher.combine(
                     restorableAgentIndex.entry(
                         workspaceId: workspace.id,
@@ -5846,6 +5850,7 @@ extension TabManager {
         hasher.combine(snapshot.sessionId)
         hashOptionalString(snapshot.workingDirectory, into: &hasher)
         hashAgentLaunchCommand(snapshot.launchCommand, into: &hasher)
+        hashOptionalString(snapshot.workbenchAuthority?.rawValue, into: &hasher)
     }
 
     nonisolated private static func hashAgentLaunchCommand(

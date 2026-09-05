@@ -9,6 +9,21 @@ import {
   workbenchToolDefinitions,
 } from "../workbench-mcp";
 
+type InspectedResponse = {
+  error?: { code: number };
+  result?: {
+    serverInfo?: { name: string };
+    tools?: unknown[];
+    isError?: boolean;
+  };
+} | null;
+
+function inspectResponse(
+  response: Awaited<ReturnType<typeof handleWorkbenchMCPRequest>>,
+): InspectedResponse {
+  return response;
+}
+
 test("Workbench MCP exposes only focus and flag-for-review", () => {
   expect(workbenchToolDefinitions().map((tool) => tool.name)).toEqual([
     "workbench_focus",
@@ -18,32 +33,32 @@ test("Workbench MCP exposes only focus and flag-for-review", () => {
 
 test("Workbench MCP handles its complete protocol surface", async () => {
   const call = async () => ({});
-  expect((await handleWorkbenchMCPRequest({}, call)).error?.code).toBe(-32600);
+  expect(inspectResponse(await handleWorkbenchMCPRequest({}, call))?.error?.code).toBe(-32600);
   expect(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     method: "notifications/initialized",
   }, call)).toBeNull();
-  expect((await handleWorkbenchMCPRequest({
+  expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-  }, call)).result?.serverInfo.name).toBe("ouro-workbench-v1");
-  expect((await handleWorkbenchMCPRequest({
+  }, call))?.result?.serverInfo?.name).toBe("ouro-workbench-v1");
+  expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 2,
     method: "tools/list",
-  }, call)).result?.tools).toHaveLength(2);
-  expect((await handleWorkbenchMCPRequest({
+  }, call))?.result?.tools).toHaveLength(2);
+  expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 3,
     method: "unknown",
-  }, call)).error?.code).toBe(-32601);
-  expect((await handleWorkbenchMCPRequest({
+  }, call))?.error?.code).toBe(-32601);
+  expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 4,
     method: "tools/call",
     params: { name: "unknown", arguments: {} },
-  }, call)).result?.isError).toBe(true);
+  }, call))?.result?.isError).toBe(true);
 });
 
 test("Workbench MCP maps validated tools to exact native action requests", async () => {
@@ -64,7 +79,7 @@ test("Workbench MCP maps validated tools to exact native action requests", async
       arguments: { request_id: "focus-1", workspace_id: workspaceId, surface_id: surfaceId },
     },
   }, call);
-  expect(focus.result?.isError).toBe(false);
+  expect(inspectResponse(focus)?.result?.isError).toBe(false);
 
   const flag = await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
@@ -80,7 +95,7 @@ test("Workbench MCP maps validated tools to exact native action requests", async
       },
     },
   }, call);
-  expect(flag.result?.isError).toBe(false);
+  expect(inspectResponse(flag)?.result?.isError).toBe(false);
   expect(calls).toEqual([
     {
       method: "workbench.focus",
@@ -118,7 +133,7 @@ test("Workbench MCP rejects malformed action requests before native dispatch", a
     return {};
   });
 
-  expect(response.result?.isError).toBe(true);
+  expect(inspectResponse(response)?.result?.isError).toBe(true);
   expect(calls).toBe(0);
 });
 
@@ -175,7 +190,7 @@ test("Workbench MCP loop translates malformed input", async () => {
   }
   const output: string[] = [];
   await runWorkbenchMCP(input(), (line) => output.push(line), async () => ({}));
-  expect(output.map(JSON.parse)).toEqual([
+  expect(output.map((line) => JSON.parse(line))).toEqual([
     { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
   ]);
 });

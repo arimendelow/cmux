@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForProductForTest, resolveSessionStartForTest, startErrorMessageForTest, workbenchExperienceForTest } from "../server";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { agencyHubStatusForTest, agencyHubStatusFromOutputForTest, providerDefinitionsForProductForTest, providerDefinitionsForTest, resolveSessionStartForProductForTest, resolveSessionStartForTest, startErrorMessageForTest, workbenchExperienceForTest } from "../server";
 
 test("stock Agent Chat keeps its direct provider profiles", () => {
   const providers = providerDefinitionsForTest();
@@ -46,7 +49,9 @@ test("Workbench v1 exposes exactly one selected Ouro Boss", () => {
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
     hubUrl: "https://aka.ms/agency/hub",
+    hubStatus: "unknown",
   });
+
   expect(workbenchExperienceForTest("", "Desk / demo-task")).toBeUndefined();
   expect(providerDefinitionsForProductForTest("ouro-workbench-v1", {
     bossAgent: "slugger",
@@ -90,6 +95,41 @@ test("Workbench v1 exposes exactly one selected Ouro Boss", () => {
     new Error("working directory is outside configured roots"),
     "ouro-workbench-v1",
   )).toBe("Failed to start Boss: working directory is outside the configured roots");
+});
+
+test("Agency Hub status parser uses only the released CLI output", () => {
+  expect(agencyHubStatusFromOutputForTest("hub daemon (PID 42)\n  Connection: connected\n", 0)).toBe("connected");
+  expect(agencyHubStatusFromOutputForTest("hub daemon (PID 42)\n  Connection: disconnected\n", 0)).toBe("disconnected");
+  expect(agencyHubStatusFromOutputForTest("Agency Hub daemon is not running\n", 0)).toBe("stopped");
+  expect(agencyHubStatusFromOutputForTest("unexpected preview output\n", 0)).toBe("unknown");
+  expect(agencyHubStatusFromOutputForTest("", 1)).toBe("unavailable");
+});
+
+test("Agency Hub status probe stays bounded when the command is unavailable or ignores termination", async () => {
+  expect(await agencyHubStatusForTest(["/definitely/missing-agency"], 20, 20)).toBe("unavailable");
+  const root = await mkdtemp(join(tmpdir(), "workbench-hub-timeout-"));
+  const pidFile = join(root, "descendant.pid");
+  let descendantPid = 0;
+  try {
+    expect(await agencyHubStatusForTest([
+      "/bin/sh",
+      "-c",
+      `/bin/sh -c 'trap "" TERM; while :; do :; done' & echo $! > '${pidFile}'; wait`,
+    ], 500, 20)).toBe("unavailable");
+    descendantPid = Number((await readFile(pidFile, "utf8")).trim());
+    var alive = true;
+    try {
+      process.kill(descendantPid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  } finally {
+    if (descendantPid > 0) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("session start defaults are safe and do not retain prompt text", () => {

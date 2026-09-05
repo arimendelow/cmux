@@ -291,6 +291,7 @@ export function GalleryApp() {
                 localAuthorityLabel: "Controlled here",
                 hubAuthorityLabel: "Controlled in Agency Hub",
                 hubUrl: "https://aka.ms/agency/hub",
+                hubStatus: "connected",
               }} />
             </div>
             <div>

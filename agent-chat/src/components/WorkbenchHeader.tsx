@@ -7,6 +7,14 @@ export function WorkbenchHeader({
   experience: WorkbenchExperience;
   compact?: boolean;
 }) {
+  const hubStatus = experience.hubStatus ?? "unknown";
+  const hubStatusLabel = {
+    connected: "Hub connected",
+    disconnected: "Hub disconnected",
+    stopped: "Hub stopped",
+    unavailable: "Hub unavailable",
+    unknown: "Hub status unknown",
+  }[hubStatus];
   return (
     <header className={`workbench-header${compact ? " compact" : ""}`}>
       <div className="workbench-identity">
@@ -20,6 +28,7 @@ export function WorkbenchHeader({
           <span className="authority-hub">
             <span>Remote sessions:</span>
             <strong>{experience.hubAuthorityLabel}</strong>
+            <span className={`authority-hub-status ${hubStatus}`}>{hubStatusLabel}</span>
           </span>
           <a className="authority-hub-link" href={experience.hubUrl} target="_blank" rel="noreferrer">Open Hub</a>
         </span>

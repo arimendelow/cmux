@@ -783,13 +783,17 @@ struct SessionRestorableAgentSnapshot: Codable, Sendable {
     /// Last hook-observed permission mode; re-applied as `--permission-mode` on
     /// user-owned claude resume/fork when no explicit launch flag covers it.
     var permissionMode: String? = nil
+    /// Persisted source that owns automated control of this session.
+    /// Nil preserves exact launch-provenance inference for older snapshots.
+    var workbenchAuthority: WorkbenchSessionAuthority? = nil
 
     func preparedResumeArguments(
         launchCommand: AgentLaunchCommandSnapshot?,
         workingDirectory: String?,
         observedPermissionMode: String?
     ) -> [String]? {
-        AgentResumeCommandBuilder.resumeArguments(
+        guard effectiveWorkbenchAuthority == .controlledHere else { return nil }
+        return AgentResumeCommandBuilder.resumeArguments(
             kind: kind,
             sessionId: sessionId,
             launchCommand: launchCommand,
@@ -803,6 +807,7 @@ struct SessionRestorableAgentSnapshot: Codable, Sendable {
         useLocalRestoreVerb: Bool = true,
         restoringWorkingDirectory: String? = nil
     ) -> String? {
+        guard effectiveWorkbenchAuthority == .controlledHere else { return nil }
         if useLocalRestoreVerb {
             let executable = AgentRestoreLaunch.cliStartupExecutableToken
             guard AgentRestoreCLIArgument(rawValue: kind.rawValue) != nil,
@@ -1137,6 +1142,9 @@ struct RestorableAgentSessionIndex: Sendable {
                         lookup: claudeTranscriptLookup
                     )
                     : record
+                let inferredWorkbenchAuthority = WorkbenchSessionAuthority.inferred(
+                    from: effectiveRecord.launchCommand
+                )
                 // Drop untrusted launch captures before ANY derivation: the
                 // working directory below would otherwise inherit the foreign launch cwd.
                 effectiveRecord.launchCommand = trustedLaunchCommand(
@@ -1170,7 +1178,10 @@ struct RestorableAgentSessionIndex: Sendable {
                     ),
                     launchCommand: effectiveRecord.launchCommand,
                     registration: registration,
-                    permissionMode: effectiveRecord.lastPermissionMode
+                    permissionMode: effectiveRecord.lastPermissionMode,
+                    workbenchAuthority: inferredWorkbenchAuthority == .controlledInAgencyHub
+                        ? .controlledInAgencyHub
+                        : nil
                 )
                 let key = PanelKey(workspaceId: workspaceId, panelId: panelId)
                 let sessionKey = SessionKey(kind: kind, sessionId: normalizedSessionId)

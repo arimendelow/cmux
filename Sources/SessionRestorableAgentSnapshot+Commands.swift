@@ -8,6 +8,7 @@ extension SessionRestorableAgentSnapshot {
         case launchCommand
         case registration
         case permissionMode
+        case workbenchAuthority
     }
 
     init(from decoder: Decoder) throws {
@@ -37,7 +38,11 @@ extension SessionRestorableAgentSnapshot {
             ),
             registration: registration,
             // Optional so snapshots persisted before the field decode unchanged.
-            permissionMode: try container.decodeIfPresent(String.self, forKey: .permissionMode)
+            permissionMode: try container.decodeIfPresent(String.self, forKey: .permissionMode),
+            workbenchAuthority: try container.decodeIfPresent(
+                WorkbenchSessionAuthority.self,
+                forKey: .workbenchAuthority
+            )
         )
     }
 
@@ -49,6 +54,7 @@ extension SessionRestorableAgentSnapshot {
         includeWorkingDirectoryPrefix: Bool,
         restoringWorkingDirectory: String? = nil
     ) -> String? {
+        guard effectiveWorkbenchAuthority == .controlledHere else { return nil }
         let effectiveWorkingDirectory = restoringWorkingDirectory ?? workingDirectory
         if kind.restoreMode == .relaunchCommand {
             return AgentRelaunchCommandBuilder().shellCommand(
@@ -70,7 +76,8 @@ extension SessionRestorableAgentSnapshot {
     }
 
     var forkCommand: String? {
-        guard kind.restoreMode == .resumeSession else { return nil }
+        guard effectiveWorkbenchAuthority == .controlledHere,
+              kind.restoreMode == .resumeSession else { return nil }
         return AgentResumeCommandBuilder.forkShellCommand(
             kind: kind,
             sessionId: sessionId,

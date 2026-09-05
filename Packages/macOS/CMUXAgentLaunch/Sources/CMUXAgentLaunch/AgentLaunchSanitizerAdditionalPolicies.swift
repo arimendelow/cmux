@@ -81,7 +81,8 @@ extension AgentLaunchSanitizer {
             "--continue",
             "--interactive",
             "-i",
-            "--resume"
+            "--resume",
+            "--ui-server"
         ],
         droppedOptionPrefixes: [
             "--connect=",

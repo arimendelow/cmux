@@ -116,6 +116,11 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   display: flex; gap: 5px; color: var(--text-faint); font: calc(var(--font-size-base) - 3px) var(--font-sans);
 }
 .authority-hub strong { color: var(--text-dim); font-weight: 500; }
+.authority-hub-status { display: inline-flex; align-items: center; gap: 4px; }
+.authority-hub-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--text-faint); }
+.authority-hub-status.connected::before { background: var(--green); }
+.authority-hub-status.disconnected::before, .authority-hub-status.stopped::before { background: var(--amber); }
+.authority-hub-status.unavailable::before { background: var(--red); }
 .authority-remote { display: flex; align-items: center; gap: 8px; }
 .authority-hub-link {
   color: var(--accent); font: 600 calc(var(--font-size-base) - 3px) var(--font-sans);
@@ -137,6 +142,11 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   .workbench-header.compact { padding-inline: 18px; }
   .workbench-header.compact .workbench-authority { align-items: flex-start; flex-direction: column; gap: 4px; }
   .authority-remote { flex-wrap: wrap; row-gap: 2px; }
+}
+@media (max-width: 420px) {
+  .authority-remote { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .authority-hub { flex-wrap: wrap; }
+  .authority-hub > span:first-child { flex-basis: 100%; }
 }
 #composer-card {
   position: relative; width: min(660px, 100%);

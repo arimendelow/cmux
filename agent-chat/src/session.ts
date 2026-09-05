@@ -108,6 +108,7 @@ export interface WorkbenchExperience {
   localAuthorityLabel: string;
   hubAuthorityLabel: string;
   hubUrl: string;
+  hubStatus?: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
 }
 export interface RecoveryState { mode: "resumed" | "respawned"; title: string; message: string; }
 export interface ConnectionState { state: "starting"; title: string; message?: string; }

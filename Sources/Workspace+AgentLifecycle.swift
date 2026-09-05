@@ -2,6 +2,51 @@ import CmuxWorkspaces
 import Foundation
 
 extension Workspace {
+    func canTakeControlOfHubSession(panelId: UUID) -> Bool {
+        hubSessionLocalTakeover(panelId: panelId) != nil
+    }
+
+    @discardableResult
+    func takeControlOfHubSession(
+        panelId: UUID,
+        send: (TerminalPanel, String) -> Bool
+    ) -> Bool {
+        guard let terminal = terminalPanel(for: panelId),
+              let takeover = hubSessionLocalTakeover(panelId: panelId),
+              send(terminal, takeover.input) else {
+            return false
+        }
+        restoredAgentSnapshotsByPanelId[panelId] = takeover.snapshot
+        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
+        restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
+        return true
+    }
+
+    private func hubSessionLocalTakeover(
+        panelId: UUID
+    ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
+        let agent = restoredAgentSnapshotsByPanelId[panelId]
+        let binding = surfaceResumeBindingsByPanelId[panelId]
+        let canResume = restoredAgentResumeStatesByPanelId[panelId] == .manualResumeAvailable ||
+            (
+                restoredAgentResumeStatesByPanelId[panelId] == nil &&
+                agent == nil &&
+                binding != nil &&
+                panelShellActivityStates[panelId] == .promptIdle
+            )
+        guard canResume,
+              !isRemoteTerminalContext(panelId),
+              let snapshot = WorkbenchSessionAuthority.localTakeoverSnapshot(
+                agent: agent,
+                binding: binding
+              ),
+              let command = snapshot.resumeCommand else {
+            return nil
+        }
+        return (snapshot, command + "\r")
+    }
+
     func allowsAgentContinuation(forPanelId panelId: UUID) -> Bool {
         restoredAgentResumeStatesByPanelId[panelId] != .completedAgentExit ||
             restoredAgentSnapshotForContinuation(panelId: panelId) != nil

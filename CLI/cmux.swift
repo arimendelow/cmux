@@ -28279,7 +28279,12 @@ struct CMUXCLI {
         let workingDirectory = (envCaptureIsTrusted ? normalizedHookValue(env["CMUX_AGENT_LAUNCH_CWD"]) : nil)
             ?? normalizedHookValue(cwd)
             ?? normalizedHookValue(env["PWD"])
-        let environment = selectedAgentLaunchEnvironment(from: env, kind: launcher)
+        var environment = selectedAgentLaunchEnvironment(from: env, kind: launcher)
+        if fallbackKind == "copilot",
+           normalizedHookValue(env["MSFT_AGENCY"])?.lowercased() == "true",
+           arguments?.contains("--ui-server") == true {
+            environment["CMUX_AGENT_LAUNCH_AUTHORITY"] = "agency-hub"
+        }
 
         // Fallback when the launch argv is genuinely UNAVAILABLE: plain `codex` with no cmux launcher
         // (no CMUX_AGENT_LAUNCH_ARGV_B64) and an unresolved/exited PID, so processArguments returns nil.

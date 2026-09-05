@@ -151,6 +151,7 @@ export interface WorkbenchExperience {
   localAuthorityLabel: string;
   hubAuthorityLabel: string;
   hubUrl: string;
+  hubStatus: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
 }
 
 interface WorkbenchBossProviderOptions {
@@ -160,7 +161,11 @@ interface WorkbenchBossProviderOptions {
   workbenchMcp?: string;
 }
 
-function workbenchExperience(productId: string, contextLabel: string): WorkbenchExperience | undefined {
+function workbenchExperience(
+  productId: string,
+  contextLabel: string,
+  hubStatus: WorkbenchExperience["hubStatus"] = "unknown",
+): WorkbenchExperience | undefined {
   if (productId !== "ouro-workbench-v1") return undefined;
   return {
     productName: "Ouro Workbench v1",
@@ -170,6 +175,7 @@ function workbenchExperience(productId: string, contextLabel: string): Workbench
     localAuthorityLabel: "Controlled here",
     hubAuthorityLabel: "Controlled in Agency Hub",
     hubUrl: "https://aka.ms/agency/hub",
+    hubStatus,
   };
 }
 
@@ -177,10 +183,85 @@ export function workbenchExperienceForTest(productId: string, contextLabel = "")
   return workbenchExperience(productId, contextLabel);
 }
 
-const WORKBENCH_EXPERIENCE = workbenchExperience(
+export function agencyHubStatusFromOutputForTest(
+  output: string,
+  exitCode: number,
+): WorkbenchExperience["hubStatus"] {
+  if (exitCode !== 0) return "unavailable";
+  if (/Connection:\s+connected\b/i.test(output)) return "connected";
+  if (/Connection:\s+\S+/i.test(output)) return "disconnected";
+  if (/\bhub daemon\b.*\b(?:stopped|not running)\b/i.test(output)) return "stopped";
+  return "unknown";
+}
+
+async function agencyHubStatus(
+  command: string[] = ["agency", "hub", "status"],
+  timeoutMs = 3_000,
+  killGraceMs = 250,
+): Promise<WorkbenchExperience["hubStatus"]> {
+  try {
+    const child = Bun.spawn(command, {
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: true,
+    });
+    const reader = child.stdout.getReader();
+    const output = (async () => {
+      const decoder = new TextDecoder();
+      let text = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) return text + decoder.decode();
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+    })();
+    const completed = Promise.all([output, child.exited])
+      .then(([text, exitCode]) => ({ text, exitCode }))
+      .catch(() => null);
+    const result = await Promise.race([
+      completed,
+      Bun.sleep(timeoutMs).then(() => undefined),
+    ]);
+    if (result !== undefined && result !== null) {
+      return agencyHubStatusFromOutputForTest(result.text, result.exitCode);
+    }
+    await Promise.race([reader.cancel().catch(() => {}), Bun.sleep(killGraceMs)]);
+    try {
+      globalThis.process.kill(-child.pid, "SIGTERM");
+    } catch {
+      child.kill();
+    }
+    await Bun.sleep(killGraceMs);
+    try {
+      globalThis.process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try { child.kill(9); } catch {}
+    }
+    await Promise.race([child.exited.catch(() => {}), Bun.sleep(killGraceMs)]);
+    return "unavailable";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export function agencyHubStatusForTest(
+  command: string[],
+  timeoutMs: number,
+  killGraceMs: number,
+): Promise<WorkbenchExperience["hubStatus"]> {
+  return agencyHubStatus(command, timeoutMs, killGraceMs);
+}
+
+let WORKBENCH_EXPERIENCE = workbenchExperience(
   PRODUCT_ID,
   process.env.CMUX_AGENT_CHAT_CONTEXT_LABEL?.trim() ?? "",
 );
+if (import.meta.main && WORKBENCH_EXPERIENCE) {
+  WORKBENCH_EXPERIENCE = {
+    ...WORKBENCH_EXPERIENCE,
+    hubStatus: await agencyHubStatus(),
+  };
+}
 
 if (WORKBENCH_EXPERIENCE && !AUTH_TOKEN) {
   throw new Error("Ouro Workbench requires a launch token");

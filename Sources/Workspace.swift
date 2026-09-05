@@ -361,6 +361,11 @@ extension Workspace {
                 $0,
                 resumeBinding: resumeBinding
             )
+        }.map {
+            WorkbenchSessionAuthority.preservingExplicitLocalAuthority(
+                observed: $0,
+                current: restoredAgentSnapshotsByPanelId[panelId]
+            )
         }
         if indexedRestorableAgent != nil, compatibleIndexedRestorableAgent == nil {
             clearRestoredAgentSnapshot(panelId: panelId)
@@ -1331,7 +1336,14 @@ extension Workspace {
             // Only auto-resume if the agent was actively running when the snapshot was saved.
             // wasAgentRunning == nil means a legacy snapshot; treat as true for backwards compatibility.
             let agentWasRunningAtQuit = snapshot.terminal?.wasAgentRunning ?? true
-            let shouldAutoResumeAgent = autoResumeAgentSessions && agentWasRunningAtQuit
+            let workbenchAuthority = WorkbenchSessionAuthority.resolved(
+                agent: restorableAgent,
+                binding: persistedResumeBinding
+            )
+            let shouldAutoResumeAgent = workbenchAuthority.allowsLocalAutoResume(
+                globalEnabled: autoResumeAgentSessions,
+                wasRunning: agentWasRunningAtQuit
+            )
             let remoteStartupCommand = remoteTerminalStartupCommand()
             let restoresRemoteWorkspaceTerminalSnapshot =
                 remoteStartupCommand != nil &&
@@ -1367,6 +1379,7 @@ extension Workspace {
                 restorableAgent: restorableAgent
             )
             let resumeBindingForStartup =
+                workbenchAuthority == .controlledInAgencyHub ||
                 restoredHibernation != nil ||
                 (resumeBinding?.isProcessDetected == true && resumeBinding?.autoResume != true)
                     ? nil

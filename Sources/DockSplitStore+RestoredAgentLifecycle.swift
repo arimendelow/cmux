@@ -17,6 +17,44 @@ extension DockSplitStore {
         agentRuntimeByPanelId.removeValue(forKey: panelId)
     }
 
+    func canTakeControlOfHubSession(panelId: UUID) -> Bool {
+        hubSessionLocalTakeover(panelId: panelId) != nil
+    }
+
+    @discardableResult
+    func takeControlOfHubSession(
+        panelId: UUID,
+        send: (TerminalPanel, String) -> Bool
+    ) -> Bool {
+        guard let terminal = panels[panelId] as? TerminalPanel,
+              let takeover = hubSessionLocalTakeover(panelId: panelId),
+              send(terminal, takeover.input) else {
+            return false
+        }
+        restoredAgentLifecycle.snapshotsByPanelId[panelId] = takeover.snapshot
+        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
+        managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
+        restoredAgentLifecycle.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        restoredAgentLifecycle.invalidatedFingerprintsByPanelId.removeValue(forKey: panelId)
+        return true
+    }
+
+    private func hubSessionLocalTakeover(
+        panelId: UUID
+    ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
+        guard restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable,
+              detachedSurfaceTransfersByPanelId[panelId]?.isRemoteTerminal != true,
+              let snapshot = WorkbenchSessionAuthority.localTakeoverSnapshot(
+                agent: restoredAgentLifecycle.snapshotsByPanelId[panelId],
+                binding: managedAgentResumeBinding(panelId: panelId)
+                    ?? surfaceResumeBindingsByPanelId[panelId]
+              ),
+              let command = snapshot.resumeCommand else {
+            return nil
+        }
+        return (snapshot, command + "\r")
+    }
+
     func updatePanelShellActivityState(panelId: UUID, state: PanelShellActivityState) {
         guard let terminal = panels[panelId] as? TerminalPanel else { return }
         terminal.updateShellActivityState(state)

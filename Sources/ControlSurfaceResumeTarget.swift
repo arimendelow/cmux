@@ -269,6 +269,12 @@ extension TerminalController {
         target: ControlSurfaceResumeTarget,
         binding: SurfaceResumeBindingSnapshot?
     ) -> ControlSurfaceRestoreRecord? {
+        guard WorkbenchSessionAuthority.resolved(
+            agent: target.restorableAgent,
+            binding: binding
+        ) == .controlledHere else {
+            return nil
+        }
         // Structured fields remain untouched; only the explicit legacy fallback
         // receives restore-time provider refreshes that older records depended on.
         let compatibilityBinding = binding.map {

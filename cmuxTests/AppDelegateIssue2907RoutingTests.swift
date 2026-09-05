@@ -1256,6 +1256,67 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         )
     }
 
+    func testSurfaceResumeGetDoesNotExposeHubOwnedRestoreRecord() throws {
+        _ = NSApplication.shared
+        let previousAppDelegate = AppDelegate.shared
+        let app = AppDelegate()
+        AppDelegate.shared = app
+        defer {
+            TerminalController.shared.setActiveTabManager(nil)
+            AppDelegate.shared = previousAppDelegate
+        }
+
+        let windowId = UUID()
+        let window = makeMainWindow(id: windowId)
+        defer {
+            app.unregisterMainWindowContextForTesting(windowId: windowId)
+            window.orderOut(nil)
+        }
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        app.registerMainWindow(
+            window,
+            windowId: windowId,
+            tabManager: manager,
+            sidebarState: SidebarState(),
+            sidebarSelectionState: SidebarSelectionState(),
+            fileExplorerState: FileExplorerState()
+        )
+        TerminalController.shared.setActiveTabManager(manager)
+
+        let workspace = try XCTUnwrap(manager.selectedWorkspace)
+        let panelId = try XCTUnwrap(workspace.focusedPanelId)
+        workspace.restoredAgentSnapshotsByPanelId[panelId] = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: UUID().uuidString.lowercased(),
+            workingDirectory: "/tmp",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "copilot",
+                executablePath: "/usr/local/bin/copilot",
+                arguments: ["/usr/local/bin/copilot"],
+                workingDirectory: "/tmp",
+                environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
+            ),
+            workbenchAuthority: .controlledInAgencyHub
+        )
+        workspace.restoredAgentResumeStatesByPanelId[panelId] = .manualResumeAvailable
+        let menu = NSMenu()
+        let surfaceView = try XCTUnwrap(workspace.terminalPanel(for: panelId))
+            .hostedView.surfaceView
+        XCTAssertEqual(surfaceView.terminalSurface?.id, panelId)
+        surfaceView.appendCurrentSurfaceContextMenuItems(to: menu)
+        XCTAssertNotNil(menu.items.first(where: { $0.title == "Take Control Here" }))
+
+        let result = try v2Result(
+            method: "surface.resume.get",
+            params: [
+                "window_id": windowId.uuidString,
+                "workspace_id": workspace.id.uuidString,
+                "surface_id": panelId.uuidString,
+            ]
+        )
+        XCTAssertTrue(result["restore_record"] is NSNull)
+    }
+
     func testSurfaceResumeSetCannotEnableAutoResumeFromSocket() throws {
         _ = NSApplication.shared
         let previousAppDelegate = AppDelegate.shared
