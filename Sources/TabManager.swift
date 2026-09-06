@@ -2106,14 +2106,16 @@ class TabManager: ObservableObject {
         childWorkspaceIds: [UUID] = [],
         anchorWorkingDirectory: String? = nil,
         selectAnchor: Bool = true,
-        collapseSidebarSelection: Bool = true
+        collapseSidebarSelection: Bool = true,
+        externalID: String? = nil
     ) -> UUID? {
         workspaceGrouping.createWorkspaceGroup(
             name: name,
             childWorkspaceIds: childWorkspaceIds,
             anchorWorkingDirectory: anchorWorkingDirectory,
             selectAnchor: selectAnchor,
-            collapseSidebarSelection: collapseSidebarSelection
+            collapseSidebarSelection: collapseSidebarSelection,
+            externalID: externalID
         )
     }
 
@@ -2180,8 +2182,15 @@ class TabManager: ObservableObject {
         workspaceGrouping.removeWorkspaceFromGroup(workspaceId: workspaceId)
     }
 
-    func ungroupWorkspaceGroup(groupId: UUID) {
-        workspaceGrouping.ungroupWorkspaceGroup(groupId: groupId)
+    @discardableResult
+    func ungroupWorkspaceGroup(
+        groupId: UUID,
+        removeGeneratedAnchor: Bool = false
+    ) -> WorkspaceGroupUngroupResult {
+        workspaceGrouping.ungroupWorkspaceGroup(
+            groupId: groupId,
+            removeGeneratedAnchor: removeGeneratedAnchor
+        )
     }
 
     @discardableResult
@@ -4305,6 +4314,10 @@ class TabManager: ObservableObject {
         focusHistoryNavigation.focusHistoryMenuSnapshot(direction: direction, maxItemCount: maxItemCount)
     }
 
+    func recentlyFocusedFocusHistoryMenuItems(maxItemCount: Int) -> [FocusHistoryMenuItem] {
+        focusHistoryNavigation.recentlyFocusedFocusHistoryMenuItems(maxItemCount: maxItemCount)
+    }
+
     @discardableResult
     func navigateToFocusHistoryMenuItem(_ item: FocusHistoryMenuItem) -> Bool {
         focusHistoryNavigation.navigateToFocusHistoryMenuItem(item)
@@ -6166,6 +6179,8 @@ extension TabManager {
             hasher.combine(group.isEmpty)
             hasher.combine(group.customColor ?? "")
             hasher.combine(group.iconSymbol ?? "")
+            hasher.combine(group.externalID ?? "")
+            hasher.combine(group.anchorWorkspaceProvenance.rawValue)
         }
         for workspace in tabs.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow) {
             hasher.combine(workspace.id)
@@ -6435,7 +6450,8 @@ extension TabManager {
     func sessionSnapshot(
         includeScrollback: Bool,
         restorableAgentIndex: RestorableAgentSessionIndex = .empty,
-        surfaceResumeBindingIndex: SurfaceResumeBindingIndex? = nil
+        surfaceResumeBindingIndex: SurfaceResumeBindingIndex? = nil,
+        downgradeStoredProcessDetectedResumeBindingsWhenDetectionUnavailable: Bool = false
     ) -> SessionTabManagerSnapshot {
         panelTitleUpdateCoalescer.flushNow()
         let restorableTabs = tabs
@@ -6446,7 +6462,9 @@ extension TabManager {
                 $0.sessionSnapshot(
                     includeScrollback: includeScrollback,
                     restorableAgentIndex: restorableAgentIndex,
-                    surfaceResumeBindingIndex: surfaceResumeBindingIndex
+                    surfaceResumeBindingIndex: surfaceResumeBindingIndex,
+                    downgradeStoredProcessDetectedResumeBindingsWhenDetectionUnavailable:
+                        downgradeStoredProcessDetectedResumeBindingsWhenDetectionUnavailable
                 )
             }
         let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
@@ -6484,7 +6502,9 @@ extension TabManager {
                         anchorIsEmpty: group.isEmpty ? true : nil,
                         isPinned: group.isPinned,
                         customColor: group.customColor,
-                        iconSymbol: group.iconSymbol
+                        iconSymbol: group.iconSymbol,
+                        externalID: group.externalID,
+                        anchorWorkspaceProvenance: group.anchorWorkspaceProvenance.rawValue
                     )
                 }
             return snapshots.isEmpty ? nil : snapshots
@@ -6715,7 +6735,11 @@ extension TabManager {
                         // group moves rather than as missing workspaces.
                         anchor: .empty(groupSnapshot.id),
                         customColor: groupSnapshot.customColor,
-                        iconSymbol: groupSnapshot.iconSymbol
+                        iconSymbol: groupSnapshot.iconSymbol,
+                        externalID: groupSnapshot.externalID,
+                        anchorWorkspaceProvenance: WorkspaceGroupAnchorProvenance(
+                            rawValue: groupSnapshot.anchorWorkspaceProvenance ?? ""
+                        ) ?? .unknown
                     )
                 }
                 // Resolve anchor: prefer the restore-stable index, then the
@@ -6739,7 +6763,11 @@ extension TabManager {
                     isPinned: groupSnapshot.isPinned ?? false,
                     anchor: .workspace(anchorId),
                     customColor: groupSnapshot.customColor,
-                    iconSymbol: groupSnapshot.iconSymbol
+                    iconSymbol: groupSnapshot.iconSymbol,
+                    externalID: groupSnapshot.externalID,
+                    anchorWorkspaceProvenance: WorkspaceGroupAnchorProvenance(
+                        rawValue: groupSnapshot.anchorWorkspaceProvenance ?? ""
+                    ) ?? .unknown
                 )
             }
         }()
