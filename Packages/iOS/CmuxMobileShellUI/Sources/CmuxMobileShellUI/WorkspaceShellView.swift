@@ -170,6 +170,11 @@ struct WorkspaceShellView: View {
     @State private var notificationSearchNavigationPath: [MobileWorkspacePreview.ID] = []
     @State private var pendingPrimarySearchWorkspaceNavigationID: MobileWorkspacePreview.ID?
     @State private var pendingPrimarySearchNotificationNavigationID: MobileWorkspacePreview.ID?
+    // A search result pushes a workspace while the native search control is
+    // mounted at the bottom of the tab bar. End that session for the push, then
+    // restore it after the detail has popped so UIKit can use the bottom anchor
+    // again instead of re-hosting the field in the navigation bar.
+    @State private var restoreNotificationSearchOnPop = false
     @State private var showingRootSettings = false
     @State private var settingsPairingScannerHandoff = SettingsPairingScannerHandoff()
     @State private var showingRootDeviceTree = false
@@ -286,6 +291,7 @@ struct WorkspaceShellView: View {
             .onChange(of: selectedPrimaryTab) { oldValue, newValue in
                 if oldValue == .search, newValue != .search {
                     notificationSearchNavigationPath = []
+                    restoreNotificationSearchOnPop = false
                 }
             }
             .onChange(of: store.deeplinkWorkspaceNavigationRequest) { _, request in
@@ -412,7 +418,21 @@ struct WorkspaceShellView: View {
                     canCreateWorkspaceForSelection: presentation.canCreateWorkspaceForSelection
                 )
                 .toolbarVisibility(.hidden, for: .tabBar)
+                .onDisappear {
+                    guard restoreNotificationSearchOnPop else { return }
+                    restoreNotificationSearchOnPop = false
+                    guard selectedPrimaryTab == .search,
+                          notificationSearchNavigationPath.isEmpty else { return }
+                    primarySearchCoordinator.setPresentation(true)
+                }
             }
+            // Make the tab bar available before the popped destination
+            // disappears. This gives the restored search field its normal
+            // bottom placement.
+            .toolbarVisibility(
+                notificationSearchNavigationPath.isEmpty ? .automatic : .hidden,
+                for: .tabBar
+            )
         }
     }
 
@@ -820,6 +840,8 @@ struct WorkspaceShellView: View {
                 selectedTab: selectedPrimaryTab
             ) {
             case .mountedNotificationSearch:
+                primarySearchCoordinator.deactivateCurrentSearch()
+                restoreNotificationSearchOnPop = true
                 if notificationSearchNavigationPath.last != workspaceID {
                     notificationSearchNavigationPath = [workspaceID]
                 }
