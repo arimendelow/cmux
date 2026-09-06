@@ -32585,18 +32585,41 @@ export default CMUXSessionRestore;
     /// so session-start / prompt-submit / stop events show up in Feed's
     /// "All" view even when no permission/plan/question event fires.
     /// Failures are swallowed.
-    func sendBestEffortFeedTelemetry(socketPath: String, line: String, socketPassword: String?) {
-        let oneWayClient = SocketClient(path: socketPath)
-        defer { oneWayClient.close() }
+    func sendBestEffortFeedTelemetry(
+        socketPath: String,
+        line: String,
+        socketPassword: String?,
+        awaitResponse: Bool = false
+    ) {
+        let telemetryClient = SocketClient(path: socketPath)
+        defer { telemetryClient.close() }
         do {
-            try oneWayClient.connectWithoutRetry(responseTimeout: 0.05)
+            if !awaitResponse {
+                try telemetryClient.connectWithoutRetry(responseTimeout: 0.05)
+                try authenticateClientIfNeeded(
+                    telemetryClient,
+                    explicitPassword: socketPassword,
+                    socketPath: socketPath,
+                    responseTimeout: 0.05
+                )
+                try telemetryClient.sendOneWay(command: line, writeTimeout: 0.05)
+                return
+            }
+
+            let deadline = Date.now.addingTimeInterval(Self.feedTelemetryAcknowledgementTimeoutSeconds)
+            try telemetryClient.connect(deadline: deadline)
             try authenticateClientIfNeeded(
-                oneWayClient,
+                telemetryClient,
                 explicitPassword: socketPassword,
                 socketPath: socketPath,
-                responseTimeout: 0.05
+                responseTimeout: Self.feedTelemetryAcknowledgementTimeoutSeconds,
+                deadline: deadline
             )
-            try oneWayClient.sendOneWay(command: line, writeTimeout: 0.05)
+            _ = try telemetryClient.send(
+                command: line,
+                responseTimeout: Self.feedTelemetryAcknowledgementTimeoutSeconds,
+                deadline: deadline
+            )
         } catch {
             return
         }
@@ -32674,19 +32697,28 @@ export default CMUXSessionRestore;
             promptText: promptText
         )
         FeedSourceIdentity(payload: parsedInput.rawObject ?? parsedInput.object ?? [:]).apply(to: &event)
-        event["_opencode_request_id"] = "\(source)-\(sessionId)-\(hookEventName)-\(Int(Date().timeIntervalSince1970 * 1000))"
+        let requestId = "\(source)-\(sessionId)-\(hookEventName)-\(Int(Date().timeIntervalSince1970 * 1000))"
+        event["_opencode_request_id"] = requestId
 
-        let frame: [String: Any] = [
+        var frame: [String: Any] = [
             "method": "feed.push",
             "params": [
                 "event": event,
                 "wait_timeout_seconds": 0,
             ],
         ]
+        if source == "copilot" {
+            frame["id"] = requestId
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: frame),
               let line = String(data: data, encoding: .utf8)
         else { return }
-        sendBestEffortFeedTelemetry(socketPath: client.socketPath, line: line, socketPassword: socketPassword)
+        sendBestEffortFeedTelemetry(
+            socketPath: client.socketPath,
+            line: line,
+            socketPassword: socketPassword,
+            awaitResponse: source == "copilot"
+        )
     }
 
     private func feedContextForEvent(
