@@ -155,6 +155,38 @@ struct WorkbenchLocalSupervisionTests {
         #expect(active.inputEpoch == 1)
     }
 
+    @Test func localSessionProjectionPrefersSourceNativeSessionIdentity() throws {
+        let store = WorkbenchLocalSessionStateStore()
+        let workspaceId = try #require(UUID(uuidString: Self.workspaceId))
+        let surfaceId = try #require(UUID(uuidString: Self.surfaceId))
+        let lifecycle = event(
+            name: "agent.hook.SessionStart",
+            eventId: "native-session-start",
+            sequence: 1,
+            sourceEventId: "native-session-start",
+            sessionId: "copilot-native-session"
+        )
+
+        store.observeLifecycleEvent(lifecycle)
+        #expect(
+            store.snapshot(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )?.sessionId == "native-session"
+        )
+
+        let stop = event(
+            eventId: "native-stop",
+            sequence: 2,
+            sourceEventId: "native-stop",
+            sessionId: "copilot-native-session"
+        )
+        #expect(
+            WorkbenchLocalSupervisionCoordinator.envelopeForTesting(stop)?.sessionId
+                == "native-session"
+        )
+    }
+
     @Test func recoveryHydratesReadOnlyProjectionBeforeReceiptDedupe() async throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
@@ -1141,7 +1173,7 @@ struct WorkbenchLocalSupervisionTests {
         sourceEventId: String? = nil,
         actionRequestId: String? = nil,
         isError: Bool = false,
-        sessionId: String = "copilot-session",
+        sessionId: String = "copilot-copilot-session",
         sourceRevision: String = "revision-1",
         causalChainId: String = "turn-1"
     ) -> [String: Any] {
