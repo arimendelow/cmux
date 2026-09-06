@@ -1215,6 +1215,140 @@ struct WorkbenchLocalSupervisionTests {
 @Suite("Workbench local actions", .serialized)
 @MainActor
 struct WorkbenchLocalActionTests {
+    @Test func interruptStopAndResumeReuseGuardedReceiptsAndReadback() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        var policy = WorkbenchSupervisionPolicy.dogfoodDefault
+        policy.autonomyMode = .trusted
+        policy.humanMutationMode = .allowed
+        policy.save(defaults: defaults)
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let sessionId = "copilot-control"
+        let store = WorkbenchLocalSessionStateStore()
+        func observe(
+            phase: WorkbenchSupervisionObservationKind,
+            revision: String,
+            epoch: UInt64
+        ) {
+            store.observe(
+                WorkbenchSupervisionEnvelope(
+                    id: revision,
+                    eventId: revision,
+                    eventSequence: Int64(epoch + 1),
+                    source: "copilot",
+                    sessionId: sessionId,
+                    workspaceId: workspaceId.uuidString,
+                    surfaceId: surfaceId.uuidString,
+                    cwd: "/tmp",
+                    observation: phase,
+                    sourceEventId: revision,
+                    sourceRevision: revision,
+                    causalChainId: revision,
+                    actionRequestId: nil,
+                    toolName: nil,
+                    occurredAt: "2099-01-01T00:00:00Z",
+                    evidence: WorkbenchSupervisionEvidence(
+                        lastUserMessage: "task",
+                        assistantMessage: "working"
+                    ),
+                    inputEpoch: epoch
+                )
+            )
+        }
+        func params(
+            requestId: String,
+            revision: String,
+            epoch: UInt64
+        ) -> [String: Any] {
+            [
+                "request_id": requestId,
+                "workspace_id": workspaceId.uuidString,
+                "surface_id": surfaceId.uuidString,
+                "session_id": sessionId,
+                "expected_source_revision": revision,
+                "expected_input_epoch": epoch,
+            ]
+        }
+
+        observe(phase: .silenceThresholdCrossed, revision: "active-1", epoch: 0)
+        let interrupted = WorkbenchLocalActionRouter.interrupt(
+            params: params(requestId: "interrupt-1", revision: "active-1", epoch: 0),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { workspace, surface in
+                #expect(workspace == workspaceId)
+                #expect(surface == surfaceId)
+                return true
+            }
+        )
+        #expect(try successPayload(interrupted)["result_code"] as? String == "interrupted")
+        #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 1)
+
+        observe(phase: .silenceThresholdCrossed, revision: "active-2", epoch: 1)
+        let stopped = WorkbenchLocalActionRouter.stop(
+            params: params(requestId: "stop-1", revision: "active-2", epoch: 1),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _ in true }
+        )
+        #expect(try successPayload(stopped)["result_code"] as? String == "stopped")
+        #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 2)
+
+        observe(phase: .sessionEnded, revision: "ended-1", epoch: 2)
+        let resumed = WorkbenchLocalActionRouter.resume(
+            params: params(requestId: "resume-1", revision: "ended-1", epoch: 2),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _ in true }
+        )
+        #expect(try successPayload(resumed)["result_code"] as? String == "resumed")
+        #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 3)
+
+        let replay = WorkbenchLocalActionRouter.resume(
+            params: params(requestId: "resume-1", revision: "ended-1", epoch: 2),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in
+                Issue.record("receipt replay must not re-evaluate authority")
+                return nil
+            },
+            effect: { _, _ in
+                Issue.record("receipt replay must not resume twice")
+                return false
+            }
+        )
+        #expect(try successPayload(replay)["replayed"] as? Bool == true)
+
+        observe(phase: .turnYielded, revision: "yielded-1", epoch: 3)
+        let inactive = WorkbenchLocalActionRouter.interrupt(
+            params: params(requestId: "interrupt-idle", revision: "yielded-1", epoch: 3),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _ in false }
+        )
+        #expect(errorPayload(inactive)["result_code"] as? String == "session_not_active")
+
+        let hub = WorkbenchLocalActionRouter.stop(
+            params: params(requestId: "stop-hub", revision: "yielded-1", epoch: 3),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledInAgencyHub },
+            effect: { _, _ in false }
+        )
+        #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
+    }
+
     @Test func inspectAndGuidanceUseExactRevisionEpochAuthorityAndIdempotency() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }

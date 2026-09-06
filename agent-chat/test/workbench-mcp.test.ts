@@ -30,6 +30,9 @@ test("Workbench MCP exposes bounded inspection and safe local actions", () => {
     "workbench_inspect",
     "workbench_focus",
     "workbench_send_guidance",
+    "workbench_interrupt",
+    "workbench_stop",
+    "workbench_resume",
     "workbench_flag_for_review",
   ]);
 });
@@ -50,7 +53,7 @@ test("Workbench MCP handles its complete protocol surface", async () => {
     jsonrpc: "2.0",
     id: 2,
     method: "tools/list",
-  }, call))?.result?.tools).toHaveLength(5);
+  }, call))?.result?.tools).toHaveLength(8);
   expect(inspectResponse(await handleWorkbenchMCPRequest({
     jsonrpc: "2.0",
     id: 3,
@@ -140,6 +143,30 @@ test("Workbench MCP maps validated tools to exact native action requests", async
     },
   }, call);
   expect(inspectResponse(guidance)?.result?.isError).toBe(false);
+
+  for (const [id, name] of [
+    [5, "workbench_interrupt"],
+    [6, "workbench_stop"],
+    [7, "workbench_resume"],
+  ] as const) {
+    const response = await handleWorkbenchMCPRequest({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: {
+        name,
+        arguments: {
+          request_id: `${name}-1`,
+          workspace_id: workspaceId,
+          surface_id: surfaceId,
+          session_id: "copilot-session",
+          expected_source_revision: "revision-1",
+          expected_input_epoch: 4,
+        },
+      },
+    }, call);
+    expect(inspectResponse(response)?.result?.isError).toBe(false);
+  }
   expect(calls).toEqual([
     {
       method: "workbench.list",
@@ -172,6 +199,39 @@ test("Workbench MCP maps validated tools to exact native action requests", async
         expected_source_revision: "revision-1",
         expected_input_epoch: 4,
         text: "Use the shared helper and continue.",
+      },
+    },
+    {
+      method: "workbench.interrupt",
+      params: {
+        request_id: "workbench_interrupt-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: 4,
+      },
+    },
+    {
+      method: "workbench.stop",
+      params: {
+        request_id: "workbench_stop-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: 4,
+      },
+    },
+    {
+      method: "workbench.resume",
+      params: {
+        request_id: "workbench_resume-1",
+        workspace_id: workspaceId,
+        surface_id: surfaceId,
+        session_id: "copilot-session",
+        expected_source_revision: "revision-1",
+        expected_input_epoch: 4,
       },
     },
   ]);
