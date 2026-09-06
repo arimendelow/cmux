@@ -18,6 +18,12 @@ enum WorkbenchLocalActionStatus: String, Codable {
     case failed
 }
 
+enum WorkbenchGuidanceDeliveryOutcome: Equatable {
+    case submitted
+    case pasteFailed
+    case pastedNotSubmitted
+}
+
 struct WorkbenchLocalActionReceipt: Codable, Equatable {
     var requestId: String
     var fingerprint: String
@@ -38,7 +44,11 @@ struct WorkbenchLocalActionReceipt: Codable, Equatable {
 enum WorkbenchLocalActionRouter {
     typealias FocusEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID) -> Bool
     typealias FlagEffect = @MainActor (_ requestId: String, _ workspaceId: UUID, _ surfaceId: UUID?, _ summary: String) -> UUID?
-    typealias GuidanceEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ text: String) -> Bool
+    typealias GuidanceEffect = @MainActor (
+        _ workspaceId: UUID,
+        _ surfaceId: UUID,
+        _ text: String
+    ) -> WorkbenchGuidanceDeliveryOutcome
     typealias ControlEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> Bool
     typealias AuthorityResolver = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> WorkbenchSessionAuthority?
 
@@ -202,7 +212,8 @@ enum WorkbenchLocalActionRouter {
                 notificationId: UUID?,
                 observedInputEpoch: UInt64?
             ) in
-                guard (effect ?? liveSendGuidance)(workspaceId, surfaceId, text) else {
+                let delivery = (effect ?? liveSendGuidance)(workspaceId, surfaceId, text)
+                guard delivery != .pasteFailed else {
                     return (false, "delivery_failed", nil, nil)
                 }
                 let observedEpoch = stateStore.inputEpoch(
@@ -212,7 +223,10 @@ enum WorkbenchLocalActionRouter {
                 guard observedEpoch > inputEpoch else {
                     return (false, "readback_failed", nil, observedEpoch)
                 }
-                return (true, "guidance_sent", nil, observedEpoch)
+                let resultCode = delivery == .submitted
+                    ? "guidance_sent"
+                    : "guidance_pasted_not_submitted"
+                return (true, resultCode, nil, observedEpoch)
             }
             switch claimed {
             case .success(let outcome):
@@ -715,14 +729,27 @@ enum WorkbenchLocalActionRouter {
         workspaceId: UUID,
         surfaceId: UUID,
         text: String
-    ) -> Bool {
+    ) -> WorkbenchGuidanceDeliveryOutcome {
         guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
               let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
               let terminal = workspace.panels[surfaceId] as? TerminalPanel,
               terminal.surface.hasLiveSurface else {
-            return false
+            return .pasteFailed
         }
-        return terminal.surface.sendInputResult(text + "\r") == .sent
+        return deliverGuidance(
+            text,
+            paste: { terminal.sendText($0) },
+            sendNamedKey: { terminal.sendNamedKeyResult($0).accepted }
+        )
+    }
+
+    static func deliverGuidance(
+        _ text: String,
+        paste: (String) -> Bool,
+        sendNamedKey: (String) -> Bool
+    ) -> WorkbenchGuidanceDeliveryOutcome {
+        guard paste(text) else { return .pasteFailed }
+        return sendNamedKey("return") ? .submitted : .pastedNotSubmitted
     }
 
     private static func liveInterrupt(

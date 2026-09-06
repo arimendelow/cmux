@@ -1267,6 +1267,7 @@ struct WorkbenchLocalActionTests {
                     return true
                 }
             )
+                == .submitted
         )
         #expect(operations == [
             "paste:Continue with the verified fix.",
@@ -1275,16 +1276,36 @@ struct WorkbenchLocalActionTests {
 
         operations.removeAll()
         #expect(
-            !WorkbenchLocalActionRouter.deliverGuidance(
+            WorkbenchLocalActionRouter.deliverGuidance(
                 "Do not submit.",
                 paste: { _ in false },
-                sendNamedKey: {
+                sendNamedKey: { _ in
                     operations.append("unexpected")
                     return true
                 }
             )
+                == .pasteFailed
         )
         #expect(operations.isEmpty)
+
+        #expect(
+            WorkbenchLocalActionRouter.deliverGuidance(
+                "Leave this draft visible.",
+                paste: {
+                    operations.append("paste:\($0)")
+                    return true
+                },
+                sendNamedKey: {
+                    operations.append("key:\($0)")
+                    return false
+                }
+            )
+                == .pastedNotSubmitted
+        )
+        #expect(operations == [
+            "paste:Leave this draft visible.",
+            "key:return",
+        ])
     }
 
     @Test func interruptStopAndResumeReuseGuardedReceiptsAndReadback() throws {
@@ -1526,7 +1547,7 @@ struct WorkbenchLocalActionTests {
             authority: { _, _, _ in .controlledHere },
             effect: { _, _, _ in
                 Issue.record("observe-only policy must block automated input")
-                return true
+                return .submitted
             }
         )) == "policy_denied")
         var policy = WorkbenchSupervisionPolicy.dogfoodDefault
@@ -1546,7 +1567,7 @@ struct WorkbenchLocalActionTests {
                 #expect(text == "Use the shared helper and continue.")
                 calls.withLock { $0 += 1 }
                 store.recordInput(workspaceId: workspaceId, surfaceId: surfaceId)
-                return true
+                return .submitted
             }
         )
         let sentPayload = try successPayload(sent)
@@ -1577,7 +1598,7 @@ struct WorkbenchLocalActionTests {
             authority: { _, _, _ in .controlledHere },
             effect: { _, _, _ in
                 Issue.record("an exact replay must not send guidance twice")
-                return false
+                return .pasteFailed
             }
         )
         #expect(try successPayload(replay)["replayed"] as? Bool == true)
@@ -1592,7 +1613,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _, _ in false }
+            effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(stale)["result_code"] as? String == "input_changed")
 
@@ -1606,7 +1627,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _, _ in false }
+            effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(staleRevision)["result_code"] as? String == "source_stale")
 
@@ -1619,7 +1640,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledInAgencyHub },
-            effect: { _, _, _ in false }
+            effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
 
@@ -1658,7 +1679,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _, _ in false }
+            effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(noEvidence)["result_code"] as? String == "evidence_unavailable")
 
@@ -1698,7 +1719,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _, _ in false }
+            effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(deliveryFailed)["result_code"] as? String == "delivery_failed")
 
@@ -1710,9 +1731,68 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _, _ in true }
+            effect: { _, _, _ in .submitted }
         )
         #expect(errorPayload(readbackFailed)["result_code"] as? String == "readback_failed")
+
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "yielded-partial",
+                eventId: "yielded-partial",
+                eventSequence: 4,
+                source: "copilot",
+                sessionId: sessionId,
+                workspaceId: workspaceId.uuidString,
+                surfaceId: surfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "native-yielded-partial",
+                sourceRevision: "revision-3",
+                causalChainId: "turn-3",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2099-01-01T00:00:00Z",
+                evidence: WorkbenchSupervisionEvidence(
+                    lastUserMessage: "continue?",
+                    assistantMessage: "I still need the shared helper."
+                ),
+                inputEpoch: 1
+            )
+        )
+        let partialParams = params.merging([
+            "request_id": "guidance-partial",
+            "expected_source_revision": "revision-3",
+            "expected_input_epoch": UInt64(1),
+        ]) { _, new in new }
+        let partial = WorkbenchLocalActionRouter.sendGuidance(
+            params: partialParams,
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            effect: { _, _, _ in
+                store.recordInput(workspaceId: workspaceId, surfaceId: surfaceId)
+                return .pastedNotSubmitted
+            }
+        )
+        let partialPayload = try successPayload(partial)
+        #expect(partialPayload["result_code"] as? String == "guidance_pasted_not_submitted")
+        #expect(partialPayload["input_epoch"] as? UInt64 == 2)
+        let partialReplay = WorkbenchLocalActionRouter.sendGuidance(
+            params: partialParams,
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in
+                Issue.record("partial guidance replay must not re-evaluate authority")
+                return nil
+            },
+            effect: { _, _, _ in
+                Issue.record("partial guidance replay must not paste twice")
+                return .pasteFailed
+            }
+        )
+        #expect(try successPayload(partialReplay)["replayed"] as? Bool == true)
     }
 
     @Test func focusIsWriteAheadIdempotentAndRejectsRequestReuse() throws {
