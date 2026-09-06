@@ -1,9 +1,11 @@
+import AppKit
 import CryptoKit
 import CmuxControlSocket
 import Foundation
 
 enum WorkbenchLocalActionKind: String, Codable {
     case focus
+    case sendGuidance = "send_guidance"
     case flagForReview = "flag_for_review"
 }
 
@@ -23,16 +25,72 @@ struct WorkbenchLocalActionReceipt: Codable, Equatable {
     var status: WorkbenchLocalActionStatus
     var resultCode: String?
     var notificationId: UUID?
+    var sessionId: String? = nil
+    var sourceRevision: String? = nil
+    var expectedInputEpoch: UInt64? = nil
+    var observedInputEpoch: UInt64? = nil
 }
 
 @MainActor
 enum WorkbenchLocalActionRouter {
     typealias FocusEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID) -> Bool
     typealias FlagEffect = @MainActor (_ requestId: String, _ workspaceId: UUID, _ surfaceId: UUID?, _ summary: String) -> UUID?
+    typealias GuidanceEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ text: String) -> Bool
+    typealias AuthorityResolver = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> WorkbenchSessionAuthority?
 
     static let receiptDefaultsKey = "workbench.local-actions.v1"
     private static let requestIdPattern = #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"#
     private static let receiptLimit = 256
+
+    static func list(
+        params: [String: Any],
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil
+    ) -> TerminalController.V2CallResult {
+        guard enabled else {
+            return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
+        }
+        guard params.isEmpty else {
+            return .err(code: "invalid_params", message: "list accepts no parameters", data: nil)
+        }
+        let resolveAuthority = authority ?? liveAuthority
+        let sessions = stateStore.snapshots().prefix(100).map {
+            projectionResponse(
+                $0,
+                authority: resolveAuthority($0.workspaceId, $0.surfaceId, $0.sessionId),
+                includeEvidence: false
+            )
+        }
+        return .ok(["sessions": Array(sessions)])
+    }
+
+    static func inspect(
+        params: [String: Any],
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil
+    ) -> TerminalController.V2CallResult {
+        guard enabled else {
+            return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
+        }
+        guard hasOnlyKeys(params, allowed: ["workspace_id", "surface_id"]),
+              let workspaceId = uuid(params["workspace_id"]),
+              let surfaceId = uuid(params["surface_id"]) else {
+            return .err(code: "invalid_params", message: "inspect requires workspace_id and surface_id", data: nil)
+        }
+        guard let projection = stateStore.snapshot(workspaceId: workspaceId, surfaceId: surfaceId) else {
+            return .err(code: "target_unavailable", message: "Workbench has no current state for that session", data: nil)
+        }
+        let resolvedAuthority = (authority ?? liveAuthority)(workspaceId, surfaceId, projection.sessionId)
+        return .ok(
+            projectionResponse(
+                projection,
+                authority: resolvedAuthority,
+                includeEvidence: true
+            )
+        )
+    }
 
     static func focus(
         params: [String: Any],
@@ -58,7 +116,106 @@ enum WorkbenchLocalActionRouter {
             defaults: defaults
         ) {
             let succeeded = (effect ?? liveFocus)(workspaceId, surfaceId)
-            return (succeeded, succeeded ? "focused" : "target_unavailable", nil)
+            return (succeeded, succeeded ? "focused" : "target_unavailable", nil, nil)
+        }
+    }
+
+    static func sendGuidance(
+        params: [String: Any],
+        defaults: UserDefaults = .standard,
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil,
+        effect: GuidanceEffect? = nil
+    ) -> TerminalController.V2CallResult {
+        guard enabled else {
+            return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
+        }
+        guard hasOnlyKeys(
+            params,
+            allowed: [
+                "request_id",
+                "workspace_id",
+                "surface_id",
+                "session_id",
+                "expected_source_revision",
+                "expected_input_epoch",
+                "text",
+            ]
+        ),
+        let requestId = requestId(params["request_id"]),
+        let workspaceId = uuid(params["workspace_id"]),
+        let surfaceId = uuid(params["surface_id"]),
+        let sessionId = boundedIdentifier(params["session_id"]),
+        let sourceRevision = boundedIdentifier(params["expected_source_revision"]),
+        let inputEpoch = uint64(params["expected_input_epoch"]),
+        let text = boundedGuidance(params["text"]) else {
+            return .err(
+                code: "invalid_params",
+                message: "send_guidance requires exact target identity, source revision, input epoch, and one line of text up to 4000 characters",
+                data: nil
+            )
+        }
+        let resolveAuthority = authority ?? liveAuthority
+        return execute(
+            action: .sendGuidance,
+            requestId: requestId,
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            summary: nil,
+            sessionId: sessionId,
+            sourceRevision: sourceRevision,
+            expectedInputEpoch: inputEpoch,
+            fingerprintExtras: [sessionId, sourceRevision, String(inputEpoch), text],
+            defaults: defaults,
+            authorizeNewRequest: {
+                guard WorkbenchSupervisionPolicy.load(defaults: defaults)
+                    .allowsAutomatedLocalMutation(appIsActive: NSApp.isActive) else {
+                    return .err(
+                        code: "policy_denied",
+                        message: "Workbench policy does not permit automated local input",
+                        data: nil
+                    )
+                }
+                return nil
+            }
+        ) {
+            guard resolveAuthority(workspaceId, surfaceId, sessionId) == .controlledHere else {
+                return (false, "authority_denied", nil, nil)
+            }
+            let claimed = stateStore.withMutationClaim(
+                requestId: requestId,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: sessionId,
+                sourceRevision: sourceRevision,
+                inputEpoch: inputEpoch,
+                requiredPhase: .yielded,
+                requiresVerifiedEvidence: true
+            ) { _ -> (
+                succeeded: Bool,
+                resultCode: String,
+                notificationId: UUID?,
+                observedInputEpoch: UInt64?
+            ) in
+                guard (effect ?? liveSendGuidance)(workspaceId, surfaceId, text) else {
+                    return (false, "delivery_failed", nil, nil)
+                }
+                let observedEpoch = stateStore.inputEpoch(
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId
+                )
+                guard observedEpoch > inputEpoch else {
+                    return (false, "readback_failed", nil, observedEpoch)
+                }
+                return (true, "guidance_sent", nil, observedEpoch)
+            }
+            switch claimed {
+            case .success(let outcome):
+                return outcome
+            case .failure(let failure):
+                return (false, failure.rawValue, nil, nil)
+            }
         }
     }
 
@@ -94,7 +251,12 @@ enum WorkbenchLocalActionRouter {
             defaults: defaults
         ) {
             let notificationId = (effect ?? liveFlagForReview)(requestId, workspaceId, surfaceId, summary)
-            return (notificationId != nil, notificationId == nil ? "target_unavailable" : "flagged", notificationId)
+            return (
+                notificationId != nil,
+                notificationId == nil ? "target_unavailable" : "flagged",
+                notificationId,
+                nil
+            )
         }
     }
 
@@ -104,8 +266,18 @@ enum WorkbenchLocalActionRouter {
         workspaceId: UUID,
         surfaceId: UUID?,
         summary: String?,
+        sessionId: String? = nil,
+        sourceRevision: String? = nil,
+        expectedInputEpoch: UInt64? = nil,
+        fingerprintExtras: [String] = [],
         defaults: UserDefaults,
-        effect: () -> (succeeded: Bool, resultCode: String, notificationId: UUID?)
+        authorizeNewRequest: () -> TerminalController.V2CallResult? = { nil },
+        effect: () -> (
+            succeeded: Bool,
+            resultCode: String,
+            notificationId: UUID?,
+            observedInputEpoch: UInt64?
+        )
     ) -> TerminalController.V2CallResult {
         guard var receipts = loadReceipts(defaults: defaults) else {
             return .err(code: "receipt_store_unavailable", message: "Workbench action receipts are unreadable", data: nil)
@@ -114,13 +286,17 @@ enum WorkbenchLocalActionRouter {
             action: action,
             workspaceId: workspaceId,
             surfaceId: surfaceId,
-            summary: summary
+            summary: summary,
+            extras: fingerprintExtras
         )
         if let existing = receipts.first(where: { $0.requestId == requestId }) {
             guard existing.fingerprint == fingerprint else {
                 return .err(code: "request_conflict", message: "request_id was already used for a different action", data: response(existing, replayed: true))
             }
             return result(existing, replayed: true)
+        }
+        if let denied = authorizeNewRequest() {
+            return denied
         }
 
         let createdAt = Date()
@@ -133,7 +309,11 @@ enum WorkbenchLocalActionRouter {
             createdAt: createdAt,
             status: .pending,
             resultCode: nil,
-            notificationId: nil
+            notificationId: nil,
+            sessionId: sessionId,
+            sourceRevision: sourceRevision,
+            expectedInputEpoch: expectedInputEpoch,
+            observedInputEpoch: nil
         )
         receipts.append(receipt)
         trim(&receipts)
@@ -145,6 +325,7 @@ enum WorkbenchLocalActionRouter {
         receipt.status = outcome.succeeded ? .completed : .failed
         receipt.resultCode = outcome.resultCode
         receipt.notificationId = outcome.notificationId
+        receipt.observedInputEpoch = outcome.observedInputEpoch
         receipts[receipts.index(before: receipts.endIndex)] = receipt
         guard saveReceipts(receipts, defaults: defaults) else {
             return .err(code: "action_outcome_unknown", message: "The action ran but its final receipt could not be persisted", data: response(receipt, replayed: false))
@@ -178,6 +359,10 @@ enum WorkbenchLocalActionRouter {
             "status": receipt.status.rawValue,
             "result_code": receipt.resultCode ?? NSNull(),
             "notification_id": receipt.notificationId?.uuidString ?? NSNull(),
+            "session_id": receipt.sessionId ?? NSNull(),
+            "source_revision": receipt.sourceRevision ?? NSNull(),
+            "expected_input_epoch": receipt.expectedInputEpoch ?? NSNull(),
+            "input_epoch": receipt.observedInputEpoch ?? NSNull(),
             "replayed": replayed,
         ]
     }
@@ -205,19 +390,73 @@ enum WorkbenchLocalActionRouter {
         return trimmed
     }
 
+    private static func boundedIdentifier(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 256 else { return nil }
+        return trimmed
+    }
+
+    private static func boundedGuidance(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.count <= 4_000,
+              !trimmed.unicodeScalars.contains(where: { CharacterSet.newlines.contains($0) || $0.value == 0 }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func uint64(_ value: Any?) -> UInt64? {
+        if let value = value as? UInt64 { return value }
+        if let value = value as? Int, value >= 0 { return UInt64(value) }
+        if let value = value as? NSNumber, value.int64Value >= 0 {
+            return UInt64(value.int64Value)
+        }
+        return nil
+    }
+
     private static func fingerprint(
         action: WorkbenchLocalActionKind,
         workspaceId: UUID,
         surfaceId: UUID?,
-        summary: String?
+        summary: String?,
+        extras: [String]
     ) -> String {
-        let payload = [
+        let payload = ([
             action.rawValue,
             workspaceId.uuidString,
             surfaceId?.uuidString ?? "",
             summary ?? "",
-        ].joined(separator: "\u{0}")
+        ] + extras).joined(separator: "\u{0}")
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func projectionResponse(
+        _ projection: WorkbenchLocalSessionProjection,
+        authority: WorkbenchSessionAuthority?,
+        includeEvidence: Bool
+    ) -> [String: Any] {
+        var response: [String: Any] = [
+            "source": projection.source,
+            "session_id": projection.sessionId,
+            "workspace_id": projection.workspaceId.uuidString,
+            "surface_id": projection.surfaceId.uuidString,
+            "source_revision": projection.sourceRevision,
+            "phase": projection.phase.rawValue,
+            "input_epoch": projection.inputEpoch,
+            "mutation_eligible": projection.mutationEligible,
+            "authority": authority?.rawValue ?? "unadopted",
+        ]
+        if includeEvidence {
+            response["pending_guidance"] = projection.pendingGuidance?.text ?? NSNull()
+            response["last_user_message"] = projection.evidence?.lastUserMessage ?? NSNull()
+            response["assistant_message"] = projection.evidence?.assistantMessage ?? NSNull()
+        } else {
+            response["has_pending_guidance"] = projection.pendingGuidance != nil
+        }
+        return response
     }
 
     private static func loadReceipts(defaults: UserDefaults) -> [WorkbenchLocalActionReceipt]? {
@@ -294,11 +533,105 @@ enum WorkbenchLocalActionRouter {
         )
         return store.notifications.first(where: { $0.correlationKey == correlationKey })?.id
     }
+
+    private static func liveSendGuidance(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        text: String
+    ) -> Bool {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              let terminal = workspace.panels[surfaceId] as? TerminalPanel,
+              terminal.surface.hasLiveSurface else {
+            return false
+        }
+        return terminal.surface.sendInputResult(text + "\r") == .sent
+    }
+
+    private static func liveAuthority(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> WorkbenchSessionAuthority? {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              workspace.panels[surfaceId] is TerminalPanel else {
+            return nil
+        }
+        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
+        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        guard workspace.restoredAgentResumeStatesByPanelId[surfaceId] != .completedAgentExit else {
+            return nil
+        }
+        if let agent {
+            guard ManagedAgentSessionIdentity.sessionIDsMatch(
+                kind: agent.kind.rawValue,
+                lhs: agent.sessionId,
+                rhs: sessionId
+            ), AgentResumeLiveness.hasLiveProcess(
+                for: SharedLiveAgentIndex.shared.index?.entry(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId
+                ),
+                kind: agent.kind.rawValue,
+                sessionId: agent.sessionId
+            ) else {
+                return nil
+            }
+        } else if let binding,
+                  binding.isAgentHookBinding,
+                  let kind = binding.kind,
+                  let checkpointId = binding.checkpointId {
+            guard ManagedAgentSessionIdentity.sessionIDsMatch(
+                kind: kind,
+                lhs: checkpointId,
+                rhs: sessionId
+            ), AgentResumeLiveness.hasLiveProcess(
+                for: SharedLiveAgentIndex.shared.index?.entry(
+                    workspaceId: workspaceId,
+                    panelId: surfaceId
+                ),
+                kind: kind,
+                sessionId: checkpointId
+            ) else {
+                return nil
+            }
+        } else {
+            return nil
+        }
+        return WorkbenchSessionAuthority.resolved(agent: agent, binding: binding)
+    }
+
+#if DEBUG
+    static func liveAuthorityForTesting(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> WorkbenchSessionAuthority? {
+        liveAuthority(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            sessionId: sessionId
+        )
+    }
+#endif
 }
 
 extension TerminalController {
+    func v2WorkbenchList(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.list(params: params)
+    }
+
+    func v2WorkbenchInspect(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.inspect(params: params)
+    }
+
     func v2WorkbenchFocus(params: [String: Any]) -> V2CallResult {
         WorkbenchLocalActionRouter.focus(params: params)
+    }
+
+    func v2WorkbenchSendGuidance(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.sendGuidance(params: params)
     }
 
     func v2WorkbenchFlagForReview(params: [String: Any]) -> V2CallResult {

@@ -25,6 +25,19 @@ function requiredString(value: unknown, name: string, maxLength: number): string
   return trimmed;
 }
 
+function requiredSingleLine(value: unknown, name: string, maxLength: number): string {
+  const text = requiredString(value, name, maxLength);
+  if (/[\r\n\u0000]/u.test(text)) throw new Error(`${name} must be a single line`);
+  return text;
+}
+
+function requiredEpoch(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("expected_input_epoch must be a non-negative integer");
+  }
+  return value;
+}
+
 function requireExactKeys(value: Record<string, unknown>, allowed: string[]): void {
   const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
   if (unexpected) throw new Error(`unsupported argument: ${unexpected}`);
@@ -32,12 +45,32 @@ function requireExactKeys(value: Record<string, unknown>, allowed: string[]): vo
 
 function actionArguments(name: string, raw: unknown): Record<string, unknown> {
   const args = object(raw);
-  requireExactKeys(
-    args,
-    name === "workbench_focus"
-      ? ["request_id", "workspace_id", "surface_id"]
-      : ["request_id", "workspace_id", "surface_id", "summary"],
-  );
+  if (name === "workbench_list") {
+    requireExactKeys(args, []);
+    return {};
+  }
+  if (name === "workbench_inspect") {
+    requireExactKeys(args, ["workspace_id", "surface_id"]);
+    const workspaceId = requiredString(args.workspace_id, "workspace_id", 36);
+    const surfaceId = requiredString(args.surface_id, "surface_id", 36);
+    if (!UUID.test(workspaceId)) throw new Error("workspace_id must be a UUID");
+    if (!UUID.test(surfaceId)) throw new Error("surface_id must be a UUID");
+    return { workspace_id: workspaceId, surface_id: surfaceId };
+  }
+  const allowed = name === "workbench_focus"
+    ? ["request_id", "workspace_id", "surface_id"]
+    : name === "workbench_send_guidance"
+      ? [
+        "request_id",
+        "workspace_id",
+        "surface_id",
+        "session_id",
+        "expected_source_revision",
+        "expected_input_epoch",
+        "text",
+      ]
+      : ["request_id", "workspace_id", "surface_id", "summary"];
+  requireExactKeys(args, allowed);
   const requestId = requiredString(args.request_id, "request_id", 128);
   if (!REQUEST_ID.test(requestId)) throw new Error("request_id contains unsupported characters");
   const workspaceId = requiredString(args.workspace_id, "workspace_id", 36);
@@ -54,6 +87,21 @@ function actionArguments(name: string, raw: unknown): Record<string, unknown> {
       workspace_id: workspaceId,
       ...(surfaceId ? { surface_id: surfaceId } : {}),
       summary,
+    };
+  }
+  if (name === "workbench_send_guidance") {
+    return {
+      request_id: requestId,
+      workspace_id: workspaceId,
+      surface_id: surfaceId,
+      session_id: requiredString(args.session_id, "session_id", 256),
+      expected_source_revision: requiredString(
+        args.expected_source_revision,
+        "expected_source_revision",
+        256,
+      ),
+      expected_input_epoch: requiredEpoch(args.expected_input_epoch),
+      text: requiredSingleLine(args.text, "text", 4_000),
     };
   }
   return { request_id: requestId, workspace_id: workspaceId, surface_id: surfaceId };
@@ -78,12 +126,58 @@ export function workbenchToolDefinitions() {
   };
   return [
     {
+      name: "workbench_list",
+      description: "List compact deterministic projections for observed local Workbench workers.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "workbench_inspect",
+      description: "Inspect one exact local worker with bounded recent evidence and mutation preconditions.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workspace_id: targetProperties.workspace_id,
+          surface_id: targetProperties.surface_id,
+        },
+        required: ["workspace_id", "surface_id"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "workbench_focus",
       description: "Focus and visibly flash one exact local Workbench surface.",
       inputSchema: {
         type: "object",
         properties: targetProperties,
         required: ["request_id", "workspace_id", "surface_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "workbench_send_guidance",
+      description: "Send one line of guidance only if a Controlled-here worker is still yielded at the exact source revision and input epoch.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...targetProperties,
+          session_id: { type: "string", description: "Exact source-native worker session ID." },
+          expected_source_revision: { type: "string", description: "Exact yielded source revision returned by workbench_inspect." },
+          expected_input_epoch: { type: "integer", minimum: 0, description: "Exact input epoch returned by workbench_inspect." },
+          text: { type: "string", description: "Single-line guidance, at most 4000 characters." },
+        },
+        required: [
+          "request_id",
+          "workspace_id",
+          "surface_id",
+          "session_id",
+          "expected_source_revision",
+          "expected_input_epoch",
+          "text",
+        ],
         additionalProperties: false,
       },
     },
@@ -130,11 +224,24 @@ export async function handleWorkbenchMCPRequest(request: MCPRequest, call: Nativ
   try {
     const params = object(request.params);
     const name = requiredString(params.name, "name", 80);
-    if (name !== "workbench_focus" && name !== "workbench_flag_for_review") {
+    if (![
+      "workbench_list",
+      "workbench_inspect",
+      "workbench_focus",
+      "workbench_send_guidance",
+      "workbench_flag_for_review",
+    ].includes(name)) {
       throw new Error(`unknown tool: ${name}`);
     }
     const args = actionArguments(name, params.arguments);
-    const method = name === "workbench_focus" ? "workbench.focus" : "workbench.flag_for_review";
+    const methods: Record<string, string> = {
+      workbench_list: "workbench.list",
+      workbench_inspect: "workbench.inspect",
+      workbench_focus: "workbench.focus",
+      workbench_send_guidance: "workbench.send_guidance",
+      workbench_flag_for_review: "workbench.flag_for_review",
+    };
+    const method = methods[name];
     return toolResult(id, await call(method, args));
   } catch (error) {
     return toolResult(id, error instanceof Error ? error.message : String(error), true);

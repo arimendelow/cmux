@@ -2309,8 +2309,14 @@ class TerminalController {
         // feedback.open handled by ControlCommandCoordinator.
 
         // Feed (workstream): feed.jump/feed.list handled by ControlCommandCoordinator.
+        case "workbench.list":
+            return v2Result(id: id, self.v2WorkbenchList(params: params))
+        case "workbench.inspect":
+            return v2Result(id: id, self.v2WorkbenchInspect(params: params))
         case "workbench.focus":
             return v2Result(id: id, self.v2WorkbenchFocus(params: params))
+        case "workbench.send_guidance":
+            return v2Result(id: id, self.v2WorkbenchSendGuidance(params: params))
         case "workbench.flag_for_review":
             return v2Result(id: id, self.v2WorkbenchFlagForReview(params: params))
         case "sidebar.custom.open":

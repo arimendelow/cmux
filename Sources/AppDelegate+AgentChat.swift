@@ -242,22 +242,75 @@ extension AppDelegate {
             evidenceProvider: Self.workbenchSupervisionEvidence(for:),
             recoveryProvider: Self.workbenchSupervisionRecoveryEvents,
             dispositionHandler: { receiptId, envelope, result, policy in
-                guard result.disposition == .ariAttention else { return true }
-                guard policy.notificationMode != .off, let summary = result.summary else { return true }
-                return await MainActor.run {
-                    switch WorkbenchLocalActionRouter.flagForReview(
-                        params: [
-                            "request_id": "workbench-supervision:\(receiptId.uuidString)",
-                            "workspace_id": envelope.workspaceId,
-                            "surface_id": envelope.surfaceId as Any? ?? NSNull(),
-                            "summary": summary,
-                        ]
-                    ) {
-                    case .ok:
-                        return true
-                    case .err:
+                switch result.disposition {
+                case .ariAttention:
+                    guard policy.notificationMode != .off, let summary = result.summary else { return true }
+                    return await MainActor.run {
+                        switch WorkbenchLocalActionRouter.flagForReview(
+                            params: [
+                                "request_id": "workbench-supervision:\(receiptId.uuidString)",
+                                "workspace_id": envelope.workspaceId,
+                                "surface_id": envelope.surfaceId as Any? ?? NSNull(),
+                                "summary": summary,
+                            ]
+                        ) {
+                        case .ok:
+                            return true
+                        case .err:
+                            return false
+                        }
+                    }
+                case .draftGuidance:
+                    guard let guidance = result.guidance,
+                          envelope.evidence?.supportsGuidance == true,
+                          let sourceRevision = envelope.sourceRevision,
+                          let inputEpoch = envelope.inputEpoch,
+                          let workspaceId = UUID(uuidString: envelope.workspaceId),
+                          let surface = envelope.surfaceId,
+                          let surfaceId = UUID(uuidString: surface) else {
                         return false
                     }
+                    let requestId = "workbench-supervision:\(receiptId.uuidString)"
+                    let draft = WorkbenchGuidanceDraft(
+                        requestId: requestId,
+                        sourceRevision: sourceRevision,
+                        inputEpoch: inputEpoch,
+                        text: guidance
+                    )
+                    guard WorkbenchLocalSessionStateStore.shared.storeGuidance(
+                        draft,
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        sessionId: envelope.sessionId
+                    ) else {
+                        return false
+                    }
+                    let mutationAllowed = await MainActor.run {
+                        policy.allowsAutomatedLocalMutation(appIsActive: NSApp.isActive)
+                    }
+                    guard mutationAllowed else {
+                        return true
+                    }
+                    return await MainActor.run {
+                        switch WorkbenchLocalActionRouter.sendGuidance(
+                            params: [
+                                "request_id": requestId,
+                                "workspace_id": envelope.workspaceId,
+                                "surface_id": surface,
+                                "session_id": envelope.sessionId,
+                                "expected_source_revision": sourceRevision,
+                                "expected_input_epoch": inputEpoch,
+                                "text": guidance,
+                            ]
+                        ) {
+                        case .ok:
+                            return true
+                        case .err:
+                            return false
+                        }
+                    }
+                case .noAction, .hold:
+                    return true
                 }
             },
             runTurn: { [weak self] requestId, prompt, cwd in

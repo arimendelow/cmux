@@ -80,6 +80,18 @@ struct WorkbenchSupervisionPolicy: Equatable, Sendable {
             defaults.set(data, forKey: key)
         }
     }
+
+    func allowsAutomatedLocalMutation(appIsActive: Bool) -> Bool {
+        guard autonomyMode != .observeOnly else { return false }
+        switch humanMutationMode {
+        case .never:
+            return false
+        case .whenUnfocused:
+            return !appIsActive
+        case .allowed:
+            return true
+        }
+    }
 }
 
 enum WorkbenchSupervisionObservationKind: String, Codable, Sendable {
@@ -95,6 +107,291 @@ enum WorkbenchSupervisionObservationKind: String, Codable, Sendable {
 struct WorkbenchSupervisionEvidence: Codable, Equatable, Sendable {
     var lastUserMessage: String?
     var assistantMessage: String?
+
+    var supportsGuidance: Bool {
+        assistantMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+}
+
+enum WorkbenchLocalSessionPhase: String, Codable, Sendable {
+    case active
+    case yielded
+    case waiting
+    case stalled
+    case failed
+    case ended
+}
+
+struct WorkbenchGuidanceDraft: Equatable, Sendable {
+    var requestId: String
+    var sourceRevision: String
+    var inputEpoch: UInt64
+    var text: String
+}
+
+struct WorkbenchLocalSessionProjection: Equatable, Sendable {
+    var source: String
+    var sessionId: String
+    var workspaceId: UUID
+    var surfaceId: UUID
+    var sourceRevision: String
+    var observedSequence: Int64
+    var phase: WorkbenchLocalSessionPhase
+    var inputEpoch: UInt64
+    var mutationEligible: Bool
+    var evidence: WorkbenchSupervisionEvidence?
+    var pendingGuidance: WorkbenchGuidanceDraft?
+}
+
+enum WorkbenchLocalMutationFailure: String, Error, Equatable, Sendable {
+    case targetUnavailable = "target_unavailable"
+    case sessionMismatch = "session_mismatch"
+    case sourceStale = "source_stale"
+    case inputChanged = "input_changed"
+    case sessionNotYielded = "session_not_yielded"
+    case actionInFlight = "action_in_flight"
+    case evidenceUnavailable = "evidence_unavailable"
+}
+
+final class WorkbenchLocalSessionStateStore: @unchecked Sendable {
+    static let shared = WorkbenchLocalSessionStateStore()
+
+    private struct Key: Hashable {
+        var workspaceId: UUID
+        var surfaceId: UUID
+    }
+
+    // ponytail: one short process-wide critical section; split per surface only if action latency becomes material.
+    private let lock = NSRecursiveLock()
+    private let projectionLimit = 256
+    private let clock: @Sendable () -> Date
+    private var epochs: [Key: UInt64] = [:]
+    private var lastInputAt: [Key: Date] = [:]
+    private var projections: [Key: WorkbenchLocalSessionProjection] = [:]
+    private var claims: [Key: String] = [:]
+
+    init(clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.clock = clock
+    }
+
+    func recordInput(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        recordedAt: Date? = nil
+    ) {
+        lock.withLock {
+            let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
+            let epoch = (epochs[key] ?? 0) &+ 1
+            epochs[key] = epoch
+            lastInputAt[key] = recordedAt ?? clock()
+            if var projection = projections[key] {
+                projection.inputEpoch = epoch
+                projection.mutationEligible = false
+                projection.pendingGuidance = nil
+                projections[key] = projection
+            }
+        }
+    }
+
+    func observe(
+        _ envelope: WorkbenchSupervisionEnvelope,
+        mutationEligible: Bool = true
+    ) {
+        guard let workspaceId = UUID(uuidString: envelope.workspaceId),
+              let surface = envelope.surfaceId,
+              let surfaceId = UUID(uuidString: surface),
+              let sourceRevision = envelope.sourceRevision else {
+            return
+        }
+        let phase: WorkbenchLocalSessionPhase
+        switch envelope.observation {
+        case .turnYielded:
+            phase = .yielded
+        case .questionRequested, .permissionRequested:
+            phase = .waiting
+        case .turnFailed:
+            phase = .failed
+        case .processExitObserved, .sessionEnded:
+            phase = .ended
+        case .silenceThresholdCrossed:
+            phase = .stalled
+        }
+        lock.withLock {
+            let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
+            let epoch = epochs[key] ?? envelope.inputEpoch ?? 0
+            let occurredAt = envelope.occurredAt.flatMap(Self.date)
+            let inputAfterObservation = occurredAt.map {
+                (lastInputAt[key] ?? .distantPast) > $0
+            } ?? true
+            epochs[key] = epoch
+            projections[key] = WorkbenchLocalSessionProjection(
+                source: envelope.source,
+                sessionId: envelope.sessionId,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sourceRevision: sourceRevision,
+                observedSequence: envelope.eventSequence,
+                phase: phase,
+                inputEpoch: epoch,
+                mutationEligible: mutationEligible && !inputAfterObservation,
+                evidence: Self.boundedEvidence(envelope.evidence),
+                pendingGuidance: nil
+            )
+            trimProjectionsIfNeeded()
+        }
+    }
+
+    func observeLifecycleEvent(_ event: [String: Any]) {
+        guard let name = event["name"] as? String,
+              name == "agent.hook.UserPromptSubmit" || name == "agent.hook.SessionStart",
+              let payload = event["payload"] as? [String: Any],
+              (payload["phase"] as? String) == "received",
+              let sessionId = Self.nonEmpty(payload["session_id"]),
+              let source = Self.nonEmpty(event["source"]),
+              let sourceRevision = Self.nonEmpty(payload["_source_revision"]),
+              let observedSequence = Self.int64(event["seq"]),
+              let workspace = Self.nonEmpty(event["workspace_id"] ?? payload["workspace_id"]),
+              let surface = Self.nonEmpty(event["surface_id"] ?? payload["surface_id"]),
+              let workspaceId = UUID(uuidString: workspace),
+              let surfaceId = UUID(uuidString: surface) else {
+            return
+        }
+        lock.withLock {
+            let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
+            let epoch = epochs[key] ?? 0
+            projections[key] = WorkbenchLocalSessionProjection(
+                source: source,
+                sessionId: sessionId,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sourceRevision: sourceRevision,
+                observedSequence: observedSequence,
+                phase: .active,
+                inputEpoch: epoch,
+                mutationEligible: true,
+                evidence: nil,
+                pendingGuidance: nil
+            )
+            trimProjectionsIfNeeded()
+        }
+    }
+
+    func inputEpoch(workspaceId: UUID, surfaceId: UUID) -> UInt64 {
+        lock.withLock {
+            epochs[Key(workspaceId: workspaceId, surfaceId: surfaceId)] ?? 0
+        }
+    }
+
+    func snapshot(workspaceId: UUID, surfaceId: UUID) -> WorkbenchLocalSessionProjection? {
+        lock.withLock {
+            projections[Key(workspaceId: workspaceId, surfaceId: surfaceId)]
+        }
+    }
+
+    func snapshots() -> [WorkbenchLocalSessionProjection] {
+        lock.withLock {
+            projections.values.sorted {
+                if $0.workspaceId != $1.workspaceId {
+                    return $0.workspaceId.uuidString < $1.workspaceId.uuidString
+                }
+                return $0.surfaceId.uuidString < $1.surfaceId.uuidString
+            }
+        }
+    }
+
+    @discardableResult
+    func storeGuidance(
+        _ draft: WorkbenchGuidanceDraft,
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> Bool {
+        lock.withLock {
+            let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
+            guard var projection = projections[key],
+                  projection.sessionId == sessionId,
+                  projection.sourceRevision == draft.sourceRevision,
+                  projection.inputEpoch == draft.inputEpoch,
+                  projection.mutationEligible,
+                  projection.evidence?.supportsGuidance == true,
+                  projection.phase == .yielded else {
+                return false
+            }
+            projection.pendingGuidance = draft
+            projections[key] = projection
+            return true
+        }
+    }
+
+    func withMutationClaim<Output>(
+        requestId: String,
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String,
+        sourceRevision: String,
+        inputEpoch: UInt64,
+        requiredPhase: WorkbenchLocalSessionPhase,
+        requiresVerifiedEvidence: Bool = false,
+        _ body: (WorkbenchLocalSessionProjection) -> Output
+    ) -> Result<Output, WorkbenchLocalMutationFailure> {
+        lock.withLock {
+            let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
+            guard let projection = projections[key] else { return .failure(.targetUnavailable) }
+            guard projection.sessionId == sessionId else { return .failure(.sessionMismatch) }
+            guard projection.sourceRevision == sourceRevision else { return .failure(.sourceStale) }
+            guard projection.inputEpoch == inputEpoch else { return .failure(.inputChanged) }
+            guard projection.mutationEligible else { return .failure(.sourceStale) }
+            guard projection.phase == requiredPhase else { return .failure(.sessionNotYielded) }
+            if requiresVerifiedEvidence, projection.evidence?.supportsGuidance != true {
+                return .failure(.evidenceUnavailable)
+            }
+            guard claims[key] == nil else { return .failure(.actionInFlight) }
+            claims[key] = requestId
+            defer { claims.removeValue(forKey: key) }
+            return .success(body(projection))
+        }
+    }
+
+    private static func boundedEvidence(
+        _ evidence: WorkbenchSupervisionEvidence?
+    ) -> WorkbenchSupervisionEvidence? {
+        guard let evidence else { return nil }
+        return WorkbenchSupervisionEvidence(
+            lastUserMessage: evidence.lastUserMessage.map { String($0.prefix(1_000)) },
+            assistantMessage: evidence.assistantMessage.map { String($0.prefix(1_000)) }
+        )
+    }
+
+    private static func nonEmpty(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func int64(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
+        return nil
+    }
+
+    private func trimProjectionsIfNeeded() {
+        while projections.count > projectionLimit,
+              let oldest = projections.min(by: {
+                  $0.value.observedSequence < $1.value.observedSequence
+              })?.key {
+            projections.removeValue(forKey: oldest)
+            epochs.removeValue(forKey: oldest)
+            lastInputAt.removeValue(forKey: oldest)
+            claims.removeValue(forKey: oldest)
+        }
+    }
+
+    private static func date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
 }
 
 struct WorkbenchSupervisionEnvelope: Codable, Equatable, Sendable {
@@ -114,6 +411,7 @@ struct WorkbenchSupervisionEnvelope: Codable, Equatable, Sendable {
     var toolName: String?
     var occurredAt: String?
     var evidence: WorkbenchSupervisionEvidence?
+    var inputEpoch: UInt64? = nil
 
     var dedupeKey: String {
         if let sourceEventId, !sourceEventId.isEmpty {
@@ -135,6 +433,7 @@ struct WorkbenchSupervisionEnvelope: Codable, Equatable, Sendable {
 enum WorkbenchSupervisionDisposition: String, Codable, Sendable {
     case noAction = "no_action"
     case ariAttention = "ari_attention"
+    case draftGuidance = "draft_guidance"
     case hold
 }
 
@@ -167,6 +466,7 @@ struct WorkbenchSupervisionReceipt: Codable, Equatable, Sendable {
     var actionRequestId: String?
     var toolName: String?
     var occurredAt: String?
+    var inputEpoch: UInt64? = nil
     var status: WorkbenchSupervisionReceiptStatus
     var disposition: WorkbenchSupervisionDisposition?
     var reasonCode: String?
@@ -188,7 +488,8 @@ struct WorkbenchSupervisionReceipt: Codable, Equatable, Sendable {
             actionRequestId: actionRequestId,
             toolName: toolName,
             occurredAt: occurredAt,
-            evidence: nil
+            evidence: nil,
+            inputEpoch: inputEpoch
         )
     }
 }
@@ -207,11 +508,13 @@ struct WorkbenchSupervisionDispositionResult: Equatable, Sendable {
     var disposition: WorkbenchSupervisionDisposition
     var summary: String?
     var reason: String?
+    var guidance: String?
 
     private struct Raw: Decodable {
         var disposition: String
         var summary: String?
         var reason: String?
+        var guidance: String?
     }
 
     static func parse(_ text: String) -> WorkbenchSupervisionDispositionResult? {
@@ -221,10 +524,15 @@ struct WorkbenchSupervisionDispositionResult: Equatable, Sendable {
               let disposition = WorkbenchSupervisionDisposition(rawValue: raw.disposition) else {
             return nil
         }
+        let guidance = boundedGuidance(raw.guidance)
+        if disposition == .draftGuidance, guidance == nil {
+            return nil
+        }
         return WorkbenchSupervisionDispositionResult(
             disposition: disposition,
             summary: bounded(raw.summary, limit: 500),
-            reason: bounded(raw.reason, limit: 500)
+            reason: bounded(raw.reason, limit: 500),
+            guidance: guidance
         )
     }
 
@@ -233,6 +541,16 @@ struct WorkbenchSupervisionDispositionResult: Equatable, Sendable {
             return nil
         }
         return String(value.prefix(limit))
+    }
+
+    private static func boundedGuidance(_ value: String?) -> String? {
+        guard let guidance = bounded(value, limit: 4_000),
+              !guidance.unicodeScalars.contains(where: {
+                  CharacterSet.newlines.contains($0) || $0.value == 0
+              }) else {
+            return nil
+        }
+        return guidance
     }
 }
 
@@ -251,6 +569,8 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
     static let cursorDefaultsKey = "workbench.supervision.cursor.v1"
     static let gapDefaultsKey = "workbench.supervision.gaps.v1"
     static let eventNames: Set<String> = [
+        "agent.hook.SessionStart",
+        "agent.hook.UserPromptSubmit",
         "agent.hook.Stop",
         "agent.hook.AskUserQuestion",
         "agent.hook.PermissionRequest",
@@ -453,6 +773,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
     private let evidenceProvider: EvidenceProvider
     private let recoveryProvider: RecoveryProvider
     private let dispositionHandler: DispositionHandler
+    private let sessionStateStore: WorkbenchLocalSessionStateStore
     private let clock: @Sendable () -> Date
     private let stateLock = NSLock()
     private var subscription: CmuxEventSubscription?
@@ -467,6 +788,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         clock: @escaping @Sendable () -> Date = { Date() },
         evidenceProvider: @escaping EvidenceProvider = { _ in nil },
         recoveryProvider: @escaping RecoveryProvider = { [] },
+        sessionStateStore: WorkbenchLocalSessionStateStore = .shared,
         dispositionHandler: @escaping DispositionHandler = { _, _, _, _ in true },
         runTurn: @escaping TurnRunner
     ) {
@@ -475,6 +797,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         self.clock = clock
         self.evidenceProvider = evidenceProvider
         self.recoveryProvider = recoveryProvider
+        self.sessionStateStore = sessionStateStore
         self.dispositionHandler = dispositionHandler
         self.runTurn = runTurn
         var receipts = Self.loadReceipts(defaults: defaults)
@@ -535,8 +858,14 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         return workerTask
     }
 
-    func processForTesting(_ event: [String: Any]) async {
-        await process(event)
+    func processForTesting(
+        _ event: [String: Any],
+        mutationEligible: Bool = true
+    ) async {
+        await process(
+            event,
+            mutationEligible: mutationEligible
+        )
     }
 
     func resumeQueuedForTesting() async {
@@ -551,12 +880,31 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         Self.loadGaps(defaults: defaults)
     }
 
-    private func process(_ event: [String: Any], advanceCursor: Bool = true) async {
+    private func process(
+        _ event: [String: Any],
+        advanceCursor: Bool = true,
+        mutationEligible: Bool = true
+    ) async {
+        sessionStateStore.observeLifecycleEvent(event)
         guard var envelope = Self.envelope(from: event) else {
             if advanceCursor { persistCursor(from: event) }
             return
         }
         envelope.evidence = evidenceProvider(envelope)
+        if let workspaceId = UUID(uuidString: envelope.workspaceId),
+           let surface = envelope.surfaceId,
+           let surfaceId = UUID(uuidString: surface) {
+            envelope.inputEpoch = sessionStateStore.inputEpoch(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )
+        }
+        if !mutationEligible {
+            sessionStateStore.observe(
+                envelope,
+                mutationEligible: false
+            )
+        }
         let policy = WorkbenchSupervisionPolicy.load(defaults: defaults)
 
         let isDuplicate = stateLock.withLock {
@@ -583,6 +931,9 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
             return
         }
 
+        if mutationEligible {
+            sessionStateStore.observe(envelope)
+        }
         if !policy.bossWatchEnabled {
             writeReceipt(
                 envelope: envelope,
@@ -734,6 +1085,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
                 actionRequestId: envelope.actionRequestId,
                 toolName: envelope.toolName,
                 occurredAt: envelope.occurredAt,
+                inputEpoch: envelope.inputEpoch,
                 status: status,
                 disposition: disposition,
                 reasonCode: reasonCode
@@ -821,7 +1173,11 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
                 )
                 for event in recoveryProvider() {
                     if Task.isCancelled { break }
-                    await process(event, advanceCursor: false)
+                    await process(
+                        event,
+                        advanceCursor: false,
+                        mutationEligible: false
+                    )
                 }
                 if !Task.isCancelled, plan.snapshot.replay.isEmpty,
                    let bootId = plan.snapshot.ack["boot_id"] as? String,
@@ -1017,7 +1373,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         encoder.outputFormatting = [.sortedKeys]
         let payload = (try? encoder.encode(envelope)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return """
-        You are the Ouro Workbench Boss supervising one local worker observation. This pass is isolated and observe-only. Do not call tools, send input, approve, stop, resume, or mutate anything. Return exactly one JSON object with disposition equal to no_action, ari_attention, or hold, plus optional summary and reason strings. Use ari_attention only when the supplied evidence proves Ari must decide, and include a concise summary whenever you use it; use hold when evidence or authority is insufficient. Policy version: \(policy.version). Autonomy mode: \(policy.autonomyMode.rawValue). Notification mode: \(policy.notificationMode.rawValue). Human mutation mode: \(policy.humanMutationMode.rawValue). Observation: \(payload)
+        You are the Ouro Workbench Boss supervising one local worker observation. This pass is isolated and tool-free. Do not call tools or mutate anything directly. Return exactly one JSON object with disposition equal to no_action, ari_attention, draft_guidance, or hold, plus optional summary and reason strings. Use draft_guidance only for a yielded local worker and include one concise single-line guidance string; Workbench will apply authority, policy, source-revision, and input-epoch gates before any delivery. Use ari_attention only when the supplied evidence proves Ari must decide, and include a concise summary whenever you use it; use hold when evidence or authority is insufficient. Policy version: \(policy.version). Autonomy mode: \(policy.autonomyMode.rawValue). Notification mode: \(policy.notificationMode.rawValue). Human mutation mode: \(policy.humanMutationMode.rawValue). Observation: \(payload)
         """
     }
 

@@ -129,6 +129,10 @@ extension RendererRealizationController: TerminalRendererRealizationScheduling {
 @MainActor
 final class TerminalAgentHibernationRecorder: AgentHibernationRecording {
     func recordTerminalInput(workspaceId: UUID, panelId: UUID) {
+        WorkbenchLocalSessionStateStore.shared.recordInput(
+            workspaceId: workspaceId,
+            surfaceId: panelId
+        )
         guard AgentHibernationTrackingGate.isEnabled() else { return }
         AgentHibernationController.shared.recordTerminalInput(
             workspaceId: workspaceId,

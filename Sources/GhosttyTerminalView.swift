@@ -3582,6 +3582,10 @@ private final class TerminalSharedBackdropCutoutFilter: CIFilter {
 
 @MainActor
 private func recordAgentHibernationTerminalInput(workspaceId: UUID, panelId: UUID) {
+    WorkbenchLocalSessionStateStore.shared.recordInput(
+        workspaceId: workspaceId,
+        surfaceId: panelId
+    )
     guard AgentHibernationTrackingGate.isEnabled() else { return }
     AgentHibernationController.shared.recordTerminalInput(
         workspaceId: workspaceId,

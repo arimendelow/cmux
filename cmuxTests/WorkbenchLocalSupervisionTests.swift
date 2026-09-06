@@ -200,17 +200,65 @@ struct WorkbenchLocalSupervisionTests {
         let store = WorkbenchLocalSessionStateStore()
         let workspaceId = try #require(UUID(uuidString: Self.workspaceId))
         let surfaceId = try #require(UUID(uuidString: Self.surfaceId))
-
-        #expect(
-            store.claimMutation(
-                requestId: "missing",
+        func claim(
+            requestId: String,
+            targetSurfaceId: UUID? = nil,
+            sessionId: String = "copilot-session",
+            sourceRevision: String = "revision-1",
+            inputEpoch: UInt64 = 0,
+            phase: WorkbenchLocalSessionPhase = .yielded,
+            requiresEvidence: Bool = false
+        ) -> Result<Bool, WorkbenchLocalMutationFailure> {
+            store.withMutationClaim(
+                requestId: requestId,
                 workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "copilot-session",
-                sourceRevision: "revision-1",
-                inputEpoch: 0,
-                requiredPhase: .yielded
-            ) == .failure(.targetUnavailable)
+                surfaceId: targetSurfaceId ?? surfaceId,
+                sessionId: sessionId,
+                sourceRevision: sourceRevision,
+                inputEpoch: inputEpoch,
+                requiredPhase: phase,
+                requiresVerifiedEvidence: requiresEvidence
+            ) { _ in
+                true
+            }
+        }
+
+        #expect(claim(requestId: "missing") == .failure(.targetUnavailable))
+
+        let fractionalSurfaceId = UUID()
+        store.recordInput(
+            workspaceId: workspaceId,
+            surfaceId: fractionalSurfaceId,
+            recordedAt: .distantPast
+        )
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "fractional",
+                eventId: "fractional",
+                eventSequence: 0,
+                source: "copilot",
+                sessionId: "fractional-session",
+                workspaceId: workspaceId.uuidString,
+                surfaceId: fractionalSurfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "fractional-native",
+                sourceRevision: "fractional-revision",
+                causalChainId: "fractional-turn",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2026-09-05T00:00:00.123Z",
+                evidence: WorkbenchSupervisionEvidence(
+                    lastUserMessage: "next",
+                    assistantMessage: "waiting"
+                )
+            )
+        )
+        #expect(
+            store.snapshot(
+                workspaceId: workspaceId,
+                surfaceId: fractionalSurfaceId
+            )?.mutationEligible == true
         )
 
         let recoveredSurfaceId = UUID()
@@ -236,14 +284,11 @@ struct WorkbenchLocalSupervisionTests {
             mutationEligible: false
         )
         #expect(
-            store.claimMutation(
+            claim(
                 requestId: "recovered",
-                workspaceId: workspaceId,
-                surfaceId: recoveredSurfaceId,
+                targetSurfaceId: recoveredSurfaceId,
                 sessionId: "recovered-session",
-                sourceRevision: "recovered-revision",
-                inputEpoch: 0,
-                requiredPhase: .yielded
+                sourceRevision: "recovered-revision"
             ) == .failure(.sourceStale)
         )
 
@@ -277,15 +322,13 @@ struct WorkbenchLocalSupervisionTests {
             )
         )
         #expect(
-            store.claimMutation(
+            claim(
                 requestId: "late-input",
-                workspaceId: workspaceId,
-                surfaceId: lateInputSurfaceId,
+                targetSurfaceId: lateInputSurfaceId,
                 sessionId: "late-input-session",
                 sourceRevision: "late-input-revision",
                 inputEpoch: 1,
-                requiredPhase: .yielded,
-                requiresVerifiedEvidence: true
+                requiresEvidence: true
             ) == .failure(.sourceStale)
         )
 
@@ -309,30 +352,15 @@ struct WorkbenchLocalSupervisionTests {
                 evidence: nil
             )
         )
+        #expect(claim(requestId: "wrong-session", sessionId: "other-session") == .failure(.sessionMismatch))
         #expect(
-            store.claimMutation(
-                requestId: "wrong-session",
-                workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "other-session",
-                sourceRevision: "revision-1",
-                inputEpoch: 0,
-                requiredPhase: .yielded
-            ) == .failure(.sessionMismatch)
-        )
-        #expect(
-            store.claimMutation(
+            claim(
                 requestId: "stale",
-                workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "copilot-session",
-                sourceRevision: "revision-stale",
-                inputEpoch: 0,
-                requiredPhase: .yielded
+                sourceRevision: "revision-stale"
             ) == .failure(.sourceStale)
         )
 
-        let first = try store.claimMutation(
+        let first = store.withMutationClaim(
             requestId: "claim-1",
             workspaceId: workspaceId,
             surfaceId: surfaceId,
@@ -340,30 +368,19 @@ struct WorkbenchLocalSupervisionTests {
             sourceRevision: "revision-1",
             inputEpoch: 0,
             requiredPhase: .yielded
-        ).get()
-        #expect(
-            store.claimMutation(
-                requestId: "claim-2",
-                workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "copilot-session",
-                sourceRevision: "revision-1",
-                inputEpoch: 0,
-                requiredPhase: .yielded
-            ) == .failure(.actionInFlight)
-        )
-        store.release(first)
+        ) { _ in
+            let second = claim(requestId: "claim-2")
+            #expect(second == .failure(.actionInFlight))
+            return true
+        }
+        #expect(try first.get())
         store.recordInput(workspaceId: workspaceId, surfaceId: surfaceId)
+        #expect(claim(requestId: "input-changed") == .failure(.inputChanged))
         #expect(
-            store.claimMutation(
-                requestId: "input-changed",
-                workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "copilot-session",
-                sourceRevision: "revision-1",
-                inputEpoch: 0,
-                requiredPhase: .yielded
-            ) == .failure(.inputChanged)
+            claim(
+                requestId: "fresh-inspection-after-input",
+                inputEpoch: 1
+            ) == .failure(.sourceStale)
         )
 
         store.observeLifecycleEvent(
@@ -376,14 +393,10 @@ struct WorkbenchLocalSupervisionTests {
             )
         )
         #expect(
-            store.claimMutation(
+            claim(
                 requestId: "active",
-                workspaceId: workspaceId,
-                surfaceId: surfaceId,
-                sessionId: "copilot-session",
                 sourceRevision: "revision-2",
-                inputEpoch: 1,
-                requiredPhase: .yielded
+                inputEpoch: 1
             ) == .failure(.sessionNotYielded)
         )
 
@@ -577,7 +590,9 @@ struct WorkbenchLocalSupervisionTests {
             payload: payload(sessionId: "copilot-one", sourceEventId: "native-one")
         )
         try await waitUntil { first.receiptsForTesting().count == 1 }
-        first.stop()
+        if let stopped = first.stop() {
+            await stopped.value
+        }
 
         bus.publish(
             name: "feed.item.received",
@@ -604,7 +619,10 @@ struct WorkbenchLocalSupervisionTests {
         )
         second.start()
         defer { second.stop() }
-        try await waitUntil { second.receiptsForTesting().count == 2 }
+        try await waitUntil {
+            second.receiptsForTesting().count == 2
+                && secondRunner.calls.count == 1
+        }
         #expect(secondRunner.calls.count == 1)
         #expect(second.receiptsForTesting().last?.observation == .sessionEnded)
     }
@@ -1339,6 +1357,7 @@ struct WorkbenchLocalActionTests {
             )
         )
         #expect(afterSend["pending_guidance"] is NSNull)
+        #expect(afterSend["mutation_eligible"] as? Bool == false)
 
         policy.autonomyMode = .observeOnly
         policy.humanMutationMode = .never
@@ -1436,10 +1455,37 @@ struct WorkbenchLocalActionTests {
         )
         #expect(errorPayload(noEvidence)["result_code"] as? String == "evidence_unavailable")
 
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "yielded-again",
+                eventId: "yielded-again",
+                eventSequence: 3,
+                source: "copilot",
+                sessionId: sessionId,
+                workspaceId: workspaceId.uuidString,
+                surfaceId: surfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .turnYielded,
+                sourceEventId: "native-yielded-again",
+                sourceRevision: "revision-2",
+                causalChainId: "turn-2",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2099-01-01T00:00:00Z",
+                evidence: WorkbenchSupervisionEvidence(
+                    lastUserMessage: "continue?",
+                    assistantMessage: "I still need the shared helper."
+                ),
+                inputEpoch: 1
+            )
+        )
+        let revisedParams = params.merging([
+            "expected_source_revision": "revision-2",
+            "expected_input_epoch": UInt64(1),
+        ]) { _, new in new }
         let deliveryFailed = WorkbenchLocalActionRouter.sendGuidance(
-            params: params.merging([
+            params: revisedParams.merging([
                 "request_id": "guidance-delivery-failed",
-                "expected_input_epoch": UInt64(1),
             ]) { _, new in new },
             defaults: defaults,
             stateStore: store,
@@ -1450,9 +1496,8 @@ struct WorkbenchLocalActionTests {
         #expect(errorPayload(deliveryFailed)["result_code"] as? String == "delivery_failed")
 
         let readbackFailed = WorkbenchLocalActionRouter.sendGuidance(
-            params: params.merging([
+            params: revisedParams.merging([
                 "request_id": "guidance-readback-failed",
-                "expected_input_epoch": UInt64(1),
             ]) { _, new in new },
             defaults: defaults,
             stateStore: store,
