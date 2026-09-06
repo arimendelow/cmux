@@ -57,6 +57,11 @@ function actionArguments(name: string, raw: unknown): Record<string, unknown> {
     if (!UUID.test(surfaceId)) throw new Error("surface_id must be a UUID");
     return { workspace_id: workspaceId, surface_id: surfaceId };
   }
+  const guardedControlNames = [
+    "workbench_interrupt",
+    "workbench_stop",
+    "workbench_resume",
+  ];
   const allowed = name === "workbench_focus"
     ? ["request_id", "workspace_id", "surface_id"]
     : name === "workbench_send_guidance"
@@ -69,6 +74,15 @@ function actionArguments(name: string, raw: unknown): Record<string, unknown> {
         "expected_input_epoch",
         "text",
       ]
+      : guardedControlNames.includes(name)
+        ? [
+          "request_id",
+          "workspace_id",
+          "surface_id",
+          "session_id",
+          "expected_source_revision",
+          "expected_input_epoch",
+        ]
       : ["request_id", "workspace_id", "surface_id", "summary"];
   requireExactKeys(args, allowed);
   const requestId = requiredString(args.request_id, "request_id", 128);
@@ -104,6 +118,20 @@ function actionArguments(name: string, raw: unknown): Record<string, unknown> {
       text: requiredSingleLine(args.text, "text", 4_000),
     };
   }
+  if (guardedControlNames.includes(name)) {
+    return {
+      request_id: requestId,
+      workspace_id: workspaceId,
+      surface_id: surfaceId,
+      session_id: requiredString(args.session_id, "session_id", 256),
+      expected_source_revision: requiredString(
+        args.expected_source_revision,
+        "expected_source_revision",
+        256,
+      ),
+      expected_input_epoch: requiredEpoch(args.expected_input_epoch),
+    };
+  }
   return { request_id: requestId, workspace_id: workspaceId, surface_id: surfaceId };
 }
 
@@ -115,6 +143,27 @@ function toolResult(id: unknown, value: unknown, isError = false) {
       content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }],
       isError,
     },
+  };
+}
+
+function guardedControlSchema(targetProperties: Record<string, unknown>) {
+  return {
+    type: "object",
+    properties: {
+      ...targetProperties,
+      session_id: { type: "string", description: "Exact source-native worker session ID." },
+      expected_source_revision: { type: "string", description: "Exact source revision returned by workbench_inspect." },
+      expected_input_epoch: { type: "integer", minimum: 0, description: "Exact input epoch returned by workbench_inspect." },
+    },
+    required: [
+      "request_id",
+      "workspace_id",
+      "surface_id",
+      "session_id",
+      "expected_source_revision",
+      "expected_input_epoch",
+    ],
+    additionalProperties: false,
   };
 }
 
@@ -182,6 +231,21 @@ export function workbenchToolDefinitions() {
       },
     },
     {
+      name: "workbench_interrupt",
+      description: "Soft-interrupt one exact active Controlled-here worker with Escape after source-revision and input-epoch checks.",
+      inputSchema: guardedControlSchema(targetProperties),
+    },
+    {
+      name: "workbench_stop",
+      description: "Stop one exact active Controlled-here worker turn with Ctrl-C after source-revision and input-epoch checks.",
+      inputSchema: guardedControlSchema(targetProperties),
+    },
+    {
+      name: "workbench_resume",
+      description: "Resume one exact hibernated Controlled-here worker session after source-revision and input-epoch checks.",
+      inputSchema: guardedControlSchema(targetProperties),
+    },
+    {
       name: "workbench_flag_for_review",
       description: "Create one idempotent native Workbench review notification for Ari.",
       inputSchema: {
@@ -229,6 +293,9 @@ export async function handleWorkbenchMCPRequest(request: MCPRequest, call: Nativ
       "workbench_inspect",
       "workbench_focus",
       "workbench_send_guidance",
+      "workbench_interrupt",
+      "workbench_stop",
+      "workbench_resume",
       "workbench_flag_for_review",
     ].includes(name)) {
       throw new Error(`unknown tool: ${name}`);
@@ -239,6 +306,9 @@ export async function handleWorkbenchMCPRequest(request: MCPRequest, call: Nativ
       workbench_inspect: "workbench.inspect",
       workbench_focus: "workbench.focus",
       workbench_send_guidance: "workbench.send_guidance",
+      workbench_interrupt: "workbench.interrupt",
+      workbench_stop: "workbench.stop",
+      workbench_resume: "workbench.resume",
       workbench_flag_for_review: "workbench.flag_for_review",
     };
     const method = methods[name];

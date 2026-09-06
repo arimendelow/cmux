@@ -6,6 +6,9 @@ import Foundation
 enum WorkbenchLocalActionKind: String, Codable {
     case focus
     case sendGuidance = "send_guidance"
+    case interrupt
+    case stop
+    case resume
     case flagForReview = "flag_for_review"
 }
 
@@ -36,6 +39,7 @@ enum WorkbenchLocalActionRouter {
     typealias FocusEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID) -> Bool
     typealias FlagEffect = @MainActor (_ requestId: String, _ workspaceId: UUID, _ surfaceId: UUID?, _ summary: String) -> UUID?
     typealias GuidanceEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ text: String) -> Bool
+    typealias ControlEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> Bool
     typealias AuthorityResolver = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> WorkbenchSessionAuthority?
 
     static let receiptDefaultsKey = "workbench.local-actions.v1"
@@ -219,6 +223,69 @@ enum WorkbenchLocalActionRouter {
         }
     }
 
+    static func interrupt(
+        params: [String: Any],
+        defaults: UserDefaults = .standard,
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil,
+        effect: ControlEffect? = nil
+    ) -> TerminalController.V2CallResult {
+        guardedControlAction(
+            action: .interrupt,
+            resultCode: "interrupt_sent",
+            allowedPhases: [.active, .waiting, .stalled],
+            params: params,
+            defaults: defaults,
+            stateStore: stateStore,
+            enabled: enabled,
+            authority: authority ?? liveAuthority,
+            effect: effect ?? liveInterrupt
+        )
+    }
+
+    static func stop(
+        params: [String: Any],
+        defaults: UserDefaults = .standard,
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil,
+        effect: ControlEffect? = nil
+    ) -> TerminalController.V2CallResult {
+        guardedControlAction(
+            action: .stop,
+            resultCode: "stop_requested",
+            allowedPhases: [.active, .waiting, .stalled],
+            params: params,
+            defaults: defaults,
+            stateStore: stateStore,
+            enabled: enabled,
+            authority: authority ?? liveAuthority,
+            effect: effect ?? liveStop
+        )
+    }
+
+    static func resume(
+        params: [String: Any],
+        defaults: UserDefaults = .standard,
+        stateStore: WorkbenchLocalSessionStateStore = .shared,
+        enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
+        authority: AuthorityResolver? = nil,
+        effect: ControlEffect? = nil
+    ) -> TerminalController.V2CallResult {
+        guardedControlAction(
+            action: .resume,
+            resultCode: "resume_started",
+            allowedPhases: [.ended, .yielded],
+            params: params,
+            defaults: defaults,
+            stateStore: stateStore,
+            enabled: enabled,
+            authority: authority ?? liveResumeAuthority,
+            effect: effect ?? liveResume
+        )
+    }
+
     static func flagForReview(
         params: [String: Any],
         defaults: UserDefaults = .standard,
@@ -331,6 +398,116 @@ enum WorkbenchLocalActionRouter {
             return .err(code: "action_outcome_unknown", message: "The action ran but its final receipt could not be persisted", data: response(receipt, replayed: false))
         }
         return result(receipt, replayed: false)
+    }
+
+    private static func guardedControlAction(
+        action: WorkbenchLocalActionKind,
+        resultCode: String,
+        allowedPhases: [WorkbenchLocalSessionPhase],
+        params: [String: Any],
+        defaults: UserDefaults,
+        stateStore: WorkbenchLocalSessionStateStore,
+        enabled: Bool,
+        authority: @escaping AuthorityResolver,
+        effect: @escaping ControlEffect
+    ) -> TerminalController.V2CallResult {
+        guard enabled else {
+            return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
+        }
+        guard hasOnlyKeys(
+            params,
+            allowed: [
+                "request_id",
+                "workspace_id",
+                "surface_id",
+                "session_id",
+                "expected_source_revision",
+                "expected_input_epoch",
+            ]
+        ),
+        let requestId = requestId(params["request_id"]),
+        let workspaceId = uuid(params["workspace_id"]),
+        let surfaceId = uuid(params["surface_id"]),
+        let sessionId = boundedIdentifier(params["session_id"]),
+        let sourceRevision = boundedIdentifier(params["expected_source_revision"]),
+        let inputEpoch = uint64(params["expected_input_epoch"]) else {
+            return .err(
+                code: "invalid_params",
+                message: "\(action.rawValue) requires exact target identity, source revision, and input epoch",
+                data: nil
+            )
+        }
+        return execute(
+            action: action,
+            requestId: requestId,
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            summary: nil,
+            sessionId: sessionId,
+            sourceRevision: sourceRevision,
+            expectedInputEpoch: inputEpoch,
+            fingerprintExtras: [sessionId, sourceRevision, String(inputEpoch)],
+            defaults: defaults,
+            authorizeNewRequest: {
+                guard WorkbenchSupervisionPolicy.load(defaults: defaults)
+                    .allowsAutomatedLocalMutation(appIsActive: NSApp.isActive) else {
+                    return .err(
+                        code: "policy_denied",
+                        message: "Workbench policy does not permit automated local control",
+                        data: nil
+                    )
+                }
+                return nil
+            }
+        ) {
+            guard authority(workspaceId, surfaceId, sessionId) == .controlledHere else {
+                return (false, "authority_denied", nil, nil)
+            }
+            guard let projection = stateStore.snapshot(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            ), allowedPhases.contains(projection.phase) else {
+                return (false, "session_not_active", nil, nil)
+            }
+            let claimed = stateStore.withMutationClaim(
+                requestId: requestId,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                sessionId: sessionId,
+                sourceRevision: sourceRevision,
+                inputEpoch: inputEpoch,
+                requiredPhase: projection.phase
+            ) { _ -> (
+                succeeded: Bool,
+                resultCode: String,
+                notificationId: UUID?,
+                observedInputEpoch: UInt64?
+            ) in
+                guard effect(workspaceId, surfaceId, sessionId) else {
+                    return (false, "control_failed", nil, nil)
+                }
+                if stateStore.inputEpoch(
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId
+                ) == inputEpoch {
+                    stateStore.recordInput(
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId
+                    )
+                }
+                let observedEpoch = stateStore.inputEpoch(
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId
+                )
+                return (true, resultCode, nil, observedEpoch)
+            }
+            switch claimed {
+            case .success(let outcome):
+                return outcome
+            case .failure(let failure):
+                return (false, failure.rawValue, nil, nil)
+            }
+        }
     }
 
     private static func result(
@@ -548,6 +725,77 @@ enum WorkbenchLocalActionRouter {
         return terminal.surface.sendInputResult(text + "\r") == .sent
     }
 
+    private static func liveInterrupt(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> Bool {
+        _ = sessionId
+        guard let terminal = liveTerminal(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId
+        ) else {
+            return false
+        }
+        return terminal.sendNamedKeyResult("escape") == .sent
+    }
+
+    private static func liveStop(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> Bool {
+        _ = sessionId
+        guard let terminal = liveTerminal(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId
+        ) else {
+            return false
+        }
+        return terminal.sendNamedKeyResult("ctrl-c") == .sent
+    }
+
+    private static func liveResume(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              let terminal = workspace.panels[surfaceId] as? TerminalPanel,
+              terminal.isAgentHibernated,
+              workspace.resumeAgentHibernation(
+                  panelId: surfaceId,
+                  focus: false
+              ),
+              !terminal.isAgentHibernated,
+              let resumed = workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+              let state = workspace.restoredAgentResumeStatesByPanelId[surfaceId],
+              state == .awaitingAutoResumeCommand || state == .autoResumeCommandRunning,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: resumed.kind.rawValue,
+                  lhs: resumed.sessionId,
+                  rhs: sessionId
+              ) else {
+            return false
+        }
+        return true
+    }
+
+    private static func liveTerminal(
+        workspaceId: UUID,
+        surfaceId: UUID
+    ) -> TerminalPanel? {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              let terminal = workspace.panels[surfaceId] as? TerminalPanel,
+              !terminal.isAgentHibernated,
+              terminal.surface.hasLiveSurface else {
+            return nil
+        }
+        return terminal
+    }
+
     private static func liveAuthority(
         workspaceId: UUID,
         surfaceId: UUID,
@@ -602,6 +850,30 @@ enum WorkbenchLocalActionRouter {
         return WorkbenchSessionAuthority.resolved(agent: agent, binding: binding)
     }
 
+    private static func liveResumeAuthority(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> WorkbenchSessionAuthority? {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              let terminal = workspace.panels[surfaceId] as? TerminalPanel,
+              terminal.isAgentHibernated,
+              workspace.restoredAgentResumeStatesByPanelId[surfaceId] == .manualResumeAvailable,
+              let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: agent.kind.rawValue,
+                  lhs: agent.sessionId,
+                  rhs: sessionId
+              ) else {
+            return nil
+        }
+        return WorkbenchSessionAuthority.resolved(
+            agent: agent,
+            binding: workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        )
+    }
+
 #if DEBUG
     static func liveAuthorityForTesting(
         workspaceId: UUID,
@@ -609,6 +881,18 @@ enum WorkbenchLocalActionRouter {
         sessionId: String
     ) -> WorkbenchSessionAuthority? {
         liveAuthority(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            sessionId: sessionId
+        )
+    }
+
+    static func liveResumeAuthorityForTesting(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> WorkbenchSessionAuthority? {
+        liveResumeAuthority(
             workspaceId: workspaceId,
             surfaceId: surfaceId,
             sessionId: sessionId
@@ -632,6 +916,18 @@ extension TerminalController {
 
     func v2WorkbenchSendGuidance(params: [String: Any]) -> V2CallResult {
         WorkbenchLocalActionRouter.sendGuidance(params: params)
+    }
+
+    func v2WorkbenchInterrupt(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.interrupt(params: params)
+    }
+
+    func v2WorkbenchStop(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.stop(params: params)
+    }
+
+    func v2WorkbenchResume(params: [String: Any]) -> V2CallResult {
+        WorkbenchLocalActionRouter.resume(params: params)
     }
 
     func v2WorkbenchFlagForReview(params: [String: Any]) -> V2CallResult {

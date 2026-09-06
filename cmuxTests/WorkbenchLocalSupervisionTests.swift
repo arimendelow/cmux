@@ -1278,13 +1278,14 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { workspace, surface in
+            effect: { workspace, surface, session in
                 #expect(workspace == workspaceId)
                 #expect(surface == surfaceId)
+                #expect(session == sessionId)
                 return true
             }
         )
-        #expect(try successPayload(interrupted)["result_code"] as? String == "interrupted")
+        #expect(try successPayload(interrupted)["result_code"] as? String == "interrupt_sent")
         #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 1)
 
         observe(phase: .silenceThresholdCrossed, revision: "active-2", epoch: 1)
@@ -1294,9 +1295,9 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _ in true }
+            effect: { _, _, _ in true }
         )
-        #expect(try successPayload(stopped)["result_code"] as? String == "stopped")
+        #expect(try successPayload(stopped)["result_code"] as? String == "stop_requested")
         #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 2)
 
         observe(phase: .sessionEnded, revision: "ended-1", epoch: 2)
@@ -1306,9 +1307,9 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _ in true }
+            effect: { _, _, _ in true }
         )
-        #expect(try successPayload(resumed)["result_code"] as? String == "resumed")
+        #expect(try successPayload(resumed)["result_code"] as? String == "resume_started")
         #expect(store.inputEpoch(workspaceId: workspaceId, surfaceId: surfaceId) == 3)
 
         let replay = WorkbenchLocalActionRouter.resume(
@@ -1320,7 +1321,7 @@ struct WorkbenchLocalActionTests {
                 Issue.record("receipt replay must not re-evaluate authority")
                 return nil
             },
-            effect: { _, _ in
+            effect: { _, _, _ in
                 Issue.record("receipt replay must not resume twice")
                 return false
             }
@@ -1334,7 +1335,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
-            effect: { _, _ in false }
+            effect: { _, _, _ in false }
         )
         #expect(errorPayload(inactive)["result_code"] as? String == "session_not_active")
 
@@ -1344,7 +1345,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledInAgencyHub },
-            effect: { _, _ in false }
+            effect: { _, _, _ in false }
         )
         #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
     }
@@ -1954,6 +1955,45 @@ struct WorkbenchLocalActionTests {
                 surfaceId: surfaceId,
                 sessionId: completedSessionId
             ) == nil
+        )
+
+        let hubResumeSnapshot = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: completedSessionId,
+            workingDirectory: "/tmp",
+            launchCommand: nil,
+            workbenchAuthority: nil
+        )
+        target.restoredAgentSnapshotsByPanelId[surfaceId] = hubResumeSnapshot
+        target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
+        target.surfaceResumeBindingsByPanelId[surfaceId] = SurfaceResumeBindingSnapshot(
+            name: "Copilot",
+            kind: "copilot",
+            command: "agency copilot --hub",
+            cwd: "/tmp",
+            checkpointId: completedSessionId,
+            source: "agent-hook",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "agency",
+                executablePath: "/usr/local/bin/agency",
+                arguments: ["agency", "copilot", "--hub"],
+                workingDirectory: "/tmp"
+            ),
+            autoResume: false
+        )
+        let targetPanel = try #require(target.panels[surfaceId] as? TerminalPanel)
+        #expect(
+            targetPanel.enterAgentHibernation(
+                agent: hubResumeSnapshot,
+                lastActivityAt: .distantPast
+            )
+        )
+        #expect(
+            WorkbenchLocalActionRouter.liveResumeAuthorityForTesting(
+                workspaceId: target.id,
+                surfaceId: surfaceId,
+                sessionId: completedSessionId
+            ) == .controlledInAgencyHub
         )
 
         let existingRequestId = "review-existing"

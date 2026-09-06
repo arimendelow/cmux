@@ -2317,6 +2317,12 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkbenchFocus(params: params))
         case "workbench.send_guidance":
             return v2Result(id: id, self.v2WorkbenchSendGuidance(params: params))
+        case "workbench.interrupt":
+            return v2Result(id: id, self.v2WorkbenchInterrupt(params: params))
+        case "workbench.stop":
+            return v2Result(id: id, self.v2WorkbenchStop(params: params))
+        case "workbench.resume":
+            return v2Result(id: id, self.v2WorkbenchResume(params: params))
         case "workbench.flag_for_review":
             return v2Result(id: id, self.v2WorkbenchFlagForReview(params: params))
         case "sidebar.custom.open":
