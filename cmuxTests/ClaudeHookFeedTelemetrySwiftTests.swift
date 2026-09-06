@@ -256,6 +256,12 @@ struct ClaudeHookFeedTelemetrySwiftTests {
         #expect(result.status == 0, Comment(rawValue: result.stderr))
         #expect(result.stdout == "{}\n")
         #expect(feedSeen.wait(timeout: .now() + 5) == .success)
+        let feedRequest = try #require(
+            context.state.commandsSnapshot()
+                .compactMap(jsonObject)
+                .first { ($0["method"] as? String) == "feed.push" }
+        )
+        #expect(feedRequest["id"] is String)
         let event = try #require(
             context.state.feedEventsSnapshot().last { $0["hook_event_name"] as? String == "Notification" }
         )
