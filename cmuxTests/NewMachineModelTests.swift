@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Testing
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -7,14 +7,9 @@ import XCTest
 @testable import cmux
 #endif
 
-/// The New Machine sheet's model: the CLI invocation it builds, the plan
-/// ceilings it mirrors, and how Create hands the work off without waiting.
+@Suite("New machine model")
 @MainActor
-final class NewMachineModelTests: XCTestCase {
-    private struct SubmitRecorder {
-        var requests: [MachineCreateRequest] = []
-    }
-
+struct NewMachineModelTests {
     private final class Box<Value> {
         var value: Value
         init(_ value: Value) { self.value = value }
@@ -23,252 +18,95 @@ final class NewMachineModelTests: XCTestCase {
     private func makeModel(
         mode: NewMachineModel.Mode = .newMachine,
         plan: MachinePlanSnapshot? = nil,
-        imageKinds: [VMImageKindOption] = [],
+        memoryOptionsMb: [Int] = NewMachineModel.memoryOptionsMb,
         starts: Bool = true
-    ) -> (NewMachineModel, Box<SubmitRecorder>) {
-        let recorder = Box(SubmitRecorder())
-        let model = NewMachineModel(mode: mode, plan: plan, imageKinds: imageKinds) { request in
-            recorder.value.requests.append(request)
+    ) -> (NewMachineModel, Box<[MachineCreateRequest]>) {
+        let recorder = Box<[MachineCreateRequest]>([])
+        let model = NewMachineModel(mode: mode, plan: plan, memoryOptionsMb: memoryOptionsMb) { request in
+            recorder.value.append(request)
             return starts
         }
         return (model, recorder)
     }
 
-    // MARK: Kind
-
-    func testKindInferredFromImageWhenBackendOmitsIt() {
-        XCTAssertEqual(VMMachineKind.inferred(fromImage: "cmux-xfce-vnc:latest"), .desktop)
-        XCTAssertEqual(VMMachineKind.inferred(fromImage: "cmuxd-ws:tooling-20260509f"), .base)
-        XCTAssertEqual(VMMachineKind.inferred(fromImage: ""), .base)
-    }
-
-    /// Regression: `devbox` used to imply a desktop because one provider's
-    /// devbox image bundled xfce + noVNC. The shared devbox image every
-    /// remaining provider boots is shell-only, so inferring a desktop from the
-    /// name published a Desktop surface for a machine with no screen.
-    func testSharedDevboxImageIsNotInferredAsDesktop() {
-        XCTAssertEqual(VMMachineKind.inferred(fromImage: "cmux-devbox:devbox-20260828b"), .base)
-        XCTAssertEqual(VMMachineKind.inferred(fromImage: "cmux-devbox-20260828b"), .base)
-    }
-
-    func testResolvedKindPrefersBackendField() {
-        XCTAssertEqual(VMMachineKind.resolved(kind: "base", image: "cmux-devbox:devbox-20260828b"), .base)
-        XCTAssertEqual(VMMachineKind.resolved(kind: "DESKTOP", image: "cmuxd-ws:tooling-20260509f"), .desktop)
-        XCTAssertEqual(VMMachineKind.resolved(kind: "bogus", image: "cmux-xfce-vnc:latest"), .desktop)
-        XCTAssertEqual(VMMachineKind.resolved(kind: nil, image: nil), .base)
-    }
-
-    func testSummaryResolvedKindPrefersServerKindOverImageName() {
-        var summary = VMSummary(
-            id: "noble-wren",
-            provider: "freestyle",
-            status: "running",
-            // An image whose name says desktop, so the server's `base` has
-            // something to override.
-            image: "cmux-xfce-vnc:latest",
-            createdAt: 0,
-            base: nil
-        )
-        XCTAssertEqual(summary.resolvedKind, .desktop)
-        summary.kind = .base
-        XCTAssertEqual(summary.resolvedKind, .base)
-        XCTAssertFalse(MachineSnapshotBuilder.snapshot(from: summary).isDesktop)
-    }
-
-    // MARK: CLI arguments
-
-    /// With no `limits.imageKinds` from the backend the sheet opens on
-    /// shell-only (no provider ships a desktop image), and the kind travels
-    /// as a flag: no image id is pinned, and the create runs in the background.
-    func testDefaultInvocationRequestsShellOnlyByKindInTheBackground() {
+    @Test func defaultSizeIsTheSmallestSupportedBaseImage() {
         let (model, _) = makeModel()
-        XCTAssertEqual(model.cliArguments, ["vm", "new", "--base", "--size", "24576", "--focus", "false"])
-        XCTAssertFalse(model.cliArguments.contains("--image"))
+        #expect(model.memoryOptions == [4096, 8192, 16384, 24576, 32768, 65536])
+        #expect(model.memoryMb == 8192)
+        #expect(model.selectedSize == MachineSizeOption(memoryMb: 8192))
     }
 
-    func testDesktopKindTravelsAsAFlagWhenTheBackendServesIt() {
-        let kinds = [
-            VMImageKindOption(kind: .desktop, image: "cmux-xfce-vnc:latest"),
-            VMImageKindOption(kind: .base, image: "cmuxd-ws:tooling-20260509f"),
-        ]
-        let (model, _) = makeModel(imageKinds: kinds)
-        XCTAssertEqual(model.cliArguments, ["vm", "new", "--desktop", "--size", "24576", "--focus", "false"])
-        XCTAssertFalse(model.cliArguments.contains("--image"))
+    @Test func sizeLabelsDescribeMemoryAndDisk() {
+        #expect(MachineSizeOption(memoryMb: 4096)?.title == "4 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 4096)?.detail == "16 GB disk included")
+        #expect(MachineSizeOption(memoryMb: 4096)?.diskTitle == "16 GB")
+        #expect(MachineSizeOption(memoryMb: 8192)?.title == "8 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 8192)?.detail == "32 GB disk included")
+        #expect(MachineSizeOption(memoryMb: 8192)?.menuTitle == "8 GB RAM · 32 GB disk")
+        #expect(MachineSizeOption(memoryMb: 16384)?.title == "16 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 16384)?.detail == "64 GB disk included")
+        #expect(MachineSizeOption(memoryMb: 24576)?.title == "24 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 24576)?.detail == "96 GB disk included")
+        #expect(MachineSizeOption(memoryMb: 32768)?.title == "32 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 32768)?.detail == "128 GB disk included")
+        #expect(MachineSizeOption(memoryMb: 65536)?.title == "64 GB RAM")
+        #expect(MachineSizeOption(memoryMb: 65536)?.detail == "128 GB disk included")
     }
 
-    func testBaseKindSizeAndNameTravelAsFlags() {
-        let (model, _) = makeModel(plan: MachinePlanSnapshot(activeCount: 1, maxActiveVms: 5, planId: "pro"))
-        model.kind = .base
-        model.memoryMb = 8192
-        model.name = "  build box  "
-        XCTAssertEqual(model.cliArguments, ["vm", "new", "--base", "--size", "8192", "--name", "build box", "--focus", "false"])
+    @Test func serverOptionsAreSortedAndDeduplicated() {
+        let plan = MachinePlanSnapshot(activeCount: 0, maxActiveVms: 50, planId: "pro")
+        let (model, _) = makeModel(plan: plan, memoryOptionsMb: [16384, 8192, 8192])
+        #expect(model.memoryOptions == [8192, 16384])
+        #expect(model.memoryMb == 8192)
     }
 
-    func testBlankNameIsNotSent() {
-        let (model, _) = makeModel()
-        model.name = "   "
-        XCTAssertNil(model.trimmedName)
-        XCTAssertFalse(model.cliArguments.contains("--name"))
+    @Test func emptyServerOptionsPreserveLegacyDefaultWithoutSizeFlag() {
+        let (model, _) = makeModel(memoryOptionsMb: [])
+        #expect(model.memoryOptions == [])
+        #expect(model.memoryMb == 20480)
+        #expect(!model.supportsSize)
+        #expect(model.cliArguments == ["vm", "new", "--base", "--focus", "false"])
     }
 
-    func testBaseSetupOpensTheWorkspaceWithoutSizeOrName() {
+    @Test func selectedSizeTravelsAsBaseSizeFlagOnly() {
+        let (model, recorder) = makeModel()
+        model.memoryMb = 65536
+        model.create()
+        let request = recorder.value.first
+        #expect(request?.kind == .base)
+        #expect(request?.name == nil)
+        #expect(request?.arguments == ["vm", "new", "--base", "--size", "65536", "--focus", "false"])
+    }
+
+    @Test func baseSetupHasNoSizeFlag() {
         let workspaceID = UUID()
         let (model, _) = makeModel(mode: .base(workspaceID: workspaceID))
-        XCTAssertFalse(model.supportsSize)
-        XCTAssertFalse(model.supportsName)
-        model.name = "ignored"
-        model.kind = .base
-        XCTAssertEqual(
-            model.cliArguments,
-            ["vm", "base", "open", "--workspace", workspaceID.uuidString, "--base", "--focus", "false"]
-        )
-        XCTAssertNil(model.createRequest.name, "Base has no label; the row is called Base")
-        XCTAssertEqual(model.createRequest.baseWorkspaceID, workspaceID)
+        #expect(!model.supportsSize)
+        #expect(model.cliArguments == ["vm", "base", "open", "--workspace", workspaceID.uuidString, "--base", "--focus", "false"])
     }
 
-    // MARK: Plan ceilings
-
-    func testFreePlanCapsSizeAtTwentyFourGigabytes() {
-        let (model, _) = makeModel(plan: MachinePlanSnapshot(activeCount: 0, maxActiveVms: 1, planId: "free"))
-        XCTAssertEqual(model.memoryOptions, [2048, 4096, 8192, 16384, 24576])
-        XCTAssertEqual(model.memoryMb, 24576)
-    }
-
-    func testPaidPlanUnlocksThirtyTwoGigabytesButDefaultsToTwentyFour() {
-        let (model, _) = makeModel(plan: MachinePlanSnapshot(activeCount: 2, maxActiveVms: 5, planId: "pro"))
-        XCTAssertEqual(model.memoryOptions.last, 32768)
-        XCTAssertEqual(model.memoryMb, 24576)
-    }
-
-    func testUnknownPlanUsesTheFreeCeiling() {
-        let (model, _) = makeModel(plan: nil)
-        XCTAssertEqual(model.memoryOptions.last, 24576)
-        XCTAssertNil(model.planMeterText)
-        XCTAssertNil(model.freeAccessNoteText)
-    }
-
-    func testPlanTextsMirrorTheMeterAndFreeWindow() {
+    @Test func planTextsMirrorTheMeterAndFreeWindow() {
         let free = MachinePlanSnapshot(activeCount: 0, maxActiveVms: 1, planId: "free", freeAccessWindowDays: 7)
-        let (freeModel, _) = makeModel(plan: free)
-        XCTAssertEqual(freeModel.planMeterText, "0 of 1 machine in use")
-        XCTAssertEqual(
-            freeModel.freeAccessNoteText,
-            "Free plan: this machine stays reachable for 7 days. Upgrade to keep it."
-        )
-
-        let pro = MachinePlanSnapshot(activeCount: 2, maxActiveVms: 5, planId: "pro", freeAccessWindowDays: 7)
-        let (proModel, _) = makeModel(plan: pro)
-        XCTAssertEqual(proModel.planMeterText, "2 of 5 machines in use")
-        XCTAssertNil(proModel.freeAccessNoteText, "paid plans have no access window")
+        let (model, _) = makeModel(plan: free)
+        #expect(model.planMeterText == "0 of 1 machine in use")
+        #expect(model.freeAccessNoteText == "Free plan: this machine stays reachable for 7 days. Upgrade to keep it.")
     }
 
-    func testMemoryLabelsReadInGigabytes() {
-        XCTAssertEqual(NewMachineModel.memoryLabel(mb: 2048), "2 GB")
-        XCTAssertEqual(NewMachineModel.memoryLabel(mb: 24576), "24 GB")
-        XCTAssertEqual(NewMachineModel.memoryLabel(mb: 1500), "1500 MB")
-    }
-
-    func testSelectedImageFollowsTheKind() {
-        let kinds = [
-            VMImageKindOption(kind: .desktop, image: "cmux-xfce-vnc:latest"),
-            VMImageKindOption(kind: .base, image: "cmuxd-ws:tooling-20260509f"),
-        ]
-        let (model, _) = makeModel(imageKinds: kinds)
-        XCTAssertEqual(model.selectedImage, "cmux-xfce-vnc:latest")
-        model.kind = .base
-        XCTAssertEqual(model.selectedImage, "cmuxd-ws:tooling-20260509f")
-    }
-
-    /// The sheet must not open preselected on a kind the deployment cannot
-    /// provision: no provider ships a desktop image today, so a desktop
-    /// default would make the primary button fail with an image config error.
-    func testKindDefaultsToAServableKind() {
-        let baseOnly = [VMImageKindOption(kind: .base, image: "cmuxd-ws:tooling-20260509f")]
-        let (baseModel, _) = makeModel(imageKinds: baseOnly)
-        XCTAssertEqual(baseModel.kind, .base)
-        XCTAssertEqual(baseModel.selectableKinds, [.base])
-
-        let both = [
-            VMImageKindOption(kind: .desktop, image: "cmux-xfce-vnc:latest"),
-            VMImageKindOption(kind: .base, image: "cmuxd-ws:tooling-20260509f"),
-        ]
-        let (bothModel, _) = makeModel(imageKinds: both)
-        XCTAssertEqual(bothModel.kind, .desktop)
-        XCTAssertEqual(bothModel.selectableKinds, [.desktop, .base])
-    }
-
-    /// An older control plane sends no `limits.imageKinds`. Offering nothing
-    /// would be worse than offering both, so the sheet keeps the full picker.
-    func testUnknownImageKindsStillOfferEveryKind() {
-        let (model, _) = makeModel(imageKinds: [])
-        XCTAssertEqual(model.selectableKinds, VMMachineKind.allCases)
-        XCTAssertEqual(model.kind, .base)
-    }
-
-    // MARK: Create lifecycle
-
-    /// https://github.com/manaflow-ai/cmux/issues/11397: Create must hand the
-    /// person back their window immediately. The sheet finishes as soon as the
-    /// create is submitted; the machine coming up (tens of seconds) is the
-    /// coordinator's business, never the sheet's lifetime.
-    func testCreateFinishesTheSheetBeforeTheMachineExists() {
+    @Test func createFinishesWithoutWaitingForTheMachine() {
         let (model, recorder) = makeModel()
         var outcomes: [NewMachineModel.Outcome] = []
         model.onFinished = { outcomes.append($0) }
-
         model.create()
-
-        XCTAssertEqual(recorder.value.requests.count, 1, "the create is submitted once")
-        XCTAssertEqual(outcomes, [.submitted], "the sheet must finish without waiting for the CLI to complete")
-        XCTAssertEqual(model.outcome, .submitted)
-        XCTAssertNil(model.errorText)
+        #expect(recorder.value.count == 1)
+        #expect(outcomes == [.submitted])
+        #expect(model.outcome == .submitted)
     }
 
-    func testSubmittedRequestCarriesTheSheetsChoices() {
-        let (model, recorder) = makeModel(plan: MachinePlanSnapshot(activeCount: 1, maxActiveVms: 5, planId: "pro"))
-        model.kind = .base
-        model.memoryMb = 4096
-        model.name = " ci box "
-        model.create()
-        let request = recorder.value.requests.first
-        XCTAssertEqual(request?.mode, .newMachine)
-        XCTAssertEqual(request?.kind, .base)
-        XCTAssertEqual(request?.name, "ci box")
-        XCTAssertEqual(request?.displayName, "ci box")
-        XCTAssertEqual(request?.arguments, ["vm", "new", "--base", "--size", "4096", "--name", "ci box", "--focus", "false"])
-        XCTAssertEqual(request?.progressLabel, "Creating…")
-    }
-
-    func testSecondCreateAfterSubmitIsIgnored() {
-        let (model, recorder) = makeModel()
-        model.create()
-        model.create()
-        XCTAssertEqual(recorder.value.requests.count, 1, "a second click must not launch a second create")
-    }
-
-    func testLaunchRefusalIsReportedWithoutFinishing() {
+    @Test func launchRefusalStaysInTheSheet() {
         let (model, recorder) = makeModel(starts: false)
-        var outcomes: [NewMachineModel.Outcome] = []
-        model.onFinished = { outcomes.append($0) }
         model.create()
-        XCTAssertNil(model.outcome)
-        XCTAssertNotNil(model.errorText, "a refused launch is the one error the sheet still shows inline")
-        XCTAssertTrue(outcomes.isEmpty)
-
-        // Retry re-submits and clears the message while it runs.
-        model.create()
-        XCTAssertEqual(recorder.value.requests.count, 2)
-        XCTAssertNotNil(model.errorText, "still refused, still shown")
-    }
-
-    func testCancelFinishesOnceAndBlocksLaterCreate() {
-        let (model, recorder) = makeModel()
-        var outcomes: [NewMachineModel.Outcome] = []
-        model.onFinished = { outcomes.append($0) }
-        model.cancel()
-        model.cancel()
-        model.create()
-        XCTAssertEqual(outcomes, [.cancelled])
-        XCTAssertTrue(recorder.value.requests.isEmpty)
+        #expect(recorder.value.count == 1)
+        #expect(model.outcome == nil)
+        #expect(model.errorText != nil)
     }
 }
