@@ -1253,6 +1253,40 @@ struct WorkbenchLocalSupervisionTests {
 @Suite("Workbench local actions", .serialized)
 @MainActor
 struct WorkbenchLocalActionTests {
+    @Test func guidanceDeliveryPastesThenSubmits() {
+        var operations: [String] = []
+        #expect(
+            WorkbenchLocalActionRouter.deliverGuidance(
+                "Continue with the verified fix.",
+                paste: {
+                    operations.append("paste:\($0)")
+                    return true
+                },
+                sendNamedKey: {
+                    operations.append("key:\($0)")
+                    return true
+                }
+            )
+        )
+        #expect(operations == [
+            "paste:Continue with the verified fix.",
+            "key:return",
+        ])
+
+        operations.removeAll()
+        #expect(
+            !WorkbenchLocalActionRouter.deliverGuidance(
+                "Do not submit.",
+                paste: { _ in false },
+                sendNamedKey: {
+                    operations.append("unexpected")
+                    return true
+                }
+            )
+        )
+        #expect(operations.isEmpty)
+    }
+
     @Test func interruptStopAndResumeReuseGuardedReceiptsAndReadback() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
