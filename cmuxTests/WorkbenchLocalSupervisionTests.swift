@@ -164,7 +164,7 @@ struct WorkbenchLocalSupervisionTests {
             eventId: "native-session-start",
             sequence: 1,
             sourceEventId: "native-session-start",
-            sessionId: "copilot-native-session"
+            sessionId: "native-session"
         )
 
         store.observeLifecycleEvent(lifecycle)
@@ -179,11 +179,16 @@ struct WorkbenchLocalSupervisionTests {
             eventId: "native-stop",
             sequence: 2,
             sourceEventId: "native-stop",
-            sessionId: "copilot-native-session"
+            sessionId: "native-session"
         )
+        let envelope = try #require(
+            WorkbenchLocalSupervisionCoordinator.envelopeForTesting(stop)
+        )
+        #expect(envelope.sessionId == "native-session")
+        #expect(envelope.workstreamId == "copilot-native-session")
         #expect(
-            WorkbenchLocalSupervisionCoordinator.envelopeForTesting(stop)?.sessionId
-                == "native-session"
+            envelope.dedupeKey
+                == "copilot\u{0}copilot-native-session\u{0}native-stop"
         )
     }
 
@@ -873,7 +878,7 @@ struct WorkbenchLocalSupervisionTests {
             eventSequence: 1,
             dedupeKey: "interrupted",
             source: "copilot",
-            sessionId: "copilot-session",
+            sessionId: "copilot-copilot-session",
             workspaceId: Self.workspaceId,
             surfaceId: Self.surfaceId,
             cwd: "/tmp",
@@ -904,6 +909,7 @@ struct WorkbenchLocalSupervisionTests {
         #expect(recovered.status == .interrupted)
         #expect(recovered.disposition == .hold)
         #expect(recovered.reasonCode == "boss_turn_interrupted")
+        #expect(recovered.envelope.sessionId == "copilot-session")
         await coordinator.processForTesting(event(eventId: "interrupted", sequence: 2))
         #expect(runner.calls.isEmpty)
     }
@@ -1173,7 +1179,7 @@ struct WorkbenchLocalSupervisionTests {
         sourceEventId: String? = nil,
         actionRequestId: String? = nil,
         isError: Bool = false,
-        sessionId: String = "copilot-copilot-session",
+        sessionId: String = "copilot-session",
         sourceRevision: String = "revision-1",
         causalChainId: String = "turn-1"
     ) -> [String: Any] {
@@ -1206,7 +1212,7 @@ struct WorkbenchLocalSupervisionTests {
         causalChainId: String = "turn-1"
     ) -> [String: Any] {
         [
-            "session_id": sessionId,
+            "session_id": "copilot-\(sessionId)",
             "workspace_id": Self.workspaceId,
             "surface_id": Self.surfaceId,
             "cwd": "/tmp",

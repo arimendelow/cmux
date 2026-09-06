@@ -376,7 +376,7 @@ extension AppDelegate {
     ) -> WorkbenchSupervisionEvidence? {
         let item = FeedCoordinator.shared.snapshot(pendingOnly: false).reversed().first { item in
             guard item.source.rawValue == envelope.source,
-                  item.workstreamId == envelope.sessionId else {
+                  item.workstreamId == envelope.workstreamId else {
                 return false
             }
             if let sourceEventId = envelope.sourceEventId,

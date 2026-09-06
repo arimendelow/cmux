@@ -246,8 +246,8 @@ final class WorkbenchLocalSessionStateStore: @unchecked Sendable {
               name == "agent.hook.UserPromptSubmit" || name == "agent.hook.SessionStart",
               let payload = event["payload"] as? [String: Any],
               (payload["phase"] as? String) == "received",
-              let sessionId = Self.nonEmpty(payload["session_id"]),
               let source = Self.nonEmpty(event["source"]),
+              let workstreamId = Self.nonEmpty(payload["session_id"]),
               let sourceRevision = Self.nonEmpty(payload["_source_revision"]),
               let observedSequence = Self.int64(event["seq"]),
               let workspace = Self.nonEmpty(event["workspace_id"] ?? payload["workspace_id"]),
@@ -256,6 +256,10 @@ final class WorkbenchLocalSessionStateStore: @unchecked Sendable {
               let surfaceId = UUID(uuidString: surface) else {
             return
         }
+        let sessionId = WorkbenchSupervisionEnvelope.sourceNativeSessionId(
+            fromWorkstreamId: workstreamId,
+            source: source
+        )
         lock.withLock {
             let key = Key(workspaceId: workspaceId, surfaceId: surfaceId)
             let epoch = epochs[key] ?? 0
@@ -413,14 +417,28 @@ struct WorkbenchSupervisionEnvelope: Codable, Equatable, Sendable {
     var evidence: WorkbenchSupervisionEvidence?
     var inputEpoch: UInt64? = nil
 
+    var workstreamId: String {
+        "\(source)-\(sessionId)"
+    }
+
+    static func sourceNativeSessionId(
+        fromWorkstreamId workstreamId: String,
+        source: String
+    ) -> String {
+        let prefix = "\(source)-"
+        guard workstreamId.hasPrefix(prefix) else { return workstreamId }
+        let sourceNativeId = String(workstreamId.dropFirst(prefix.count))
+        return sourceNativeId.isEmpty ? workstreamId : sourceNativeId
+    }
+
     var dedupeKey: String {
         if let sourceEventId, !sourceEventId.isEmpty {
-            return "\(source)\u{0}\(sessionId)\u{0}\(sourceEventId)"
+            return "\(source)\u{0}\(workstreamId)\u{0}\(sourceEventId)"
         }
         if let sourceRevision, !sourceRevision.isEmpty {
             return [
                 source,
-                sessionId,
+                workstreamId,
                 observation.rawValue,
                 sourceRevision,
                 causalChainId ?? "",
@@ -467,9 +485,20 @@ struct WorkbenchSupervisionReceipt: Codable, Equatable, Sendable {
     var toolName: String?
     var occurredAt: String?
     var inputEpoch: UInt64? = nil
+    var sessionIdentityVersion: Int? = nil
     var status: WorkbenchSupervisionReceiptStatus
     var disposition: WorkbenchSupervisionDisposition?
     var reasonCode: String?
+
+    var sourceNativeSessionId: String {
+        if sessionIdentityVersion == 1 {
+            return sessionId
+        }
+        return WorkbenchSupervisionEnvelope.sourceNativeSessionId(
+            fromWorkstreamId: sessionId,
+            source: source
+        )
+    }
 
     var envelope: WorkbenchSupervisionEnvelope {
         WorkbenchSupervisionEnvelope(
@@ -477,7 +506,7 @@ struct WorkbenchSupervisionReceipt: Codable, Equatable, Sendable {
             eventId: eventId,
             eventSequence: eventSequence,
             source: source,
-            sessionId: sessionId,
+            sessionId: sourceNativeSessionId,
             workspaceId: workspaceId,
             surfaceId: surfaceId,
             cwd: cwd,
@@ -1060,7 +1089,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
             receipts.removeAll {
                 $0.status == .queued
                     && $0.source == envelope.source
-                    && $0.sessionId == envelope.sessionId
+                    && $0.sourceNativeSessionId == envelope.sessionId
                     && $0.observation == envelope.observation
             }
         }
@@ -1086,6 +1115,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
                 toolName: envelope.toolName,
                 occurredAt: envelope.occurredAt,
                 inputEpoch: envelope.inputEpoch,
+                sessionIdentityVersion: 1,
                 status: status,
                 disposition: disposition,
                 reasonCode: reasonCode
@@ -1122,7 +1152,7 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
         }
         return Self.loadReceipts(defaults: defaults).contains { receipt in
             receipt.source == envelope.source
-                && receipt.sessionId == envelope.sessionId
+                && receipt.sourceNativeSessionId == envelope.sessionId
                 && receipt.observation == envelope.observation
                 && receipt.causalChainId == causalChainId
                 && receipt.sourceRevision == sourceRevision
@@ -1298,11 +1328,15 @@ final class WorkbenchLocalSupervisionCoordinator: @unchecked Sendable {
               let sequence = int64(event["seq"]),
               let source = nonEmpty(event["source"]),
               let payload = event["payload"] as? [String: Any],
-              let sessionId = nonEmpty(payload["session_id"]),
+              let workstreamId = nonEmpty(payload["session_id"]),
               let workspaceId = nonEmpty(event["workspace_id"] ?? payload["workspace_id"]),
               UUID(uuidString: workspaceId) != nil else {
             return nil
         }
+        let sessionId = WorkbenchSupervisionEnvelope.sourceNativeSessionId(
+            fromWorkstreamId: workstreamId,
+            source: source
+        )
 
         let surfaceId = nonEmpty(event["surface_id"] ?? payload["surface_id"])
         if let surfaceId, UUID(uuidString: surfaceId) == nil {
