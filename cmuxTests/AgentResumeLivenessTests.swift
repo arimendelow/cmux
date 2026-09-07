@@ -17,7 +17,8 @@ struct AgentResumeLivenessTests {
     private static func entry(
         kind: RestorableAgentKind = .codex,
         sessionId: String = "session-1",
-        processIDs: Set<Int> = [4_242]
+        processIDs: Set<Int> = [4_242],
+        processIdentities: [Int: AgentPIDProcessIdentity] = [:]
     ) -> RestorableAgentSessionIndex.Entry {
         RestorableAgentSessionIndex.Entry(
             snapshot: SessionRestorableAgentSnapshot(kind: kind, sessionId: sessionId),
@@ -28,9 +29,9 @@ struct AgentResumeLivenessTests {
             // one value that would contradict the empty-PID case.
             processLiveness: processIDs.isEmpty ? .exited : .running,
             processIDs: processIDs,
-            processIdentities: [:],
+            processIdentities: processIdentities,
             agentProcessIDs: processIDs,
-            agentProcessIdentities: [:],
+            agentProcessIdentities: processIdentities,
             hibernationPanelProcessIDs: processIDs,
             terminationProcessIDs: processIDs,
             terminationProcessIdentities: [:],
@@ -85,5 +86,45 @@ struct AgentResumeLivenessTests {
     @Test
     func noEntryIsNotReportedAsActive() {
         #expect(!AgentResumeLiveness.hasLiveProcess(for: nil, kind: "codex", sessionId: "session-1"))
+    }
+
+    @Test
+    func exactProcessGenerationRejectsAReusedPidAndMissingIdentity() {
+        let original = AgentPIDProcessIdentity(
+            pid: 4_242,
+            startSeconds: 10,
+            startMicroseconds: 20
+        )
+        let replacement = AgentPIDProcessIdentity(
+            pid: 4_242,
+            startSeconds: 11,
+            startMicroseconds: 21
+        )
+        let entry = Self.entry(processIdentities: [4_242: original])
+
+        #expect(
+            AgentResumeLiveness.exactProcessGeneration(
+                for: entry,
+                kind: "codex",
+                sessionId: "session-1",
+                currentProcessIdentity: { _ in original }
+            ) == [original]
+        )
+        #expect(
+            AgentResumeLiveness.exactProcessGeneration(
+                for: entry,
+                kind: "codex",
+                sessionId: "session-1",
+                currentProcessIdentity: { _ in replacement }
+            ) == nil
+        )
+        #expect(
+            AgentResumeLiveness.exactProcessGeneration(
+                for: Self.entry(),
+                kind: "codex",
+                sessionId: "session-1",
+                currentProcessIdentity: { _ in original }
+            ) == nil
+        )
     }
 }

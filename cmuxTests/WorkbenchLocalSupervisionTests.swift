@@ -1363,6 +1363,10 @@ struct WorkbenchLocalActionTests {
                 "expected_input_epoch": epoch,
             ]
         }
+        let stableProcessGeneration: WorkbenchLocalActionRouter.ProcessGenerationResolver = {
+            _, _, _ in
+            [AgentPIDProcessIdentity(pid: 42, startSeconds: 1, startMicroseconds: 1)]
+        }
 
         observe(phase: .silenceThresholdCrossed, revision: "active-1", epoch: 0)
         let interrupted = WorkbenchLocalActionRouter.interrupt(
@@ -1371,6 +1375,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
+            processGeneration: stableProcessGeneration,
             effect: { workspace, surface, session in
                 #expect(workspace == workspaceId)
                 #expect(surface == surfaceId)
@@ -1388,6 +1393,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
+            processGeneration: stableProcessGeneration,
             effect: { _, _, _ in true }
         )
         #expect(try successPayload(stopped)["result_code"] as? String == "stop_requested")
@@ -1428,6 +1434,7 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledHere },
+            processGeneration: stableProcessGeneration,
             effect: { _, _, _ in false }
         )
         #expect(errorPayload(inactive)["result_code"] as? String == "session_not_active")
@@ -1438,9 +1445,115 @@ struct WorkbenchLocalActionTests {
             stateStore: store,
             enabled: true,
             authority: { _, _, _ in .controlledInAgencyHub },
+            processGeneration: stableProcessGeneration,
             effect: { _, _, _ in false }
         )
         #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
+
+        observe(phase: .silenceThresholdCrossed, revision: "active-replaced", epoch: 3)
+        let original = Set([
+            AgentPIDProcessIdentity(pid: 42, startSeconds: 1, startMicroseconds: 1)
+        ])
+        let replacement = Set([
+            AgentPIDProcessIdentity(pid: 42, startSeconds: 2, startMicroseconds: 2)
+        ])
+        var generations = [original, replacement]
+        var dispatches = 0
+
+        let replaced = WorkbenchLocalActionRouter.interrupt(
+            params: params(
+                requestId: "interrupt-replaced",
+                revision: "active-replaced",
+                epoch: 3
+            ),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            processGeneration: { _, _, _ in generations.removeFirst() },
+            effect: { _, _, _ in
+                dispatches += 1
+                return true
+            }
+        )
+
+        #expect(errorPayload(replaced)["result_code"] as? String == "target_changed")
+        #expect(generations.isEmpty)
+        #expect(dispatches == 0)
+
+        observe(phase: .silenceThresholdCrossed, revision: "active-hub", epoch: 3)
+        var authorities: [WorkbenchSessionAuthority?] = [
+            .controlledHere,
+            .controlledInAgencyHub,
+        ]
+        let transferred = WorkbenchLocalActionRouter.stop(
+            params: params(requestId: "stop-transferred", revision: "active-hub", epoch: 3),
+            defaults: defaults,
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in authorities.removeFirst() },
+            processGeneration: stableProcessGeneration,
+            effect: { _, _, _ in
+                dispatches += 1
+                return true
+            }
+        )
+        #expect(errorPayload(transferred)["result_code"] as? String == "authority_denied")
+        #expect(authorities.isEmpty)
+        #expect(dispatches == 0)
+    }
+
+    @Test func inspectionReportsHibernatedResumeAuthoritySeparately() throws {
+        let workspaceId = UUID()
+        let surfaceId = UUID()
+        let sessionId = "copilot-hibernated"
+        let store = WorkbenchLocalSessionStateStore()
+        store.observe(
+            WorkbenchSupervisionEnvelope(
+                id: "ended",
+                eventId: "ended",
+                eventSequence: 1,
+                source: "copilot",
+                sessionId: sessionId,
+                workspaceId: workspaceId.uuidString,
+                surfaceId: surfaceId.uuidString,
+                cwd: "/tmp",
+                observation: .sessionEnded,
+                sourceEventId: "ended",
+                sourceRevision: "revision-ended",
+                causalChainId: "turn-ended",
+                actionRequestId: nil,
+                toolName: nil,
+                occurredAt: "2099-01-01T00:00:00Z",
+                evidence: nil
+            )
+        )
+
+        let inspect = WorkbenchLocalActionRouter.inspect(
+            params: [
+                "workspace_id": workspaceId.uuidString,
+                "surface_id": surfaceId.uuidString,
+            ],
+            stateStore: store,
+            enabled: true,
+            authority: { _, _, _ in nil },
+            resumeAuthority: { _, _, _ in .controlledHere }
+        )
+        let inspected = try successPayload(inspect)
+        #expect(inspected["authority"] as? String == "unadopted")
+        #expect(inspected["resume_authority"] as? String == "controlledHere")
+
+        let listed = try successPayload(
+            WorkbenchLocalActionRouter.list(
+                params: [:],
+                stateStore: store,
+                enabled: true,
+                authority: { _, _, _ in nil },
+                resumeAuthority: { _, _, _ in .controlledHere }
+            )
+        )
+        let sessions = try #require(listed["sessions"] as? [[String: Any]])
+        #expect(sessions.first?["resume_authority"] as? String == "controlledHere")
     }
 
     @Test func inspectAndGuidanceUseExactRevisionEpochAuthorityAndIdempotency() throws {
