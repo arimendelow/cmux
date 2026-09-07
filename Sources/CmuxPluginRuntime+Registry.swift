@@ -2,6 +2,13 @@ import CmuxExtensionKit
 import Foundation
 
 extension CmuxPluginRuntime {
+    /// Formats registry event timestamps using a stable internet representation.
+    static func isoTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
     /// Requests a coalesced manifest rescan after filesystem or settings changes.
     func reload() {
         lock.lock()
