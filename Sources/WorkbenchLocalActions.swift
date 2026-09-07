@@ -51,6 +51,11 @@ enum WorkbenchLocalActionRouter {
     ) -> WorkbenchGuidanceDeliveryOutcome
     typealias ControlEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> Bool
     typealias AuthorityResolver = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID, _ sessionId: String) -> WorkbenchSessionAuthority?
+    typealias ProcessGenerationResolver = @MainActor (
+        _ workspaceId: UUID,
+        _ surfaceId: UUID,
+        _ sessionId: String
+    ) -> Set<AgentPIDProcessIdentity>?
 
     static let receiptDefaultsKey = "workbench.local-actions.v1"
     private static let requestIdPattern = #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"#
@@ -60,7 +65,8 @@ enum WorkbenchLocalActionRouter {
         params: [String: Any],
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
-        authority: AuthorityResolver? = nil
+        authority: AuthorityResolver? = nil,
+        resumeAuthority: AuthorityResolver? = nil
     ) -> TerminalController.V2CallResult {
         guard enabled else {
             return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
@@ -69,10 +75,12 @@ enum WorkbenchLocalActionRouter {
             return .err(code: "invalid_params", message: "list accepts no parameters", data: nil)
         }
         let resolveAuthority = authority ?? liveAuthority
+        let resolveResumeAuthority = resumeAuthority ?? liveResumeAuthority
         let sessions = stateStore.snapshots().prefix(100).map {
             projectionResponse(
                 $0,
                 authority: resolveAuthority($0.workspaceId, $0.surfaceId, $0.sessionId),
+                resumeAuthority: resolveResumeAuthority($0.workspaceId, $0.surfaceId, $0.sessionId),
                 includeEvidence: false
             )
         }
@@ -83,7 +91,8 @@ enum WorkbenchLocalActionRouter {
         params: [String: Any],
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
-        authority: AuthorityResolver? = nil
+        authority: AuthorityResolver? = nil,
+        resumeAuthority: AuthorityResolver? = nil
     ) -> TerminalController.V2CallResult {
         guard enabled else {
             return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
@@ -97,10 +106,16 @@ enum WorkbenchLocalActionRouter {
             return .err(code: "target_unavailable", message: "Workbench has no current state for that session", data: nil)
         }
         let resolvedAuthority = (authority ?? liveAuthority)(workspaceId, surfaceId, projection.sessionId)
+        let resolvedResumeAuthority = (resumeAuthority ?? liveResumeAuthority)(
+            workspaceId,
+            surfaceId,
+            projection.sessionId
+        )
         return .ok(
             projectionResponse(
                 projection,
                 authority: resolvedAuthority,
+                resumeAuthority: resolvedResumeAuthority,
                 includeEvidence: true
             )
         )
@@ -243,9 +258,10 @@ enum WorkbenchLocalActionRouter {
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
         authority: AuthorityResolver? = nil,
+        processGeneration: ProcessGenerationResolver? = nil,
         effect: ControlEffect? = nil
     ) -> TerminalController.V2CallResult {
-        guardedControlAction(
+        return guardedControlAction(
             action: .interrupt,
             resultCode: "interrupt_sent",
             allowedPhases: [.active, .waiting, .stalled],
@@ -254,6 +270,7 @@ enum WorkbenchLocalActionRouter {
             stateStore: stateStore,
             enabled: enabled,
             authority: authority ?? liveAuthority,
+            processGeneration: processGeneration ?? liveProcessGeneration,
             effect: effect ?? liveInterrupt
         )
     }
@@ -264,9 +281,10 @@ enum WorkbenchLocalActionRouter {
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
         authority: AuthorityResolver? = nil,
+        processGeneration: ProcessGenerationResolver? = nil,
         effect: ControlEffect? = nil
     ) -> TerminalController.V2CallResult {
-        guardedControlAction(
+        return guardedControlAction(
             action: .stop,
             resultCode: "stop_requested",
             allowedPhases: [.active, .waiting, .stalled],
@@ -275,6 +293,7 @@ enum WorkbenchLocalActionRouter {
             stateStore: stateStore,
             enabled: enabled,
             authority: authority ?? liveAuthority,
+            processGeneration: processGeneration ?? liveProcessGeneration,
             effect: effect ?? liveStop
         )
     }
@@ -296,6 +315,7 @@ enum WorkbenchLocalActionRouter {
             stateStore: stateStore,
             enabled: enabled,
             authority: authority ?? liveResumeAuthority,
+            processGeneration: nil,
             effect: effect ?? liveResume
         )
     }
@@ -423,6 +443,7 @@ enum WorkbenchLocalActionRouter {
         stateStore: WorkbenchLocalSessionStateStore,
         enabled: Bool,
         authority: @escaping AuthorityResolver,
+        processGeneration: ProcessGenerationResolver?,
         effect: @escaping ControlEffect
     ) -> TerminalController.V2CallResult {
         guard enabled else {
@@ -474,6 +495,14 @@ enum WorkbenchLocalActionRouter {
                 return nil
             }
         ) {
+            let authorizedProcessGeneration = processGeneration?(
+                workspaceId,
+                surfaceId,
+                sessionId
+            )
+            if processGeneration != nil, authorizedProcessGeneration == nil {
+                return (false, "target_changed", nil, nil)
+            }
             guard authority(workspaceId, surfaceId, sessionId) == .controlledHere else {
                 return (false, "authority_denied", nil, nil)
             }
@@ -497,6 +526,13 @@ enum WorkbenchLocalActionRouter {
                 notificationId: UUID?,
                 observedInputEpoch: UInt64?
             ) in
+                guard authority(workspaceId, surfaceId, sessionId) == .controlledHere else {
+                    return (false, "authority_denied", nil, nil)
+                }
+                if let processGeneration,
+                   processGeneration(workspaceId, surfaceId, sessionId) != authorizedProcessGeneration {
+                    return (false, "target_changed", nil, nil)
+                }
                 guard effect(workspaceId, surfaceId, sessionId) else {
                     return (false, "control_failed", nil, nil)
                 }
@@ -627,6 +663,7 @@ enum WorkbenchLocalActionRouter {
     private static func projectionResponse(
         _ projection: WorkbenchLocalSessionProjection,
         authority: WorkbenchSessionAuthority?,
+        resumeAuthority: WorkbenchSessionAuthority?,
         includeEvidence: Bool
     ) -> [String: Any] {
         var response: [String: Any] = [
@@ -639,6 +676,7 @@ enum WorkbenchLocalActionRouter {
             "input_epoch": projection.inputEpoch,
             "mutation_eligible": projection.mutationEligible,
             "authority": authority?.rawValue ?? "unadopted",
+            "resume_authority": resumeAuthority?.rawValue ?? "unavailable",
         ]
         if includeEvidence {
             response["pending_guidance"] = projection.pendingGuidance?.text ?? NSNull()
@@ -838,43 +876,61 @@ enum WorkbenchLocalActionRouter {
         guard workspace.restoredAgentResumeStatesByPanelId[surfaceId] != .completedAgentExit else {
             return nil
         }
+        guard liveProcessGeneration(
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            sessionId: sessionId
+        ) != nil else { return nil }
+        return WorkbenchSessionAuthority.resolved(agent: agent, binding: binding)
+    }
+
+    private static func liveProcessGeneration(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        sessionId: String
+    ) -> Set<AgentPIDProcessIdentity>? {
+        guard let manager = AppDelegate.shared?.tabManagerFor(tabId: workspaceId),
+              let workspace = manager.tabs.first(where: { $0.id == workspaceId }),
+              let terminal = workspace.panels[surfaceId] as? TerminalPanel,
+              !terminal.isAgentHibernated,
+              terminal.surface.hasLiveSurface else {
+            return nil
+        }
+        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
+        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let kind: String
+        let expectedSessionId: String
         if let agent {
-            guard ManagedAgentSessionIdentity.sessionIDsMatch(
-                kind: agent.kind.rawValue,
-                lhs: agent.sessionId,
-                rhs: sessionId
-            ), AgentResumeLiveness.hasLiveProcess(
-                for: SharedLiveAgentIndex.shared.index?.entry(
-                    workspaceId: workspaceId,
-                    panelId: surfaceId
-                ),
-                kind: agent.kind.rawValue,
-                sessionId: agent.sessionId
-            ) else {
-                return nil
-            }
+            kind = agent.kind.rawValue
+            expectedSessionId = agent.sessionId
         } else if let binding,
                   binding.isAgentHookBinding,
-                  let kind = binding.kind,
+                  let bindingKind = binding.kind,
                   let checkpointId = binding.checkpointId {
-            guard ManagedAgentSessionIdentity.sessionIDsMatch(
-                kind: kind,
-                lhs: checkpointId,
-                rhs: sessionId
-            ), AgentResumeLiveness.hasLiveProcess(
-                for: SharedLiveAgentIndex.shared.index?.entry(
-                    workspaceId: workspaceId,
-                    panelId: surfaceId
-                ),
-                kind: kind,
-                sessionId: checkpointId
-            ) else {
-                return nil
-            }
+            kind = bindingKind
+            expectedSessionId = checkpointId
         } else {
             return nil
         }
-        return WorkbenchSessionAuthority.resolved(agent: agent, binding: binding)
+        guard ManagedAgentSessionIdentity.sessionIDsMatch(
+            kind: kind,
+            lhs: expectedSessionId,
+            rhs: sessionId
+        ) else {
+            return nil
+        }
+        return AgentResumeLiveness.exactProcessGeneration(
+            for: SharedLiveAgentIndex.shared.index?.entry(
+                workspaceId: workspaceId,
+                panelId: surfaceId
+            ),
+            kind: kind,
+            sessionId: expectedSessionId,
+            currentProcessIdentity: {
+                guard $0 > 0, $0 <= Int(Int32.max) else { return nil }
+                return AgentPIDProcessIdentity(pid: pid_t($0))
+            }
+        )
     }
 
     private static func liveResumeAuthority(

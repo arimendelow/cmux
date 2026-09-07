@@ -23,4 +23,29 @@ enum AgentResumeLiveness {
                 rhs: sessionId
             )
     }
+
+    static func exactProcessGeneration(
+        for entry: RestorableAgentSessionIndex.Entry?,
+        kind: String,
+        sessionId: String,
+        currentProcessIdentity: (Int) -> AgentPIDProcessIdentity?
+    ) -> Set<AgentPIDProcessIdentity>? {
+        guard let entry,
+              hasLiveProcess(for: entry, kind: kind, sessionId: sessionId) else {
+            return nil
+        }
+        let processIDs = entry.agentProcessIDs.isEmpty ? entry.processIDs : entry.agentProcessIDs
+        let identities = entry.agentProcessIdentities.isEmpty
+            ? entry.processIdentities
+            : entry.agentProcessIdentities
+        guard !processIDs.isEmpty,
+              Set(identities.keys) == processIDs,
+              identities.allSatisfy({ processID, identity in
+                  Int(identity.pid) == processID &&
+                      currentProcessIdentity(processID) == identity
+              }) else {
+            return nil
+        }
+        return Set(identities.values)
+    }
 }
