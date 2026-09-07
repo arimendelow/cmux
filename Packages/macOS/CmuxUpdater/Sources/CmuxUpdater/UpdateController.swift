@@ -384,6 +384,8 @@ extension UpdateController {
         guard let bundleIdentifier else { return false }
         return bundleIdentifier == "com.cmuxterm.app.debug"
             || bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.")
+            || bundleIdentifier == "com.ourostack.workbench.v1.debug"
+            || bundleIdentifier.hasPrefix("com.ourostack.workbench.v1.debug.")
             || bundleIdentifier == "com.cmuxterm.app.staging"
             || bundleIdentifier.hasPrefix("com.cmuxterm.app.staging.")
     }
