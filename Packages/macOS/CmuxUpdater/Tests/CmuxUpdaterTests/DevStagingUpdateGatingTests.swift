@@ -48,6 +48,8 @@ import Testing
         #expect(UpdateController.isDevLikeBundleIdentifier("com.cmuxterm.app.debug.my-tag"))
         #expect(UpdateController.isDevLikeBundleIdentifier("com.cmuxterm.app.staging"))
         #expect(UpdateController.isDevLikeBundleIdentifier("com.cmuxterm.app.staging.my-tag"))
+        #expect(UpdateController.isDevLikeBundleIdentifier("com.ourostack.workbench.v1.debug"))
+        #expect(UpdateController.isDevLikeBundleIdentifier("com.ourostack.workbench.v1.debug.my-tag"))
     }
 
     @Test func doesNotClassifyPublicOrNightlyOrNilAsDevLike() {
