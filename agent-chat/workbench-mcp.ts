@@ -182,7 +182,7 @@ export function workbenchToolDefinitions() {
   return [
     {
       name: "workbench_list",
-      description: "List compact deterministic projections for observed local Workbench workers.",
+      description: "Start here on every Workbench turn and after reconnect: read the app-wide window/workspace/pane/surface topology, active focus, bounded lifecycle deltas, and compact local worker projections.",
       inputSchema: {
         type: "object",
         properties: {
@@ -197,7 +197,7 @@ export function workbenchToolDefinitions() {
     },
     {
       name: "workbench_inspect",
-      description: "Inspect one exact local worker with bounded recent evidence and mutation preconditions.",
+      description: "Inspect one exact local worker only after workbench_list identifies its workspace and surface, returning bounded recent evidence plus exact mutation preconditions.",
       inputSchema: {
         type: "object",
         properties: {
