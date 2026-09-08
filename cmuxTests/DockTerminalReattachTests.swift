@@ -84,6 +84,7 @@ extension DockSocketLifecycleTests {
             restoredAgentCompletedGeneration: restoredAgentCompletedGeneration,
             shellActivityState: shellActivityState,
             restoredResumeSessionWorkingDirectory: restoredResumeSessionWorkingDirectory,
+            restoredStartupInput: nil,
             resumeBinding: resumeBinding,
             managedAgentResumeBinding: managedAgentResumeBinding,
             agentRuntime: agentRuntime,

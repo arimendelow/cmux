@@ -305,6 +305,9 @@ extension DockSplitStore {
             willRunStartupCommand: willRunAgentCommand,
             willRunStartupInput: willRunAgentInput
         )
+        if willRunAgentInput {
+            restoredAgentLifecycle.registerStartupInput(initialInput, panelId: terminal.id)
+        }
         if let hibernation, let restorableAgent, restorableAgent.resumeCommand != nil {
             terminal.enterAgentHibernation(
                 agent: restorableAgent,

@@ -49,6 +49,7 @@ extension Workspace {
         let restoredAgentCompletedGeneration: RestoredAgentCompletedGeneration?
         let shellActivityState: PanelShellActivityState?
         let restoredResumeSessionWorkingDirectory: String?
+        let restoredStartupInput: String?
         let resumeBinding: SurfaceResumeBindingSnapshot?
         /// Authoritative hook identity when `resumeBinding` is an effective
         /// process-detected binding.
@@ -104,6 +105,7 @@ extension Workspace {
                 restoredAgentCompletedGeneration: restoredAgentCompletedGeneration,
                 shellActivityState: shellActivityState,
                 restoredResumeSessionWorkingDirectory: restoredResumeSessionWorkingDirectory,
+                restoredStartupInput: restoredStartupInput,
                 resumeBinding: resumeBinding,
                 managedAgentResumeBinding: managedAgentResumeBinding,
                 agentRuntime: agentRuntime,

@@ -343,6 +343,7 @@ extension Workspace {
         restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
         restoredAgentResumeStatesByPanelId.removeValue(forKey: panelId)
         restoredResumeSessionWorkingDirectoriesByPanelId.removeValue(forKey: panelId)
+        restoredAgentLifecycle.clearStartupInput(panelId: panelId)
     }
 
     func refreshTrackedAgentPorts() {

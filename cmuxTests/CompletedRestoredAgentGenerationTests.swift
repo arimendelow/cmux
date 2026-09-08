@@ -10,6 +10,125 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct CompletedRestoredAgentGenerationTests {
+    private let restoredSelector = " cmux restore codex 6e8458c7-7970-41e0-8d3e-00beda48097b\n"
+
+    private func coordinatorAwaitingStartupInput(panelId: UUID) -> RestoredAgentLifecycleCoordinator {
+        let coordinator = RestoredAgentLifecycleCoordinator(dateProvider: { 1_788_868_000 })
+        coordinator.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        coordinator.registerStartupInput(restoredSelector, panelId: panelId)
+        return coordinator
+    }
+
+    @Test
+    func restoredStartupInputReplaysOnlyOnceWhilePromptStaysIdle() {
+        let panelId = UUID()
+        let coordinator = coordinatorAwaitingStartupInput(panelId: panelId)
+
+        #expect(coordinator.awaitsStartupInput(panelId: panelId))
+        #expect(coordinator.armStartupInputResend(panelId: panelId))
+        #expect(!coordinator.armStartupInputResend(panelId: panelId))
+        #expect(
+            coordinator.takeStartupInputForResend(
+                panelId: panelId,
+                shellState: .promptIdle
+            ) == restoredSelector
+        )
+        #expect(
+            coordinator.takeStartupInputForResend(
+                panelId: panelId,
+                shellState: .promptIdle
+            ) == nil
+        )
+    }
+
+    @Test
+    func restoredStartupInputDoesNotReplayAfterCommandStarts() {
+        let panelId = UUID()
+        let coordinator = coordinatorAwaitingStartupInput(panelId: panelId)
+        #expect(coordinator.armStartupInputResend(panelId: panelId))
+
+        coordinator.resumeStatesByPanelId[panelId] = .autoResumeCommandRunning
+        coordinator.clearStartupInput(panelId: panelId)
+
+        #expect(
+            coordinator.takeStartupInputForResend(
+                panelId: panelId,
+                shellState: .promptIdle
+            ) == nil
+        )
+    }
+
+    @Test
+    func restoredStartupInputSurvivesBusyReplayCheck() {
+        let panelId = UUID()
+        let coordinator = coordinatorAwaitingStartupInput(panelId: panelId)
+        #expect(coordinator.armStartupInputResend(panelId: panelId))
+
+        #expect(
+            coordinator.takeStartupInputForResend(
+                panelId: panelId,
+                shellState: .commandRunning
+            ) == nil
+        )
+        #expect(coordinator.awaitsStartupInput(panelId: panelId))
+    }
+
+    @Test
+    func restoredStartupInputTransfersOnlyForAwaitingLaunch() {
+        let panelId = UUID()
+        let source = coordinatorAwaitingStartupInput(panelId: panelId)
+        let destination = RestoredAgentLifecycleCoordinator(dateProvider: { 1_788_868_000 })
+
+        destination.seedTransferredState(
+            panelId: panelId,
+            snapshot: nil,
+            resumeState: .awaitingAutoResumeCommand,
+            completedGeneration: nil,
+            startupInput: source.startupInput(panelId: panelId)
+        )
+
+        #expect(destination.awaitsStartupInput(panelId: panelId))
+        #expect(
+            destination.takeStartupInputForResend(
+                panelId: panelId,
+                shellState: .promptIdle
+            ) == restoredSelector
+        )
+
+        let settled = RestoredAgentLifecycleCoordinator(dateProvider: { 1_788_868_000 })
+        settled.seedTransferredState(
+            panelId: panelId,
+            snapshot: nil,
+            resumeState: .autoResumeCommandRunning,
+            completedGeneration: nil,
+            startupInput: restoredSelector
+        )
+        #expect(settled.startupInput(panelId: panelId) == nil)
+    }
+
+    @Test
+    func workspaceTransferPreservesAwaitingStartupInput() throws {
+        let source = Workspace()
+        let panelId = try #require(source.focusedPanelId)
+        source.restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        source.restoredAgentLifecycle.registerStartupInput(restoredSelector, panelId: panelId)
+
+        let detached = try #require(source.detachSurface(panelId: panelId))
+        #expect(detached.restoredStartupInput == restoredSelector)
+
+        let destination = Workspace()
+        let destinationPaneId = try #require(destination.bonsplitController.focusedPaneId)
+        #expect(
+            destination.attachDetachedSurface(
+                detached,
+                inPane: destinationPaneId,
+                focus: false
+            ) == panelId
+        )
+        #expect(destination.restoredAgentLifecycle.startupInput(panelId: panelId) == restoredSelector)
+        #expect(destination.restoredAgentResumeStatesByPanelId[panelId] == .awaitingAutoResumeCommand)
+    }
+
     @Test
     func sameSessionNewProcessGenerationSupersedesCompletion() {
         let panelId = UUID()
