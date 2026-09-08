@@ -2060,6 +2060,62 @@ struct WorkbenchLocalActionTests {
         #expect(try successPayload(workspaceFlag)["status"] as? String == "completed")
     }
 
+    @Test func listIncludesAppWideTopologyAndBoundedDeltas() throws {
+        let stateStore = WorkbenchLocalSessionStateStore()
+        let topology: [String: Any] = [
+            "revision": Int64(14),
+            "windows": [[
+                "window_id": "11111111-1111-4111-8111-111111111111",
+                "is_key": true,
+                "workspaces": [[
+                    "workspace_id": "22222222-2222-4222-8222-222222222222",
+                    "selected": true,
+                    "panes": [[
+                        "pane_id": "33333333-3333-4333-8333-333333333333",
+                        "focused": true,
+                        "surfaces": [[
+                            "surface_id": "44444444-4444-4444-8444-444444444444",
+                            "selected": true,
+                            "type": "terminal",
+                        ]],
+                    ]],
+                ]],
+            ]],
+        ]
+        let changes: [String: Any] = [
+            "after_sequence": Int64(12),
+            "latest_sequence": Int64(14),
+            "gap": false,
+            "events": [
+                ["seq": Int64(13), "name": "workspace.selected"],
+                ["seq": Int64(14), "name": "surface.focused"],
+            ],
+        ]
+
+        let listed = try successPayload(WorkbenchLocalActionRouter.list(
+            params: ["after_sequence": 12],
+            stateStore: stateStore,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            topology: { topology },
+            changes: { afterSequence in
+                #expect(afterSequence == 12)
+                return changes
+            }
+        ))
+
+        #expect((listed["topology"] as? [String: Any])?["revision"] as? Int64 == 14)
+        #expect((listed["changes"] as? [String: Any])?["latest_sequence"] as? Int64 == 14)
+        #expect(errorCode(WorkbenchLocalActionRouter.list(
+            params: ["after_sequence": -1],
+            stateStore: stateStore,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            topology: { topology },
+            changes: { _ in changes }
+        )) == "invalid_params")
+    }
+
     @Test func actionPlaneFailsClosedOutsideWorkbenchAndOnCorruptReceipts() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
