@@ -67,6 +67,21 @@ struct WorkbenchSessionAuthorityTests {
         #expect(WorkbenchSessionAuthority.localTakeoverSnapshot(agent: nil, binding: binding)?.workbenchAuthority == .controlledHere)
     }
 
+    @Test func NonAgentBindingsRemainLocalWhenWorkbenchAgentAuthorityIsUnknown() {
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach -t work",
+            checkpointId: "work",
+            source: "cli"
+        )
+
+        #expect(WorkbenchSessionAuthority.resolved(
+            agent: nil,
+            binding: binding,
+            missingAuthority: .unknown
+        ) == .controlledHere)
+    }
+
     @Test func LocalAuthorityStillRequiresTheGlobalPreferenceAndRunningEvidence() {
         #expect(!WorkbenchSessionAuthority.controlledHere.allowsLocalAutoResume(
             globalEnabled: false,

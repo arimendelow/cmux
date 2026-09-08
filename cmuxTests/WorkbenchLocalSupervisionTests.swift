@@ -2116,6 +2116,31 @@ struct WorkbenchLocalActionTests {
         )) == "invalid_params")
     }
 
+    @Test func boundedChangesStayContiguousAndExposeTheNextCursor() {
+        let events = (1...250).map { sequence in
+            [
+                "seq": Int64(sequence),
+                "name": "surface.updated",
+                "category": "surface",
+            ] as [String: Any]
+        }
+        let page = WorkbenchLocalActionRouter.changesForTesting(
+            events: events,
+            latestSequence: 250,
+            afterSequence: 0,
+            limit: 200
+        )
+        let returned = page["events"] as? [[String: Any]]
+
+        #expect(returned?.count == 200)
+        #expect(returned?.first?["seq"] as? Int64 == 1)
+        #expect(returned?.last?["seq"] as? Int64 == 200)
+        #expect(page["returned_through_sequence"] as? Int64 == 200)
+        #expect(page["latest_sequence"] as? Int64 == 250)
+        #expect(page["has_more"] as? Bool == true)
+        #expect(page["gap"] as? Bool == false)
+    }
+
     @Test func appContinuityDistinguishesCleanAndUncleanRestarts() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
