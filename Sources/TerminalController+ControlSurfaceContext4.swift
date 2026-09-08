@@ -158,9 +158,14 @@ extension TerminalController {
                         dock.updatePanelShellActivityState(panelId: requestedSurfaceID, state: state)
                         return
                     }
-                    guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: workspaceID) else { return }
-                    tabManager.updateSurfaceShellActivity(
-                        tabId: workspaceID,
+                    guard let owner = AppDelegate.shared?.workspaceContainingPanel(
+                        panelId: requestedSurfaceID,
+                        preferredWorkspaceId: workspaceID
+                    ) else {
+                        return
+                    }
+                    owner.tabManager.updateSurfaceShellActivity(
+                        tabId: owner.workspace.id,
                         surfaceId: requestedSurfaceID,
                         state: state
                     )

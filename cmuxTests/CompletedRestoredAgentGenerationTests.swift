@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import CmuxWorkspaces
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -185,6 +186,59 @@ struct CompletedRestoredAgentGenerationTests {
         #expect(terminal.shellActivity.state == .promptIdle)
         #expect(dock.restoredAgentLifecycle.startupInput(panelId: panelId) == restoredSelector)
         #expect(!dock.restoredAgentLifecycle.armStartupInputResend(panelId: panelId))
+    }
+
+    @Test
+    func shellStateReportRoutesMovedSurfaceToCurrentWorkspace() async throws {
+        let previousAppDelegate = AppDelegate.shared
+        let appDelegate = AppDelegate()
+        defer { AppDelegate.shared = previousAppDelegate }
+
+        let manager = TabManager()
+        defer { manager.tabs.forEach { $0.teardownAllPanels() } }
+        let source = manager.addWorkspace(select: true)
+        let destination = manager.addWorkspace(select: false)
+        let panel = try #require(source.focusedTerminalPanel)
+        let destinationPaneId = try #require(destination.bonsplitController.focusedPaneId)
+        let detached = try #require(source.detachSurface(panelId: panel.id))
+        #expect(
+            destination.attachDetachedSurface(
+                detached,
+                inPane: destinationPaneId,
+                focus: false
+            ) == panel.id
+        )
+
+        let windowId = appDelegate.registerMainWindowContextForTesting(tabManager: manager)
+        defer { appDelegate.unregisterMainWindowContextForTesting(windowId: windowId) }
+        TerminalController.shared.cleanupSurfaceState(surfaceIds: [panel.id])
+        defer { TerminalController.shared.cleanupSurfaceState(surfaceIds: [panel.id]) }
+        destination.restoredAgentResumeStatesByPanelId[panel.id] = .awaitingAutoResumeCommand
+        destination.restoredAgentLifecycle.registerStartupInput(
+            restoredSelector,
+            panelId: panel.id
+        )
+
+        let resolution = TerminalController.shared.controlSurfaceReportShellState(
+            workspaceID: source.id,
+            requestedSurfaceID: panel.id,
+            stateRawValue: PanelShellActivityState.commandRunning.rawValue
+        )
+        guard case .explicit(let surfaceID, let published) = resolution else {
+            Issue.record("Expected an explicit shell-state resolution")
+            return
+        }
+        #expect(surfaceID == panel.id)
+        #expect(published)
+
+        await Task.yield()
+        await Task.yield()
+
+        #expect(
+            destination.restoredAgentResumeStatesByPanelId[panel.id] ==
+                .autoResumeCommandRunning
+        )
+        #expect(destination.restoredAgentLifecycle.startupInput(panelId: panel.id) == nil)
     }
 
     @Test
