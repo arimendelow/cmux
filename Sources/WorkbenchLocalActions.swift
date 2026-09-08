@@ -40,6 +40,47 @@ struct WorkbenchLocalActionReceipt: Codable, Equatable {
     var observedInputEpoch: UInt64? = nil
 }
 
+struct WorkbenchAppContinuitySnapshot: Codable, Equatable {
+    var launchID: UUID
+    var startedAt: Date
+    var previousExitWasClean: Bool
+}
+
+enum WorkbenchAppContinuity {
+    private static let cleanExitKey = "workbench.lifecycle.clean-exit"
+    private static let snapshotKey = "workbench.lifecycle.current"
+
+    static func beginLaunch(
+        launchID: UUID = UUID(),
+        startedAt: Date = Date(),
+        defaults: UserDefaults = .standard
+    ) -> WorkbenchAppContinuitySnapshot {
+        let previousExitWasClean = defaults.object(forKey: cleanExitKey) == nil
+            || defaults.bool(forKey: cleanExitKey)
+        let snapshot = WorkbenchAppContinuitySnapshot(
+            launchID: launchID,
+            startedAt: startedAt,
+            previousExitWasClean: previousExitWasClean
+        )
+        if let data = try? JSONEncoder().encode(snapshot) {
+            defaults.set(data, forKey: snapshotKey)
+        }
+        defaults.set(false, forKey: cleanExitKey)
+        return snapshot
+    }
+
+    static func markCleanExit(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: cleanExitKey)
+    }
+
+    static func snapshot(
+        defaults: UserDefaults = .standard
+    ) -> WorkbenchAppContinuitySnapshot? {
+        guard let data = defaults.data(forKey: snapshotKey) else { return nil }
+        return try? JSONDecoder().decode(WorkbenchAppContinuitySnapshot.self, from: data)
+    }
+}
+
 @MainActor
 enum WorkbenchLocalActionRouter {
     typealias FocusEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID) -> Bool
@@ -648,7 +689,13 @@ enum WorkbenchLocalActionRouter {
             focusedWindowID: nil,
             workspaceFilter: nil
         )
+        let continuity = WorkbenchAppContinuity.snapshot()
         return [
+            "app_instance_id": continuity?.launchID.uuidString ?? NSNull(),
+            "app_started_at": continuity.map {
+                ISO8601DateFormatter().string(from: $0.startedAt)
+            } ?? NSNull(),
+            "previous_exit_clean": continuity?.previousExitWasClean ?? NSNull(),
             "revision": CmuxEventBus.shared.latestSequence,
             "windows": tree.windows.map(topologyWindow),
         ]

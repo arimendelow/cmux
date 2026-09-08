@@ -1338,6 +1338,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
+        if OuroWorkbenchProduct.isCurrentBundle {
+            _ = WorkbenchAppContinuity.beginLaunch()
+        }
         let telemetryEnabled = TelemetrySettings.enabledForCurrentLaunch
         let sentryStartupPolicy = MacSentryStartupPolicy(
             environment: env,
@@ -2211,6 +2214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ghosttyCrashBreadcrumbTask = nil
         notificationStore?.clearAll()
         GhosttyCrashBreadcrumb.markCleanExit()
+        if OuroWorkbenchProduct.isCurrentBundle {
+            WorkbenchAppContinuity.markCleanExit()
+        }
         unregisterDisplayReconfigurationCallbackIfNeeded()
         StartupBreadcrumbLog.append("appDelegate.willTerminate.complete")
         enableSuddenTerminationIfNeeded()
