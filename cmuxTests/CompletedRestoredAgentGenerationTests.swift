@@ -74,6 +74,37 @@ struct CompletedRestoredAgentGenerationTests {
     }
 
     @Test
+    func explicitWorkspaceInputCancelsStartupReplay() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let terminal = try #require(workspace.terminalPanel(for: panelId))
+        workspace.restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        workspace.restoredAgentLifecycle.registerStartupInput(restoredSelector, panelId: panelId)
+
+        terminal.surface.didReceiveExplicitInput()
+
+        #expect(!workspace.restoredAgentLifecycle.awaitsStartupInput(panelId: panelId))
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) == nil)
+    }
+
+    @Test
+    func explicitDockInputCancelsStartupReplay() {
+        let store = DockSplitStore(
+            workspaceId: UUID(),
+            baseDirectoryProvider: { nil }
+        )
+        let terminal = TerminalPanel(workspaceId: store.workspaceId)
+        store.restoredAgentLifecycle.resumeStatesByPanelId[terminal.id] = .awaitingAutoResumeCommand
+        store.restoredAgentLifecycle.registerStartupInput(restoredSelector, panelId: terminal.id)
+        store.configureAgentHibernationResume(for: terminal)
+
+        terminal.surface.didReceiveExplicitInput()
+
+        #expect(!store.restoredAgentLifecycle.awaitsStartupInput(panelId: terminal.id))
+        #expect(store.restoredAgentLifecycle.startupInput(panelId: terminal.id) == nil)
+    }
+
+    @Test
     func restoredStartupInputTransfersOnlyForAwaitingLaunch() {
         let panelId = UUID()
         let source = coordinatorAwaitingStartupInput(panelId: panelId)
@@ -112,6 +143,8 @@ struct CompletedRestoredAgentGenerationTests {
         let panelId = try #require(source.focusedPanelId)
         source.restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
         source.restoredAgentLifecycle.registerStartupInput(restoredSelector, panelId: panelId)
+        source.panelShellActivityStates[panelId] = .promptIdle
+        source.terminalPanel(for: panelId)?.updateShellActivityState(.promptIdle)
 
         let detached = try #require(source.detachSurface(panelId: panelId))
         #expect(detached.restoredStartupInput == restoredSelector)
@@ -127,6 +160,7 @@ struct CompletedRestoredAgentGenerationTests {
         )
         #expect(destination.restoredAgentLifecycle.startupInput(panelId: panelId) == restoredSelector)
         #expect(destination.restoredAgentResumeStatesByPanelId[panelId] == .awaitingAutoResumeCommand)
+        #expect(!destination.restoredAgentLifecycle.armStartupInputResend(panelId: panelId))
     }
 
     @Test

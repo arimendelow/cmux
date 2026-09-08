@@ -96,6 +96,9 @@ extension DockSplitStore {
             completedGeneration: detached.restoredAgentCompletedGeneration,
             startupInput: detached.restoredStartupInput
         )
+        if detached.shellActivityState == .promptIdle {
+            scheduleRestoredStartupInputResend(panelId: detached.panelId)
+        }
         managedAgentResumeBindingsByPanelId.removeValue(forKey: detached.panelId)
         if let resumeBinding = detached.resumeBinding {
             surfaceResumeBindingsByPanelId[detached.panelId] = resumeBinding
@@ -114,6 +117,10 @@ extension DockSplitStore {
     }
 
     func configureAgentHibernationResume(for terminal: TerminalPanel) {
+        terminal.surface.onExplicitInput = { [weak self, weak terminal] in
+            guard let self, let terminal else { return }
+            self.restoredAgentLifecycle.clearStartupInput(panelId: terminal.id)
+        }
         terminal.onRequestAgentHibernationResume = { [weak self, weak terminal] focus in
             guard let self, let terminal else { return false }
             return self.resumeAgentHibernation(panelId: terminal.id, focus: focus)

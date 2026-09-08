@@ -3915,6 +3915,10 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func configureTerminalPanel(_ terminalPanel: TerminalPanel) {
+        terminalPanel.surface.onExplicitInput = { [weak self, weak terminalPanel] in
+            guard let self, let terminalPanel else { return }
+            self.restoredAgentLifecycle.clearStartupInput(panelId: terminalPanel.id)
+        }
         terminalPanel.surface.onFontSizeLineageChanged = { [weak self, weak terminalPanel] lineage in
             guard let self, let terminalPanel,
                   self.lastTerminalConfigInheritancePanelId == terminalPanel.id,

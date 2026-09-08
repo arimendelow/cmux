@@ -357,6 +357,9 @@ extension Workspace {
             completedGeneration: detached.restoredAgentCompletedGeneration,
             startupInput: detached.restoredStartupInput
         )
+        if detached.shellActivityState == .promptIdle {
+            scheduleRestoredStartupInputResend(panelId: detached.panelId)
+        }
         invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: detached.panelId)
     }
 
