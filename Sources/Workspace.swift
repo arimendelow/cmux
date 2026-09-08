@@ -1379,7 +1379,7 @@ extension Workspace {
                 restorableAgent: restorableAgent
             )
             let resumeBindingForStartup =
-                workbenchAuthority == .controlledInAgencyHub ||
+                workbenchAuthority != .controlledHere ||
                 restoredHibernation != nil ||
                 (resumeBinding?.isProcessDetected == true && resumeBinding?.autoResume != true)
                     ? nil

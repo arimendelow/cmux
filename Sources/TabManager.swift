@@ -5915,6 +5915,7 @@ extension TabManager {
         hashStringMap(snapshot.environment, into: &hasher)
         hashAgentLaunchCommand(snapshot.launchCommand, into: &hasher)
         hashOptionalString(snapshot.permissionMode, into: &hasher)
+        hashOptionalString(snapshot.workbenchAuthority?.rawValue, into: &hasher)
         hasher.combine(snapshot.allowsAutomaticResume)
         hasher.combine(snapshot.launchFlavor)
         if snapshot.isProcessDetected {

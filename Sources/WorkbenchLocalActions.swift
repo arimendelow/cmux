@@ -675,8 +675,8 @@ enum WorkbenchLocalActionRouter {
             "phase": projection.phase.rawValue,
             "input_epoch": projection.inputEpoch,
             "mutation_eligible": projection.mutationEligible,
-            "authority": authority?.rawValue ?? "unadopted",
-            "resume_authority": resumeAuthority?.rawValue ?? "unavailable",
+            "authority": authority?.rawValue ?? WorkbenchSessionAuthority.unknown.rawValue,
+            "resume_authority": resumeAuthority?.rawValue ?? WorkbenchSessionAuthority.unknown.rawValue,
         ]
         if includeEvidence {
             response["pending_guidance"] = projection.pendingGuidance?.text ?? NSNull()

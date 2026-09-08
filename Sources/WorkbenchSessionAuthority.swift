@@ -1,45 +1,18 @@
 import Foundation
 
-enum WorkbenchSessionAuthority: String, Codable, Sendable {
+enum WorkbenchSessionAuthority: String, Sendable {
     case controlledHere
-    case controlledInAgencyHub
-
-    static func inferred(from launchCommand: AgentLaunchCommandSnapshot?) -> WorkbenchSessionAuthority {
-        guard let launchCommand else { return .controlledHere }
-        if launchCommand.environment?["CMUX_AGENT_LAUNCH_AUTHORITY"] == "agency-hub" {
-            return .controlledInAgencyHub
-        }
-        guard let executable = launchCommand.executablePath
-            ?? launchCommand.arguments.first
-            ?? launchCommand.launcher else {
-            return .controlledHere
-        }
-        let identifiesAgency = URL(fileURLWithPath: executable).lastPathComponent == "agency"
-            || launchCommand.launcher == "agency"
-            || launchCommand.arguments.first.map {
-                URL(fileURLWithPath: $0).lastPathComponent == "agency"
-            } == true
-        guard identifiesAgency else { return .controlledHere }
-        let arguments = launchCommand.arguments.prefix { $0 != "--" }
-        guard arguments.contains(where: { $0 == "copilot" || $0 == "cp" }),
-              arguments.contains(where: { $0 == "--hub" || $0 == "--session-manager" }) else {
-            return .controlledHere
-        }
-        return .controlledInAgencyHub
-    }
+    case controlledExternally
+    case unknown
 
     static func resolved(
         agent: SessionRestorableAgentSnapshot?,
-        binding: SurfaceResumeBindingSnapshot?
+        binding: SurfaceResumeBindingSnapshot?,
+        missingAuthority: WorkbenchSessionAuthority = OuroWorkbenchProduct.isCurrentBundle
+            ? .unknown
+            : .controlledHere
     ) -> WorkbenchSessionAuthority {
-        if let explicit = agent?.workbenchAuthority {
-            return explicit
-        }
-        if inferred(from: agent?.launchCommand) == .controlledInAgencyHub ||
-            inferred(from: binding?.launchCommand) == .controlledInAgencyHub {
-            return .controlledInAgencyHub
-        }
-        return .controlledHere
+        agent?.workbenchAuthority ?? binding?.workbenchAuthority ?? missingAuthority
     }
 
     static func preservingExplicitLocalAuthority(
@@ -66,7 +39,7 @@ enum WorkbenchSessionAuthority: String, Codable, Sendable {
         agent: SessionRestorableAgentSnapshot?,
         binding: SurfaceResumeBindingSnapshot?
     ) -> SessionRestorableAgentSnapshot? {
-        guard resolved(agent: agent, binding: binding) == .controlledInAgencyHub else {
+        guard resolved(agent: agent, binding: binding) != .controlledHere else {
             return nil
         }
         var snapshot: SessionRestorableAgentSnapshot
@@ -88,14 +61,12 @@ enum WorkbenchSessionAuthority: String, Codable, Sendable {
                 workingDirectory: binding.cwd ?? binding.launchCommand?.workingDirectory,
                 launchCommand: binding.launchCommand,
                 permissionMode: binding.permissionMode,
-                workbenchAuthority: .controlledInAgencyHub
+                workbenchAuthority: binding.workbenchAuthority
             )
         }
         guard snapshot.kind == .copilot else { return nil }
         snapshot.workbenchAuthority = .controlledHere
-        if inferred(from: snapshot.launchCommand) == .controlledInAgencyHub {
-            snapshot.launchCommand = nil
-        }
+        snapshot.launchCommand = nil
         return snapshot.resumeCommand == nil ? nil : snapshot
     }
 
@@ -104,8 +75,29 @@ enum WorkbenchSessionAuthority: String, Codable, Sendable {
     }
 }
 
+extension WorkbenchSessionAuthority: Codable {
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case Self.controlledHere.rawValue:
+            self = .controlledHere
+        case Self.controlledExternally.rawValue:
+            self = .controlledExternally
+        case Self.unknown.rawValue, "":
+            self = .unknown
+        default:
+            self = .controlledExternally
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 extension SessionRestorableAgentSnapshot {
     var effectiveWorkbenchAuthority: WorkbenchSessionAuthority {
-        workbenchAuthority ?? WorkbenchSessionAuthority.inferred(from: launchCommand)
+        workbenchAuthority ?? (OuroWorkbenchProduct.isCurrentBundle ? .unknown : .controlledHere)
     }
 }

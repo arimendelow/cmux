@@ -291,11 +291,35 @@ extension TerminalController {
                 Workspace.restorableAgentForSessionRestore(
                     target.restorableAgent,
                     resumeBinding: binding
-                )
+                ) ?? binding.flatMap { binding in
+                    guard binding.isAgentHookBinding,
+                          let rawKind = binding.kind,
+                          let kind = RestorableAgentKind(rawValue: rawKind),
+                          let sessionID = binding.checkpointId?.trimmingCharacters(
+                              in: .whitespacesAndNewlines
+                          ),
+                          !sessionID.isEmpty else {
+                        return nil
+                    }
+                    return SessionRestorableAgentSnapshot(
+                        kind: kind,
+                        sessionId: sessionID,
+                        workingDirectory: binding.cwd ?? binding.launchCommand?.workingDirectory,
+                        launchCommand: binding.launchCommand,
+                        permissionMode: binding.permissionMode,
+                        workbenchAuthority: binding.workbenchAuthority
+                    )
+                }
             } else {
                 nil
             }
         if let agent = compatibleAgent {
+            let bindingReplacedAgent = target.restorableAgent != nil
+                && target.restorableAgent?.sessionId != agent.sessionId
+            let source = target.restorableAgent == nil
+                || bindingReplacedAgent
+                ? binding?.source ?? "session-snapshot"
+                : "session-snapshot"
             let launchCommand = binding?.launchCommand ?? agent.launchCommand
             let workingDirectory = target.restoredResumeWorkingDirectory
                 ?? binding?.cwd
@@ -316,7 +340,7 @@ extension TerminalController {
                 modeRawValue: mode.rawValue,
                 kind: agent.kind.rawValue,
                 checkpointID: agent.sessionId,
-                source: "session-snapshot",
+                source: source,
                 workingDirectory: workingDirectory,
                 environment: binding?.environment ?? [:],
                 launchCommand: launchCommand.map {
@@ -325,12 +349,16 @@ extension TerminalController {
                         replaySafeEnvironmentFor: agent.kind.rawValue
                     )
                 },
-                preparedArguments: preparedArguments,
+                preparedArguments: target.restorableAgent == nil
+                    ? nil
+                    : preparedArguments,
                 preparedArgumentsWorkingDirectory: preparedArguments == nil
                     ? nil
                     : workingDirectory,
                 permissionMode: permissionMode,
-                legacyCommand: compatibilityBinding?.inlineStartupInput
+                legacyCommand: bindingReplacedAgent
+                    ? binding?.command ?? compatibilityBinding?.command
+                    : compatibilityBinding?.inlineStartupInput
             )
         }
         guard let binding else { return nil }

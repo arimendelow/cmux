@@ -263,7 +263,7 @@ enum SurfaceResumeApprovalPolicy: String, Codable, CaseIterable, Sendable {
 struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name, kind, command, cwd, checkpointId, source
-        case environment, autoResume, approvalPolicy, approvalRecordId
+        case environment, autoResume, approvalPolicy, approvalRecordId, workbenchAuthority
         case launchCommand, permissionMode, launchFlavor, updatedAt
     }
 
@@ -279,6 +279,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     var autoResume: Bool?
     var approvalPolicy: SurfaceResumeApprovalPolicy?
     var approvalRecordId: String?
+    var workbenchAuthority: WorkbenchSessionAuthority?
     var launchFlavor: SurfaceResumeLaunchFlavor
     /// Whether decoding observed a legacy binding without an execution location.
     private(set) var wasDecodedWithoutLaunchFlavor = false
@@ -297,6 +298,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         autoResume: Bool? = nil,
         approvalPolicy: SurfaceResumeApprovalPolicy? = nil,
         approvalRecordId: String? = nil,
+        workbenchAuthority: WorkbenchSessionAuthority? = nil,
         launchFlavor: SurfaceResumeLaunchFlavor = .local,
         updatedAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -319,6 +321,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         self.autoResume = autoResume
         self.approvalPolicy = approvalPolicy
         self.approvalRecordId = Self.normalized(approvalRecordId)
+        self.workbenchAuthority = workbenchAuthority
         self.launchFlavor = launchFlavor
         self.updatedAt = updatedAt
     }
@@ -342,6 +345,10 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
             autoResume: try container.decodeIfPresent(Bool.self, forKey: .autoResume),
             approvalPolicy: try container.decodeIfPresent(SurfaceResumeApprovalPolicy.self, forKey: .approvalPolicy),
             approvalRecordId: try container.decodeIfPresent(String.self, forKey: .approvalRecordId),
+            workbenchAuthority: try container.decodeIfPresent(
+                WorkbenchSessionAuthority.self,
+                forKey: .workbenchAuthority
+            ),
             launchFlavor: decodedLaunchFlavor ?? .local,
             updatedAt: try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt)
                 ?? Date().timeIntervalSince1970

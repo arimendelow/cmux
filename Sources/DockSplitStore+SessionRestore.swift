@@ -171,7 +171,7 @@ extension DockSplitStore {
             globalEnabled: autoResumeEnabled,
             wasRunning: agentWasRunning
         )
-        let resumeBindingForStartup = workbenchAuthority == .controlledInAgencyHub ||
+        let resumeBindingForStartup = workbenchAuthority != .controlledHere ||
             hibernation != nil ||
             (resumeBinding?.isProcessDetected == true && resumeBinding?.autoResume != true)
             ? nil

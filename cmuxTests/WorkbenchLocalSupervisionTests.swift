@@ -1444,7 +1444,7 @@ struct WorkbenchLocalActionTests {
             defaults: defaults,
             stateStore: store,
             enabled: true,
-            authority: { _, _, _ in .controlledInAgencyHub },
+            authority: { _, _, _ in .controlledExternally },
             processGeneration: stableProcessGeneration,
             effect: { _, _, _ in false }
         )
@@ -1484,7 +1484,7 @@ struct WorkbenchLocalActionTests {
         observe(phase: .silenceThresholdCrossed, revision: "active-hub", epoch: 3)
         var authorities: [WorkbenchSessionAuthority?] = [
             .controlledHere,
-            .controlledInAgencyHub,
+            .controlledExternally,
         ]
         let transferred = WorkbenchLocalActionRouter.stop(
             params: params(requestId: "stop-transferred", revision: "active-hub", epoch: 3),
@@ -1540,7 +1540,7 @@ struct WorkbenchLocalActionTests {
             resumeAuthority: { _, _, _ in .controlledHere }
         )
         let inspected = try successPayload(inspect)
-        #expect(inspected["authority"] as? String == "unadopted")
+        #expect(inspected["authority"] as? String == "unknown")
         #expect(inspected["resume_authority"] as? String == "controlledHere")
 
         let listed = try successPayload(
@@ -1752,7 +1752,7 @@ struct WorkbenchLocalActionTests {
             defaults: defaults,
             stateStore: store,
             enabled: true,
-            authority: { _, _, _ in .controlledInAgencyHub },
+            authority: { _, _, _ in .controlledExternally },
             effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
@@ -2222,34 +2222,35 @@ struct WorkbenchLocalActionTests {
             ) == nil
         )
 
-        let hubResumeSnapshot = SessionRestorableAgentSnapshot(
+        let externalResumeSnapshot = SessionRestorableAgentSnapshot(
             kind: .copilot,
             sessionId: completedSessionId,
             workingDirectory: "/tmp",
             launchCommand: nil,
             workbenchAuthority: nil
         )
-        target.restoredAgentSnapshotsByPanelId[surfaceId] = hubResumeSnapshot
+        target.restoredAgentSnapshotsByPanelId[surfaceId] = externalResumeSnapshot
         target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
         target.surfaceResumeBindingsByPanelId[surfaceId] = SurfaceResumeBindingSnapshot(
             name: "Copilot",
             kind: "copilot",
-            command: "agency copilot --hub",
+            command: "external-wrapper agent --resume \(completedSessionId)",
             cwd: "/tmp",
             checkpointId: completedSessionId,
             source: "agent-hook",
             launchCommand: AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "copilot", "--hub"],
+                launcher: "external-wrapper",
+                executablePath: "/usr/local/bin/external-wrapper",
+                arguments: ["external-wrapper", "agent"],
                 workingDirectory: "/tmp"
             ),
-            autoResume: false
+            autoResume: false,
+            workbenchAuthority: .controlledExternally
         )
         let targetPanel = try #require(target.panels[surfaceId] as? TerminalPanel)
         #expect(
             targetPanel.enterAgentHibernation(
-                agent: hubResumeSnapshot,
+                agent: externalResumeSnapshot,
                 lastActivityAt: .distantPast
             )
         )
@@ -2258,7 +2259,7 @@ struct WorkbenchLocalActionTests {
                 workspaceId: target.id,
                 surfaceId: surfaceId,
                 sessionId: completedSessionId
-            ) == .controlledInAgencyHub
+            ) == .controlledExternally
         )
 
         let existingRequestId = "review-existing"

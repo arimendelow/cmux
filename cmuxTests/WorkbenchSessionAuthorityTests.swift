@@ -17,7 +17,11 @@ struct WorkbenchSessionAuthorityTests {
             workingDirectory: "/tmp"
         )
 
-        #expect(WorkbenchSessionAuthority.resolved(agent: nil, binding: nil) == .unknown)
+        #expect(WorkbenchSessionAuthority.resolved(
+            agent: nil,
+            binding: nil,
+            missingAuthority: .unknown
+        ) == .unknown)
         #expect(WorkbenchSessionAuthority.resolved(
             agent: SessionRestorableAgentSnapshot(
                 kind: .copilot,
@@ -25,7 +29,8 @@ struct WorkbenchSessionAuthorityTests {
                 workingDirectory: "/tmp",
                 launchCommand: launch
             ),
-            binding: nil
+            binding: nil,
+            missingAuthority: .unknown
         ) == .unknown)
         #expect(!WorkbenchSessionAuthority.unknown.allowsLocalAutoResume(
             globalEnabled: true,
@@ -62,70 +67,7 @@ struct WorkbenchSessionAuthorityTests {
         #expect(WorkbenchSessionAuthority.localTakeoverSnapshot(agent: nil, binding: binding)?.workbenchAuthority == .controlledHere)
     }
 
-    @Test(arguments: [
-        ["/usr/local/bin/agency", "copilot", "--hub"],
-        ["agency", "--no-aec", "cp", "--session-manager"],
-        ["agency", "--verbosity", "debug", "copilot", "--hub"],
-        ["copilot", "--hub"],
-    ])
-    func exactAgencyHubLaunchesAreDetected(_ arguments: [String]) {
-        let launch = AgentLaunchCommandSnapshot(
-            launcher: "agency",
-            executablePath: "/usr/local/bin/agency",
-            arguments: arguments,
-            workingDirectory: "/tmp",
-            environment: nil,
-            capturedAt: 1,
-            source: "test"
-        )
-        #expect(WorkbenchSessionAuthority.inferred(from: launch) == .controlledInAgencyHub)
-    }
-
-    @Test func AgencyManagedCopilotChildRetainsHubAuthority() {
-        let launch = AgentLaunchCommandSnapshot(
-            launcher: "copilot",
-            executablePath: "/usr/local/bin/copilot",
-            arguments: ["/usr/local/bin/copilot", "--no-auto-update"],
-            workingDirectory: "/tmp",
-            environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
-        )
-        #expect(WorkbenchSessionAuthority.inferred(from: launch) == .controlledInAgencyHub)
-    }
-
-    @Test func similarLaunchesRemainControlledHere() {
-        for launch in [
-            AgentLaunchCommandSnapshot(
-                launcher: "copilot",
-                executablePath: "/usr/local/bin/copilot",
-                arguments: ["copilot", "--hub"],
-                workingDirectory: nil
-            ),
-            AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "copilot", "--", "--hub"],
-                workingDirectory: nil
-            ),
-            AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "claude", "--hub"],
-                workingDirectory: nil
-            ),
-        ] {
-            #expect(WorkbenchSessionAuthority.inferred(from: launch) == .controlledHere)
-        }
-    }
-
-    @Test func MissingAuthorityEvidencePreservesLocalBehavior() {
-        #expect(WorkbenchSessionAuthority.inferred(from: nil) == .controlledHere)
-        #expect(WorkbenchSessionAuthority.inferred(from: AgentLaunchCommandSnapshot(
-            launcher: nil,
-            executablePath: nil,
-            arguments: [],
-            workingDirectory: nil
-        )) == .controlledHere)
-        #expect(WorkbenchSessionAuthority.resolved(agent: nil, binding: nil) == .controlledHere)
+    @Test func LocalAuthorityStillRequiresTheGlobalPreferenceAndRunningEvidence() {
         #expect(!WorkbenchSessionAuthority.controlledHere.allowsLocalAutoResume(
             globalEnabled: false,
             wasRunning: true
@@ -151,19 +93,14 @@ struct WorkbenchSessionAuthorityTests {
             agent: nil,
             binding: SurfaceResumeBindingSnapshot(
                 kind: "claude",
-                command: "agency copilot --hub",
+                command: "external-wrapper agent",
                 checkpointId: "session",
                 source: "agent-hook",
-                launchCommand: AgentLaunchCommandSnapshot(
-                    launcher: "agency",
-                    executablePath: "/usr/local/bin/agency",
-                    arguments: ["agency", "copilot", "--hub"],
-                    workingDirectory: "/tmp"
-                )
+                workbenchAuthority: .controlledExternally
             )
         ) == nil)
         var wrongKind = local
-        wrongKind.workbenchAuthority = .controlledInAgencyHub
+        wrongKind.workbenchAuthority = .controlledExternally
         #expect(
             WorkbenchSessionAuthority.localTakeoverSnapshot(
                 agent: wrongKind,
@@ -172,11 +109,11 @@ struct WorkbenchSessionAuthorityTests {
         )
     }
 
-    @Test func HubAuthorityBlocksEveryLocalContinuationUntilExplicitTakeover() throws {
+    @Test func ExternalAuthorityBlocksEveryLocalContinuationUntilExplicitTakeover() throws {
         var snapshot = localSnapshot()
-        snapshot.workbenchAuthority = .controlledInAgencyHub
+        snapshot.workbenchAuthority = .controlledExternally
 
-        #expect(snapshot.effectiveWorkbenchAuthority == .controlledInAgencyHub)
+        #expect(snapshot.effectiveWorkbenchAuthority == .controlledExternally)
         #expect(!snapshot.effectiveWorkbenchAuthority.allowsLocalAutoResume(globalEnabled: true, wasRunning: true))
         #expect(snapshot.preparedResumeArguments(
             launchCommand: snapshot.launchCommand,
@@ -195,34 +132,29 @@ struct WorkbenchSessionAuthorityTests {
         #expect(WorkbenchSessionAuthority.resolved(
             agent: snapshot,
             binding: SurfaceResumeBindingSnapshot(
-                command: "agency copilot --hub",
-                launchCommand: AgentLaunchCommandSnapshot(
-                    launcher: "agency",
-                    executablePath: "/usr/local/bin/agency",
-                    arguments: ["agency", "copilot", "--hub"],
-                    workingDirectory: "/tmp"
-                )
+                command: "external-wrapper agent",
+                workbenchAuthority: .controlledExternally
             )
         ) == .controlledHere)
     }
 
-    @Test func AuthorityRoundTripsAndLegacySnapshotsInferFromLaunchProvenance() throws {
+    @Test func AuthorityRoundTripsAndLegacySnapshotsRemainUnknownWithoutAttestation() throws {
         var explicit = localSnapshot()
-        explicit.workbenchAuthority = .controlledInAgencyHub
+        explicit.workbenchAuthority = .controlledExternally
         let decoded = try JSONDecoder().decode(
             SessionRestorableAgentSnapshot.self,
             from: JSONEncoder().encode(explicit)
         )
-        #expect(decoded.workbenchAuthority == .controlledInAgencyHub)
+        #expect(decoded.workbenchAuthority == .controlledExternally)
 
         let legacy = SessionRestorableAgentSnapshot(
             kind: .codex,
             sessionId: "11111111-1111-4111-8111-111111111111",
             workingDirectory: "/tmp",
             launchCommand: AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "copilot", "--hub"],
+                launcher: "external-wrapper",
+                executablePath: "/usr/local/bin/external-wrapper",
+                arguments: ["external-wrapper", "agent"],
                 workingDirectory: "/tmp"
             )
         )
@@ -231,17 +163,21 @@ struct WorkbenchSessionAuthorityTests {
             from: JSONEncoder().encode(legacy)
         )
         #expect(inferred.workbenchAuthority == nil)
-        #expect(inferred.effectiveWorkbenchAuthority == .controlledInAgencyHub)
+        #expect(WorkbenchSessionAuthority.resolved(
+            agent: inferred,
+            binding: nil,
+            missingAuthority: .unknown
+        ) == .unknown)
     }
 
     @Test func AutosaveFingerprintIncludesAuthority() {
         let local = localSnapshot()
-        var hub = local
-        hub.workbenchAuthority = .controlledInAgencyHub
+        var external = local
+        external.workbenchAuthority = .controlledExternally
 
         #expect(
             TabManager.restorableAgentSnapshotFingerprint(local) !=
-                TabManager.restorableAgentSnapshotFingerprint(hub)
+                TabManager.restorableAgentSnapshotFingerprint(external)
         )
     }
 
@@ -250,7 +186,7 @@ struct WorkbenchSessionAuthorityTests {
         let manager = TabManager(autoWelcomeIfNeeded: false)
         let workspace = try #require(manager.selectedWorkspace)
         let panelId = try #require(workspace.focusedPanelId)
-        var hub = SessionRestorableAgentSnapshot(
+        var external = SessionRestorableAgentSnapshot(
             kind: .copilot,
             sessionId: "77777777-7777-4777-8777-777777777777",
             workingDirectory: "/tmp",
@@ -258,23 +194,22 @@ struct WorkbenchSessionAuthorityTests {
                 launcher: "copilot",
                 executablePath: "/usr/local/bin/copilot",
                 arguments: ["/usr/local/bin/copilot"],
-                workingDirectory: "/tmp",
-                environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
+                workingDirectory: "/tmp"
             )
         )
-        hub.workbenchAuthority = .controlledInAgencyHub
-        workspace.restoredAgentSnapshotsByPanelId[panelId] = hub
+        external.workbenchAuthority = .controlledExternally
+        workspace.restoredAgentSnapshotsByPanelId[panelId] = external
         workspace.restoredAgentResumeStatesByPanelId[panelId] = .manualResumeAvailable
         let before = manager.sessionAutosaveFingerprint()
 
-        #expect(workspace.takeControlOfHubSession(panelId: panelId) { _, _ in true })
+        #expect(workspace.takeControlOfExternalSession(panelId: panelId) { _, _ in true })
         #expect(manager.sessionAutosaveFingerprint() != before)
     }
 
-    @Test func HookIndexPreservesHubAuthorityBeforeAgencyWrapperNormalization() throws {
+    @Test func HookIndexDoesNotInferAuthorityFromLaunchMetadata() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
-            .appendingPathComponent("workbench-hub-authority-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("workbench-external-authority-\(UUID().uuidString)", isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
         let repo = root.appendingPathComponent("repo", isDirectory: true)
         let transcript = root.appendingPathComponent("rollout.jsonl")
@@ -295,9 +230,9 @@ struct WorkbenchSessionAuthorityTests {
             "transcriptPath": transcript.path,
             "updatedAt": 1,
             "launchCommand": [
-                "launcher": "agency",
-                "executablePath": "/usr/local/bin/agency",
-                "arguments": ["agency", "copilot", "--hub"],
+                "launcher": "external-wrapper",
+                "executablePath": "/usr/local/bin/external-wrapper",
+                "arguments": ["external-wrapper", "agent"],
                 "workingDirectory": repo.path,
                 "capturedAt": 1,
                 "source": "process",
@@ -317,12 +252,11 @@ struct WorkbenchSessionAuthorityTests {
             fileManager: fileManager
         ).snapshot(workspaceId: workspaceId, panelId: panelId)
         #expect(snapshot?.kind == .copilot)
-        #expect(snapshot?.workbenchAuthority == .controlledInAgencyHub)
-        #expect(snapshot?.launchCommand == nil)
+        #expect(snapshot?.workbenchAuthority == nil)
     }
 
     @MainActor
-    @Test func WorkspaceRestoreKeepsAHubSessionManualWhenGlobalAutoResumeIsOn() throws {
+    @Test func WorkspaceRestoreKeepsAnExternalSessionManualWhenGlobalAutoResumeIsOn() throws {
         let defaults = UserDefaults.standard
         let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
         let previous = defaults.object(forKey: key)
@@ -340,12 +274,12 @@ struct WorkbenchSessionAuthorityTests {
         let panelId = try #require(source.focusedPanelId)
         source.updatePanelDirectory(panelId: panelId, directory: "/tmp")
         var agent = localSnapshot()
-        agent.workbenchAuthority = .controlledInAgencyHub
+        agent.workbenchAuthority = .controlledExternally
         source.updatePanelShellActivityState(panelId: panelId, state: .commandRunning)
         source.setRestoredAgentSnapshotForTesting(agent, panelId: panelId)
         let snapshot = source.sessionSnapshot(includeScrollback: false)
         let sourcePanel = try #require(snapshot.panels.first(where: { $0.id == panelId }))
-        #expect(sourcePanel.terminal?.agent?.effectiveWorkbenchAuthority == .controlledInAgencyHub)
+        #expect(sourcePanel.terminal?.agent?.effectiveWorkbenchAuthority == .controlledExternally)
 
         let restored = Workspace()
         let restoredPanelId = try #require(restored.restoreSessionSnapshot(snapshot)[panelId])
@@ -353,7 +287,7 @@ struct WorkbenchSessionAuthorityTests {
     }
 
     @MainActor
-    @Test func BindingOnlyHubRestoreCannotBypassAuthority() throws {
+    @Test func BindingOnlyExternalRestoreCannotBypassAuthority() throws {
         let defaults = UserDefaults.standard
         let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
         let previous = defaults.object(forKey: key)
@@ -377,17 +311,18 @@ struct WorkbenchSessionAuthorityTests {
                 SurfaceResumeBindingSnapshot(
                     name: "Copilot",
                     kind: "copilot",
-                    command: "agency copilot --hub",
+                    command: "external-wrapper agent --resume \(sessionId)",
                     cwd: "/tmp",
                     checkpointId: sessionId,
                     source: "agent-hook",
                     launchCommand: AgentLaunchCommandSnapshot(
-                        launcher: "agency",
-                        executablePath: "/usr/local/bin/agency",
-                        arguments: ["agency", "copilot", "--hub"],
+                        launcher: "external-wrapper",
+                        executablePath: "/usr/local/bin/external-wrapper",
+                        arguments: ["external-wrapper", "agent"],
                         workingDirectory: "/tmp"
                     ),
                     autoResume: true,
+                    workbenchAuthority: .controlledExternally,
                     updatedAt: 1
                 ),
         ])
@@ -400,10 +335,7 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(savedTerminal.agent == nil)
         let savedBinding = try #require(savedTerminal.resumeBinding)
-        #expect(
-            WorkbenchSessionAuthority.inferred(from: savedBinding.launchCommand) ==
-                .controlledInAgencyHub
-        )
+        #expect(savedBinding.workbenchAuthority == .controlledExternally)
         #expect(Workspace.surfaceResumeStartupInput(
             savedBinding,
             autoResumeAgentSessions: true,
@@ -420,17 +352,14 @@ struct WorkbenchSessionAuthorityTests {
         let restoredBinding = try #require(
             restored.surfaceResumeBindingsByPanelId[restoredPanelId]
         )
-        #expect(
-            WorkbenchSessionAuthority.inferred(from: restoredBinding.launchCommand) ==
-                .controlledInAgencyHub
-        )
+        #expect(restoredBinding.workbenchAuthority == .controlledExternally)
         #expect(restored.restoredAgentResumeStatesByPanelId[restoredPanelId] == nil)
-        #expect(restored.canTakeControlOfHubSession(panelId: restoredPanelId))
-        #expect(restored.takeControlOfHubSession(panelId: restoredPanelId) { _, _ in true })
+        #expect(restored.canTakeControlOfExternalSession(panelId: restoredPanelId))
+        #expect(restored.takeControlOfExternalSession(panelId: restoredPanelId) { _, _ in true })
     }
 
     @MainActor
-    @Test func DockBindingOnlyHubRestoreCannotBypassAuthority() throws {
+    @Test func DockBindingOnlyExternalRestoreCannotBypassAuthority() throws {
         let suiteName = "WorkbenchSessionAuthorityTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -440,23 +369,24 @@ struct WorkbenchSessionAuthorityTests {
         let binding = SurfaceResumeBindingSnapshot(
             name: "Copilot",
             kind: "copilot",
-            command: "agency copilot --hub",
+            command: "external-wrapper agent --resume \(sessionId)",
             cwd: "/tmp",
             checkpointId: sessionId,
             source: "agent-hook",
             launchCommand: AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "copilot", "--hub"],
+                launcher: "external-wrapper",
+                executablePath: "/usr/local/bin/external-wrapper",
+                arguments: ["external-wrapper", "agent"],
                 workingDirectory: "/tmp"
             ),
             autoResume: true,
+            workbenchAuthority: .controlledExternally,
             updatedAt: 1
         )
         let panelSnapshot = SessionPanelSnapshot(
             id: savedPanelId,
             type: .terminal,
-            title: "Hub-owned",
+            title: "Externally controlled",
             customTitle: nil,
             directory: "/tmp",
             isPinned: false,
@@ -498,8 +428,8 @@ struct WorkbenchSessionAuthorityTests {
                 .manualResumeAvailable
         )
         var sent = ""
-        #expect(store.canTakeControlOfHubSession(panelId: restoredPanelId))
-        #expect(store.takeControlOfHubSession(panelId: restoredPanelId) { _, input in
+        #expect(store.canTakeControlOfExternalSession(panelId: restoredPanelId))
+        #expect(store.takeControlOfExternalSession(panelId: restoredPanelId) { _, input in
             sent = input
             return true
         })
@@ -518,42 +448,41 @@ struct WorkbenchSessionAuthorityTests {
         let workspace = Workspace()
         let panelId = try #require(workspace.focusedPanelId)
         let sessionId = "55555555-5555-4555-8555-555555555555"
-        let hubLaunch = AgentLaunchCommandSnapshot(
+        let externalLaunch = AgentLaunchCommandSnapshot(
             launcher: "copilot",
             executablePath: "/usr/local/bin/copilot",
             arguments: ["/usr/local/bin/copilot", "--no-auto-update"],
-            workingDirectory: "/tmp",
-            environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
+            workingDirectory: "/tmp"
         )
         workspace.restoredAgentSnapshotsByPanelId[panelId] = SessionRestorableAgentSnapshot(
             kind: .copilot,
             sessionId: sessionId,
             workingDirectory: "/tmp",
-            launchCommand: hubLaunch,
-            workbenchAuthority: .controlledInAgencyHub
+            launchCommand: externalLaunch,
+            workbenchAuthority: .controlledExternally
         )
         workspace.restoredAgentResumeStatesByPanelId[panelId] = .manualResumeAvailable
         workspace.surfaceResumeBindingsByPanelId[panelId] = SurfaceResumeBindingSnapshot(
             name: "Copilot",
             kind: "copilot",
-            command: "agency copilot --hub",
+            command: "external-wrapper agent --resume \(sessionId)",
             cwd: "/tmp",
             checkpointId: sessionId,
             source: "agent-hook",
-            launchCommand: hubLaunch,
-            autoResume: true
+            launchCommand: externalLaunch,
+            autoResume: true,
+            workbenchAuthority: .controlledExternally
         )
         var sent = ""
 
-        #expect(workspace.canTakeControlOfHubSession(panelId: panelId))
-        #expect(workspace.takeControlOfHubSession(panelId: panelId) { _, input in
+        #expect(workspace.canTakeControlOfExternalSession(panelId: panelId))
+        #expect(workspace.takeControlOfExternalSession(panelId: panelId) { _, input in
             sent = input
             return true
         })
         #expect(sent.contains("copilot"))
         #expect(sent.contains("--resume"))
-        #expect(!sent.contains("agency"))
-        #expect(!sent.contains("--hub"))
+        #expect(!sent.contains("external-wrapper"))
         #expect(
             workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority ==
                 .controlledHere
@@ -586,7 +515,6 @@ struct WorkbenchSessionAuthorityTests {
                 "executablePath": "/usr/local/bin/copilot",
                 "arguments": ["/usr/local/bin/copilot", "--no-auto-update"],
                 "workingDirectory": "/tmp",
-                "environment": ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"],
                 "capturedAt": 2,
                 "source": "process",
             ],
@@ -612,22 +540,23 @@ struct WorkbenchSessionAuthorityTests {
         #expect(persistedAgent.launchCommand == nil)
 
         workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority =
-            .controlledInAgencyHub
+            .controlledExternally
         workspace.restoredAgentResumeStatesByPanelId[panelId] = .manualResumeAvailable
         workspace.surfaceResumeBindingsByPanelId[panelId] = SurfaceResumeBindingSnapshot(
-            command: "agency copilot --hub",
-            launchCommand: hubLaunch
+            command: "external-wrapper agent",
+            launchCommand: externalLaunch,
+            workbenchAuthority: .controlledExternally
         )
-        #expect(!workspace.takeControlOfHubSession(panelId: panelId) { _, _ in false })
+        #expect(!workspace.takeControlOfExternalSession(panelId: panelId) { _, _ in false })
         #expect(
             workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority ==
-                .controlledInAgencyHub
+                .controlledExternally
         )
         #expect(workspace.surfaceResumeBindingsByPanelId[panelId] != nil)
     }
 
     @MainActor
-    @Test func BindingOnlyWorkspaceHubSessionCanBeTakenOverExplicitly() throws {
+    @Test func BindingOnlyWorkspaceExternalSessionCanBeTakenOverExplicitly() throws {
         let workspace = Workspace()
         let panelId = try #require(workspace.focusedPanelId)
         let sessionId = "66666666-6666-4666-8666-666666666666"
@@ -643,14 +572,14 @@ struct WorkbenchSessionAuthorityTests {
                 launcher: "copilot",
                 executablePath: "/usr/local/bin/copilot",
                 arguments: ["/usr/local/bin/copilot", "--no-auto-update"],
-                workingDirectory: "/tmp",
-                environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
+                workingDirectory: "/tmp"
             ),
-            autoResume: true
+            autoResume: true,
+            workbenchAuthority: .controlledExternally
         )
 
-        #expect(workspace.canTakeControlOfHubSession(panelId: panelId))
-        #expect(workspace.takeControlOfHubSession(panelId: panelId) { _, _ in true })
+        #expect(workspace.canTakeControlOfExternalSession(panelId: panelId))
+        #expect(workspace.takeControlOfExternalSession(panelId: panelId) { _, _ in true })
         #expect(
             workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority ==
                 .controlledHere

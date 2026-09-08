@@ -17,17 +17,17 @@ extension DockSplitStore {
         agentRuntimeByPanelId.removeValue(forKey: panelId)
     }
 
-    func canTakeControlOfHubSession(panelId: UUID) -> Bool {
-        hubSessionLocalTakeover(panelId: panelId) != nil
+    func canTakeControlOfExternalSession(panelId: UUID) -> Bool {
+        externalSessionLocalTakeover(panelId: panelId) != nil
     }
 
     @discardableResult
-    func takeControlOfHubSession(
+    func takeControlOfExternalSession(
         panelId: UUID,
         send: (TerminalPanel, String) -> Bool
     ) -> Bool {
         guard let terminal = panels[panelId] as? TerminalPanel,
-              let takeover = hubSessionLocalTakeover(panelId: panelId),
+              let takeover = externalSessionLocalTakeover(panelId: panelId),
               send(terminal, takeover.input) else {
             return false
         }
@@ -39,7 +39,7 @@ extension DockSplitStore {
         return true
     }
 
-    private func hubSessionLocalTakeover(
+    private func externalSessionLocalTakeover(
         panelId: UUID
     ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
         guard restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable,

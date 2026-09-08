@@ -1294,9 +1294,9 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
                 executablePath: "/usr/local/bin/copilot",
                 arguments: ["/usr/local/bin/copilot"],
                 workingDirectory: "/tmp",
-                environment: ["CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub"]
+                environment: nil
             ),
-            workbenchAuthority: .controlledInAgencyHub
+            workbenchAuthority: .controlledExternally
         )
         workspace.restoredAgentResumeStatesByPanelId[panelId] = .manualResumeAvailable
         let menu = NSMenu()
