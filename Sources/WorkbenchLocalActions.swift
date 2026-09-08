@@ -751,28 +751,62 @@ enum WorkbenchLocalActionRouter {
     }
 
     private static func liveChanges(afterSequence: Int64?) -> [String: Any] {
-        let retained = CmuxEventBus.shared.retainedSnapshot()
-        let latest = CmuxEventBus.shared.latestSequence
+        let snapshot = CmuxEventBus.shared.retainedSnapshotWithLatestSequence()
+        return changesPayload(
+            events: snapshot.events,
+            latestSequence: snapshot.latestSequence,
+            afterSequence: afterSequence,
+            limit: 200
+        )
+    }
+
+    private static func changesPayload(
+        events retained: [[String: Any]],
+        latestSequence latest: Int64,
+        afterSequence: Int64?,
+        limit: Int
+    ) -> [String: Any] {
         let oldest = retained.first.flatMap { CmuxEventBus.int64($0["seq"]) } ?? latest + 1
         let requested = afterSequence ?? latest
         let gap = afterSequence.map { $0 < oldest - 1 || $0 > latest } ?? false
         let allowedCategories: Set<String> = ["window", "workspace", "pane", "surface", "agent"]
-        let events = retained.filter { event in
+        let matchingEvents = retained.filter { event in
             guard let sequence = CmuxEventBus.int64(event["seq"]),
                   sequence > requested,
                   let category = event["category"] as? String else {
                 return false
             }
             return allowedCategories.contains(category)
-        }.suffix(200)
+        }
+        let page = Array(matchingEvents.prefix(max(1, limit)))
+        let returnedThrough = page.last.flatMap { CmuxEventBus.int64($0["seq"]) }
+            ?? min(requested, latest)
         return [
             "after_sequence": afterSequence.map { NSNumber(value: $0) } ?? NSNull(),
             "oldest_sequence": oldest,
             "latest_sequence": latest,
+            "returned_through_sequence": returnedThrough,
+            "has_more": matchingEvents.count > page.count,
             "gap": gap,
-            "events": Array(events),
+            "events": page,
         ]
     }
+
+    #if DEBUG
+    static func changesForTesting(
+        events: [[String: Any]],
+        latestSequence: Int64,
+        afterSequence: Int64?,
+        limit: Int
+    ) -> [String: Any] {
+        changesPayload(
+            events: events,
+            latestSequence: latestSequence,
+            afterSequence: afterSequence,
+            limit: limit
+        )
+    }
+    #endif
 
     private static func boundedSummary(_ value: Any?) -> String? {
         guard let raw = value as? String else { return nil }

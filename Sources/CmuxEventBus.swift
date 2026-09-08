@@ -310,6 +310,12 @@ final class CmuxEventBus: @unchecked Sendable {
         return retained
     }
 
+    func retainedSnapshotWithLatestSequence() -> (events: [[String: Any]], latestSequence: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (retained, nextSequence - 1)
+    }
+
     #if DEBUG
     func resetForTesting() {
         lock.lock()

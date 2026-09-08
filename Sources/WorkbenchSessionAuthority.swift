@@ -12,7 +12,16 @@ enum WorkbenchSessionAuthority: String, Sendable {
             ? .unknown
             : .controlledHere
     ) -> WorkbenchSessionAuthority {
-        agent?.workbenchAuthority ?? binding?.workbenchAuthority ?? missingAuthority
+        if let authority = agent?.workbenchAuthority ?? binding?.workbenchAuthority {
+            return authority
+        }
+        guard agent != nil || binding != nil else {
+            return missingAuthority
+        }
+        guard agent != nil || binding?.isAgentHookBinding == true else {
+            return .controlledHere
+        }
+        return missingAuthority
     }
 
     static func preservingExplicitLocalAuthority(
