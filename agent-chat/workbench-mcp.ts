@@ -46,8 +46,14 @@ function requireExactKeys(value: Record<string, unknown>, allowed: string[]): vo
 function actionArguments(name: string, raw: unknown): Record<string, unknown> {
   const args = object(raw);
   if (name === "workbench_list") {
-    requireExactKeys(args, []);
-    return {};
+    requireExactKeys(args, ["after_sequence"]);
+    if (args.after_sequence === undefined) return {};
+    if (typeof args.after_sequence !== "number"
+      || !Number.isSafeInteger(args.after_sequence)
+      || args.after_sequence < 0) {
+      throw new Error("after_sequence must be a non-negative integer");
+    }
+    return { after_sequence: args.after_sequence };
   }
   if (name === "workbench_inspect") {
     requireExactKeys(args, ["workspace_id", "surface_id"]);
@@ -179,7 +185,13 @@ export function workbenchToolDefinitions() {
       description: "List compact deterministic projections for observed local Workbench workers.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          after_sequence: {
+            type: "integer",
+            minimum: 0,
+            description: "Optional last-seen Workbench event sequence for bounded topology deltas.",
+          },
+        },
         additionalProperties: false,
       },
     },

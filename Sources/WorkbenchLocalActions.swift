@@ -56,6 +56,8 @@ enum WorkbenchLocalActionRouter {
         _ surfaceId: UUID,
         _ sessionId: String
     ) -> Set<AgentPIDProcessIdentity>?
+    typealias TopologyResolver = @MainActor () -> [String: Any]
+    typealias ChangesResolver = @MainActor (_ afterSequence: Int64?) -> [String: Any]
 
     static let receiptDefaultsKey = "workbench.local-actions.v1"
     private static let requestIdPattern = #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"#
@@ -66,13 +68,16 @@ enum WorkbenchLocalActionRouter {
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
         authority: AuthorityResolver? = nil,
-        resumeAuthority: AuthorityResolver? = nil
+        resumeAuthority: AuthorityResolver? = nil,
+        topology: TopologyResolver? = nil,
+        changes: ChangesResolver? = nil
     ) -> TerminalController.V2CallResult {
         guard enabled else {
             return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
         }
-        guard params.isEmpty else {
-            return .err(code: "invalid_params", message: "list accepts no parameters", data: nil)
+        guard hasOnlyKeys(params, allowed: ["after_sequence"]),
+              let afterSequence = optionalSequence(params["after_sequence"]) else {
+            return .err(code: "invalid_params", message: "after_sequence must be a non-negative integer", data: nil)
         }
         let resolveAuthority = authority ?? liveAuthority
         let resolveResumeAuthority = resumeAuthority ?? liveResumeAuthority
@@ -84,7 +89,13 @@ enum WorkbenchLocalActionRouter {
                 includeEvidence: false
             )
         }
-        return .ok(["sessions": Array(sessions)])
+        let resolveTopology = topology ?? liveTopology
+        let resolveChanges = changes ?? liveChanges
+        return .ok([
+            "topology": resolveTopology(),
+            "changes": resolveChanges(afterSequence),
+            "sessions": Array(sessions),
+        ])
     }
 
     static func inspect(
@@ -608,6 +619,112 @@ enum WorkbenchLocalActionRouter {
     private static func uuid(_ value: Any?) -> UUID? {
         guard let raw = value as? String else { return nil }
         return UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func optionalSequence(_ value: Any?) -> Int64?? {
+        guard let value else { return .some(nil) }
+        if let number = value as? NSNumber,
+           CFGetTypeID(number) != CFBooleanGetTypeID() {
+            let sequence = number.int64Value
+            guard sequence >= 0, number.compare(NSNumber(value: sequence)) == .orderedSame else {
+                return nil
+            }
+            return .some(sequence)
+        }
+        if let sequence = value as? Int, sequence >= 0 {
+            return .some(Int64(sequence))
+        }
+        if let sequence = value as? Int64, sequence >= 0 {
+            return .some(sequence)
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func liveTopology() -> [String: Any] {
+        let tree = TerminalController.shared.controlSystemTreeWindows(
+            requestedWindowID: nil,
+            includeAllWindows: true,
+            focusedWindowID: nil,
+            workspaceFilter: nil
+        )
+        return [
+            "revision": CmuxEventBus.shared.latestSequence,
+            "windows": tree.windows.map(topologyWindow),
+        ]
+    }
+
+    private static func topologyWindow(_ node: ControlSystemTreeWindowNode) -> [String: Any] {
+        [
+            "window_id": node.summary.windowID.uuidString,
+            "index": node.index,
+            "is_key": node.summary.isKeyWindow,
+            "is_visible": node.summary.isVisible,
+            "selected_workspace_id": node.summary.selectedWorkspaceID?.uuidString ?? NSNull(),
+            "workspaces": node.workspaces.map(topologyWorkspace),
+        ]
+    }
+
+    private static func topologyWorkspace(_ node: ControlSystemTreeWorkspaceNode) -> [String: Any] {
+        [
+            "workspace_id": node.workspaceID.uuidString,
+            "index": node.index,
+            "title": node.title,
+            "description": node.description ?? NSNull(),
+            "selected": node.isSelected,
+            "pinned": node.isPinned,
+            "panes": node.panes.map(topologyPane),
+        ]
+    }
+
+    private static func topologyPane(_ node: ControlSystemTreePaneNode) -> [String: Any] {
+        [
+            "pane_id": node.paneID.uuidString,
+            "index": node.index,
+            "focused": node.isFocused,
+            "selected_surface_id": node.selectedSurfaceID?.uuidString ?? NSNull(),
+            "dock_scope": node.dockScopeRawValue ?? NSNull(),
+            "surfaces": node.surfaces.map(topologySurface),
+        ]
+    }
+
+    private static func topologySurface(_ node: ControlSystemTreeSurfaceNode) -> [String: Any] {
+        [
+            "surface_id": node.surfaceID.uuidString,
+            "index": node.index,
+            "index_in_pane": node.indexInPane ?? NSNull(),
+            "type": node.typeRawValue,
+            "title": node.title,
+            "focused": node.isFocused,
+            "selected": node.isSelected,
+            "tty": node.tty ?? NSNull(),
+            "url": node.isBrowser ? node.url ?? "" : NSNull(),
+            "dock_scope": node.dockScopeRawValue ?? NSNull(),
+        ]
+    }
+
+    private static func liveChanges(afterSequence: Int64?) -> [String: Any] {
+        let retained = CmuxEventBus.shared.retainedSnapshot()
+        let latest = CmuxEventBus.shared.latestSequence
+        let oldest = retained.first.flatMap { CmuxEventBus.int64($0["seq"]) } ?? latest + 1
+        let requested = afterSequence ?? latest
+        let gap = afterSequence.map { $0 < oldest - 1 || $0 > latest } ?? false
+        let allowedCategories: Set<String> = ["window", "workspace", "pane", "surface", "agent"]
+        let events = retained.filter { event in
+            guard let sequence = CmuxEventBus.int64(event["seq"]),
+                  sequence > requested,
+                  let category = event["category"] as? String else {
+                return false
+            }
+            return allowedCategories.contains(category)
+        }.suffix(200)
+        return [
+            "after_sequence": afterSequence.map { NSNumber(value: $0) } ?? NSNull(),
+            "oldest_sequence": oldest,
+            "latest_sequence": latest,
+            "gap": gap,
+            "events": Array(events),
+        ]
     }
 
     private static func boundedSummary(_ value: Any?) -> String? {
