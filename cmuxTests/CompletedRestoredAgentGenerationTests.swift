@@ -164,6 +164,30 @@ struct CompletedRestoredAgentGenerationTests {
     }
 
     @Test
+    func dockAdoptionRestoresIdleStateBeforeArmingStartupReplay() throws {
+        let source = Workspace()
+        let panelId = try #require(source.focusedPanelId)
+        let terminal = try #require(source.terminalPanel(for: panelId))
+        source.restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        source.restoredAgentLifecycle.registerStartupInput(restoredSelector, panelId: panelId)
+        source.panelShellActivityStates[panelId] = .promptIdle
+        terminal.updateShellActivityState(.promptIdle)
+
+        let detached = try #require(source.detachSurface(panelId: panelId))
+        terminal.updateShellActivityState(.unknown)
+        let dock = DockSplitStore(
+            workspaceId: UUID(),
+            baseDirectoryProvider: { nil }
+        )
+
+        dock.adoptSessionRestoreState(from: detached)
+
+        #expect(terminal.shellActivity.state == .promptIdle)
+        #expect(dock.restoredAgentLifecycle.startupInput(panelId: panelId) == restoredSelector)
+        #expect(!dock.restoredAgentLifecycle.armStartupInputResend(panelId: panelId))
+    }
+
+    @Test
     func sameSessionNewProcessGenerationSupersedesCompletion() {
         let panelId = UUID()
         let snapshot = agentSnapshot(

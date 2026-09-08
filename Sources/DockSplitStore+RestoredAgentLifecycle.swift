@@ -87,6 +87,9 @@ extension DockSplitStore {
     }
 
     func adoptSessionRestoreState(from detached: Workspace.DetachedSurfaceTransfer) {
+        if let shellActivityState = detached.shellActivityState {
+            (detached.panel as? TerminalPanel)?.updateShellActivityState(shellActivityState)
+        }
         invalidatedCachedTransferAgentSessionPanelIds.remove(detached.panelId)
         replacedCachedTransferAgentSessionPanelIds.remove(detached.panelId)
         restoredAgentLifecycle.seedTransferredState(
