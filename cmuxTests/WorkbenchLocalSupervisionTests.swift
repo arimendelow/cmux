@@ -2116,6 +2116,40 @@ struct WorkbenchLocalActionTests {
         )) == "invalid_params")
     }
 
+    @Test func appContinuityDistinguishesCleanAndUncleanRestarts() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let firstLaunch = UUID()
+        let secondLaunch = UUID()
+        let thirdLaunch = UUID()
+
+        let first = WorkbenchAppContinuity.beginLaunch(
+            launchID: firstLaunch,
+            startedAt: Date(timeIntervalSince1970: 100),
+            defaults: defaults
+        )
+        #expect(first.launchID == firstLaunch)
+        #expect(first.previousExitWasClean)
+
+        let second = WorkbenchAppContinuity.beginLaunch(
+            launchID: secondLaunch,
+            startedAt: Date(timeIntervalSince1970: 200),
+            defaults: defaults
+        )
+        #expect(second.launchID == secondLaunch)
+        #expect(!second.previousExitWasClean)
+
+        WorkbenchAppContinuity.markCleanExit(defaults: defaults)
+        let third = WorkbenchAppContinuity.beginLaunch(
+            launchID: thirdLaunch,
+            startedAt: Date(timeIntervalSince1970: 300),
+            defaults: defaults
+        )
+        #expect(third.launchID == thirdLaunch)
+        #expect(third.previousExitWasClean)
+        #expect(WorkbenchAppContinuity.snapshot(defaults: defaults) == third)
+    }
+
     @Test func actionPlaneFailsClosedOutsideWorkbenchAndOnCorruptReceipts() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
