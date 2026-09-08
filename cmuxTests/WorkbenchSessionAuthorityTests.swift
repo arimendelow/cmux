@@ -9,6 +9,59 @@ import Testing
 
 @Suite("Workbench session authority")
 struct WorkbenchSessionAuthorityTests {
+    @Test func MissingAuthorityFailsClosedUntilAProducerAttestsOwnership() {
+        let launch = AgentLaunchCommandSnapshot(
+            launcher: "external-wrapper",
+            executablePath: "/usr/local/bin/external-wrapper",
+            arguments: ["external-wrapper", "agent"],
+            workingDirectory: "/tmp"
+        )
+
+        #expect(WorkbenchSessionAuthority.resolved(agent: nil, binding: nil) == .unknown)
+        #expect(WorkbenchSessionAuthority.resolved(
+            agent: SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: "11111111-1111-4111-8111-111111111111",
+                workingDirectory: "/tmp",
+                launchCommand: launch
+            ),
+            binding: nil
+        ) == .unknown)
+        #expect(!WorkbenchSessionAuthority.unknown.allowsLocalAutoResume(
+            globalEnabled: true,
+            wasRunning: true
+        ))
+    }
+
+    @Test func GenericAuthorityRoundTripsAndLegacyValuesFailClosed() throws {
+        let local = try JSONDecoder().decode(
+            WorkbenchSessionAuthority.self,
+            from: Data(#""controlledHere""#.utf8)
+        )
+        let external = try JSONDecoder().decode(
+            WorkbenchSessionAuthority.self,
+            from: Data(#""legacy-external-owner""#.utf8)
+        )
+
+        #expect(local == .controlledHere)
+        #expect(external == .controlledExternally)
+        #expect(String(data: try JSONEncoder().encode(external), encoding: .utf8) == #""controlledExternally""#)
+    }
+
+    @Test func BindingAuthorityIsExplicitAndCanBeTakenOverOnlyByUserAction() {
+        let sessionId = "22222222-2222-4222-8222-222222222222"
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "external-wrapper agent --resume \(sessionId)",
+            checkpointId: sessionId,
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        #expect(WorkbenchSessionAuthority.resolved(agent: nil, binding: binding) == .controlledExternally)
+        #expect(WorkbenchSessionAuthority.localTakeoverSnapshot(agent: nil, binding: binding)?.workbenchAuthority == .controlledHere)
+    }
+
     @Test(arguments: [
         ["/usr/local/bin/agency", "copilot", "--hub"],
         ["agency", "--no-aec", "cp", "--session-manager"],
