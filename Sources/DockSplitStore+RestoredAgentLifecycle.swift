@@ -29,12 +29,17 @@ extension DockSplitStore {
     ) -> Bool {
         guard let terminal = panels[panelId] as? TerminalPanel,
               let takeover = externalSessionLocalTakeover(panelId: panelId),
+              let localBinding = WorkbenchSessionAuthority.localTakeoverBinding(
+                  snapshot: takeover.snapshot,
+                  replacing: managedAgentResumeBinding(panelId: panelId)
+                      ?? surfaceResumeBindingsByPanelId[panelId]
+              ),
               send(terminal, takeover.input) else {
             return false
         }
         restoredAgentLifecycle.snapshotsByPanelId[panelId] = takeover.snapshot
-        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
-        managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
+        surfaceResumeBindingsByPanelId[panelId] = localBinding
+        managedAgentResumeBindingsByPanelId[panelId] = localBinding
         restoredAgentLifecycle.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
         restoredAgentLifecycle.registerStartupInput(takeover.input, panelId: panelId)
         restoredAgentLifecycle.invalidatedFingerprintsByPanelId.removeValue(forKey: panelId)
@@ -47,8 +52,8 @@ extension DockSplitStore {
             transfer.restoredAgentCompletedGeneration = nil
             transfer.restoredResumeSessionWorkingDirectory = takeover.snapshot.workingDirectory
             transfer.restoredStartupInput = takeover.input
-            transfer.resumeBinding = nil
-            transfer.managedAgentResumeBinding = nil
+            transfer.resumeBinding = localBinding
+            transfer.managedAgentResumeBinding = localBinding
             transfer.agentRuntime = nil
             setDetachedSurfaceTransfer(transfer, forPanelID: panelId)
         }

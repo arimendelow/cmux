@@ -369,7 +369,15 @@ extension Workspace {
             )
         }
         if indexedRestorableAgent != nil, compatibleIndexedRestorableAgent == nil {
-            clearRestoredAgentSnapshot(panelId: panelId)
+            let currentSnapshotKeepsBindingIdentity =
+                resumeBinding?.isAgentHookBinding == true &&
+                Self.restorableAgentForSessionRestore(
+                    restoredAgentSnapshotsByPanelId[panelId],
+                    resumeBinding: resumeBinding
+                ) != nil
+            if !currentSnapshotKeepsBindingIdentity {
+                clearRestoredAgentSnapshot(panelId: panelId)
+            }
         }
         if let compatibleRestorableAgent = compatibleIndexedRestorableAgent,
            let restorableAgentObservation {

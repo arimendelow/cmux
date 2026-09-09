@@ -83,6 +83,25 @@ enum WorkbenchSessionAuthority: String, Sendable {
         return snapshot.resumeCommand == nil ? nil : snapshot
     }
 
+    static func localTakeoverBinding(
+        snapshot: SessionRestorableAgentSnapshot,
+        replacing binding: SurfaceResumeBindingSnapshot?
+    ) -> SurfaceResumeBindingSnapshot? {
+        guard let command = snapshot.resumeCommand else { return nil }
+        return SurfaceResumeBindingSnapshot(
+            name: binding?.name,
+            kind: snapshot.kind.rawValue,
+            command: command,
+            cwd: snapshot.workingDirectory,
+            checkpointId: snapshot.sessionId,
+            source: "agent-hook",
+            permissionMode: snapshot.permissionMode,
+            autoResume: true,
+            workbenchAuthority: .controlledHere,
+            launchFlavor: .local
+        )
+    }
+
     func allowsLocalAutoResume(globalEnabled: Bool, wasRunning: Bool) -> Bool {
         globalEnabled && wasRunning && self == .controlledHere
     }

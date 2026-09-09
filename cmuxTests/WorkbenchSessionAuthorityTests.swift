@@ -478,8 +478,16 @@ struct WorkbenchSessionAuthorityTests {
             store.restoredAgentLifecycle.snapshotsByPanelId[restoredPanelId]?
                 .workbenchAuthority == .controlledHere
         )
-        #expect(store.surfaceResumeBinding(panelId: restoredPanelId) == nil)
-        #expect(store.managedAgentResumeBinding(panelId: restoredPanelId) == nil)
+        let localBinding = try #require(
+            store.surfaceResumeBinding(panelId: restoredPanelId)
+        )
+        #expect(localBinding.checkpointId == sessionId)
+        #expect(localBinding.workbenchAuthority == .controlledHere)
+        #expect(localBinding.launchCommand == nil)
+        #expect(
+            store.managedAgentResumeBinding(panelId: restoredPanelId) ==
+                localBinding
+        )
     }
 
     @MainActor
@@ -527,7 +535,13 @@ struct WorkbenchSessionAuthorityTests {
                 .controlledHere
         )
         #expect(workspace.restoredAgentSnapshotsByPanelId[panelId]?.launchCommand == nil)
-        #expect(workspace.surfaceResumeBindingsByPanelId[panelId] == nil)
+        let localBinding = try #require(
+            workspace.surfaceResumeBindingsByPanelId[panelId]
+        )
+        #expect(localBinding.checkpointId == sessionId)
+        #expect(localBinding.workbenchAuthority == .controlledHere)
+        #expect(localBinding.launchCommand == nil)
+        #expect(!localBinding.command.contains("external-wrapper"))
         #expect(
             workspace.restoredAgentResumeStatesByPanelId[panelId] ==
                 .awaitingAutoResumeCommand
@@ -623,7 +637,11 @@ struct WorkbenchSessionAuthorityTests {
             workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority ==
                 .controlledHere
         )
-        #expect(workspace.surfaceResumeBindingsByPanelId[panelId] == nil)
+        let localBinding = try #require(
+            workspace.surfaceResumeBindingsByPanelId[panelId]
+        )
+        #expect(localBinding.checkpointId == sessionId)
+        #expect(localBinding.workbenchAuthority == .controlledHere)
     }
 
     @MainActor
@@ -671,6 +689,34 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(workspace.agentPIDKeysByPanelId[panelId] == nil)
         #expect(workspace.agentPIDs[staleRuntimeKey] == nil)
+        let staleIndex = RestorableAgentSessionIndex.load(
+            homeDirectory: "/tmp/workbench-takeover-stale-index",
+            fileManager: .default,
+            registry: CmuxVaultAgentRegistry(registrations: []),
+            detectedSnapshots: [
+                .init(workspaceId: workspace.id, panelId: panelId): (
+                    snapshot: SessionRestorableAgentSnapshot(
+                        kind: .copilot,
+                        sessionId: "superseded-session",
+                        workbenchAuthority: .controlledExternally
+                    ),
+                    updatedAt: 1,
+                    processIDs: [],
+                    agentProcessIDs: [],
+                    sessionIDSource: .explicit
+                ),
+            ]
+        )
+        let persisted = workspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: staleIndex
+        )
+        #expect(
+            persisted.panels.first(where: { $0.id == panelId })?
+                .terminal?.resumeBinding?.checkpointId == replacementSessionID
+        )
+        #expect(workspace.restoredAgentSnapshotsByPanelId[panelId]?.sessionId == replacementSessionID)
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) != nil)
     }
 
     @MainActor
@@ -760,8 +806,15 @@ struct WorkbenchSessionAuthorityTests {
             rebasedTransfer.restorableAgentResumeState ==
                 .awaitingAutoResumeCommand
         )
-        #expect(rebasedTransfer.resumeBinding == nil)
-        #expect(rebasedTransfer.managedAgentResumeBinding == nil)
+        #expect(rebasedTransfer.resumeBinding?.checkpointId == replacementSessionID)
+        #expect(
+            rebasedTransfer.resumeBinding?.workbenchAuthority ==
+                .controlledHere
+        )
+        #expect(
+            rebasedTransfer.managedAgentResumeBinding?.checkpointId ==
+                replacementSessionID
+        )
         #expect(rebasedTransfer.agentRuntime == nil)
         #expect(
             store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id]?.sessionId ==

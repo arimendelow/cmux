@@ -13,12 +13,16 @@ extension Workspace {
     ) -> Bool {
         guard let terminal = terminalPanel(for: panelId),
               let takeover = externalSessionLocalTakeover(panelId: panelId),
+              let localBinding = WorkbenchSessionAuthority.localTakeoverBinding(
+                  snapshot: takeover.snapshot,
+                  replacing: surfaceResumeBindingsByPanelId[panelId]
+              ),
               send(terminal, takeover.input) else {
             return false
         }
         clearAgentRuntimeState(panelId: panelId)
         restoredAgentSnapshotsByPanelId[panelId] = takeover.snapshot
-        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
+        surfaceResumeBindingsByPanelId[panelId] = localBinding
         restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
         restoredAgentLifecycle.registerStartupInput(takeover.input, panelId: panelId)
         invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
