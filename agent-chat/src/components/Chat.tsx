@@ -1,13 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useCtx } from "../context";
 import { readStoredProviderOptions, persistOptionsSnapshot, updateStoredProviderOption } from "../options-store";
-import type { OptionValue, PromptAttachment, SessionOption } from "../session";
+import {
+  canSendWhileNegotiating,
+  type OptionValue,
+  type PromptAttachment,
+  type SessionOption,
+} from "../session";
 import { ArrowUp } from "./icons";
 import { isCtrlJ, insertNewlineAtCaret, useCommandMenu } from "./CommandMenu";
 import { optionAcceptsValue } from "./options";
 import { StatusRow } from "./StatusRow";
 import { Blocks } from "./Transcript";
 import { WorkbenchHeader } from "./WorkbenchHeader";
+import { BossStatusBanner } from "./BossStatusBanner";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ShortcutOverlay, useKeymap } from "../hooks/useKeymap";
 import { useAutoGrow } from "../hooks/useAutoGrow";
@@ -78,7 +84,7 @@ export function providerSwitchAttachmentState(
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, boss, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
   const [text, setText] = useState("");
   const [sendPending, setSendPending] = useState(false);
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
@@ -98,6 +104,9 @@ export function Chat() {
   );
   const allProviderOptions = providerOptionMap(providers, providerOptions, capabilities);
   const running = session?.status === "running";
+  // Workbench holds the draft (never discards it) until the peer answers the
+  // capability negotiation, so an image-capable turn is never sent blind.
+  const negotiating = Boolean(experience) && !canSendWhileNegotiating(imageCapability);
 
   useRestoreModelScopedOptions({ provider: session?.provider, options, setOption, pendingModelRestoreRef });
   usePersistSessionOptions(session?.provider, options, pendingModelRestoreRef.current !== null);
@@ -128,7 +137,7 @@ export function Chat() {
   };
   const submit = async () => {
     const t = text.trim();
-    if (admissionPending || !imagePromptCanSubmit(
+    if (!actionsAllowed.compose || admissionPending || negotiating || !imagePromptCanSubmit(
       t,
       imageAttachments.attachments.length,
       imageAttachments.loading,
@@ -158,6 +167,7 @@ export function Chat() {
       setOpenOptionId(null);
       return;
     }
+    if (!actionsAllowed.compose) return;
     updateStoredProviderOption(provider, "model", model, allProviderOptions[provider] ?? []);
     localStorage.setItem("agentui.provider", provider);
     localStorage.setItem("agentui.cwd", session.cwd);
@@ -174,6 +184,7 @@ export function Chat() {
   return (
     <section id="chat-view">
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
+      <BossStatusBanner boss={boss} />
       {connection ? (
         <div className="recovery-banner-wrap">
           <div className="recovery-banner startup-banner" role="status">
@@ -186,7 +197,7 @@ export function Chat() {
         <Blocks
           blocks={blocks}
           status={session?.status}
-          actions={actions}
+          actions={actionsAllowed.fork ? actions : {}}
           onFork={fork}
           forkPending={forkPending}
           fileDiffs={fileDiffs}
@@ -252,8 +263,8 @@ export function Chat() {
                 <button
                   className="send"
                   type="button"
-                  aria-label="Send"
-                  disabled={admissionPending || !imagePromptCanSubmit(
+                  aria-label={negotiating ? "Connecting" : "Send"}
+                  disabled={!actionsAllowed.compose || admissionPending || negotiating || !imagePromptCanSubmit(
                     text,
                     imageAttachments.attachments.length,
                     imageAttachments.loading,

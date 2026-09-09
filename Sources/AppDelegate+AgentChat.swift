@@ -900,21 +900,51 @@ extension AppDelegate {
         return workbenchBossPanelID(in: dock)
     }
 
+    /// Boss is one app-global surface. Summoning it from the window that
+    /// already owns it reveals it; summoning it from any other window rehomes
+    /// the same surface (same session, same transcript) into that window.
+    enum WorkbenchBossSummonAction {
+        case create
+        case reveal
+        case rehome
+    }
+
+    static func workbenchBossSummonAction(
+        ownerWindowId: UUID?,
+        requestingWindowId: UUID?
+    ) -> WorkbenchBossSummonAction {
+        guard let ownerWindowId else { return .create }
+        return ownerWindowId == requestingWindowId ? .reveal : .rehome
+    }
+
     @discardableResult
     func rehomeWorkbenchBossPanelIfNeeded(from closingContext: MainWindowContext) -> Bool {
         guard !isTerminatingApp,
               let location = AgentChatActionInFlightGate.bossPanelLocation(),
               location.ownerWindowId == closingContext.windowId,
-              let sourceDock = closingContext.existingWindowDock(),
-              let sourcePane = sourceDock.paneId(forPanelId: location.panelId),
-              let detached = sourceDock.detachSurface(panelId: location.panelId) else {
+              let destination = mainWindowContexts.values.first(where: {
+                  $0 !== closingContext && $0.fileExplorerState != nil
+              }) else {
             return false
         }
-        guard let destination = mainWindowContexts.values.first(where: {
-            $0 !== closingContext && $0.fileExplorerState != nil
-        }) else {
-            _ = sourceDock.attachDetachedSurface(detached, inPane: sourcePane, focus: false)
-            AgentChatActionInFlightGate.clearBossPanel()
+        return moveWorkbenchBossPanel(from: closingContext, to: destination, clearOnFailure: true)
+    }
+
+    /// Shared move path for both owner-window closure and cross-window summon.
+    /// On any failure the surface is put back where it was, so Boss is never
+    /// duplicated and never lost.
+    @discardableResult
+    private func moveWorkbenchBossPanel(
+        from sourceContext: MainWindowContext,
+        to destination: MainWindowContext,
+        clearOnFailure: Bool
+    ) -> Bool {
+        guard let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              location.ownerWindowId == sourceContext.windowId,
+              let sourceDock = sourceContext.existingWindowDock(),
+              let sourcePane = sourceDock.paneId(forPanelId: location.panelId),
+              let detached = sourceDock.detachSurface(panelId: location.panelId) else {
+            if clearOnFailure { AgentChatActionInFlightGate.clearBossPanel() }
             return false
         }
         let destinationDock = destination.windowDockStore()
@@ -952,7 +982,21 @@ extension AppDelegate {
                let panel = dock.browserPanel(for: location.panelId) {
                 panel.setOmnibarVisible(false)
                 panel.navigateSmart(url.absoluteString)
-                revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                let requesting = mainWindowContext(for: tabManager)
+                switch Self.workbenchBossSummonAction(
+                    ownerWindowId: owner.windowId,
+                    requestingWindowId: requesting?.windowId
+                ) {
+                case .rehome:
+                    if let requesting,
+                       requesting.fileExplorerState != nil,
+                       moveWorkbenchBossPanel(from: owner, to: requesting, clearOnFailure: false) {
+                        return location.panelId
+                    }
+                    revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                case .create, .reveal:
+                    revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                }
                 return location.panelId
             }
             AgentChatActionInFlightGate.clearBossPanel()

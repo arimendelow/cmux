@@ -10,6 +10,9 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  // Negotiated peer capabilities. `image` is three-state: `unknown` until the
+  // ACP peer answers initialize, then `supported` / `unsupported`.
+  | { kind: "capabilities"; image: ImagePromptCapability }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string } // streaming assistant text
@@ -22,6 +25,7 @@ export type AgentEvent =
   | { kind: "error"; message: string };
 
 export type SessionStatus = "idle" | "running" | "exited" | "error";
+export type ImagePromptCapability = "unknown" | "supported" | "unsupported";
 export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
@@ -149,6 +153,8 @@ export interface Adapter {
     content?: Record<string, string | boolean | number>,
   ): Promise<void>;
   forkSession?(source: SessionCtx, target: SessionCtx): Promise<void>;
+  /** Establish the peer connection without sending a user turn. */
+  warmup?(sess: SessionCtx): Promise<void>;
   capabilities?: ProviderCapabilities;
 }
 

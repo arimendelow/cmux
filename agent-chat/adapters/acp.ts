@@ -1,5 +1,6 @@
 import type {
   Adapter,
+  ImagePromptCapability,
   CommandEntry,
   ElicitationAction,
   ElicitationField,
@@ -20,9 +21,9 @@ import { prettifyModelLabel } from "./model-label";
 export function makeAcpAdapter(def: ProviderDef): Adapter {
   const fallbackOptions = acpFallbackOptions(def);
   const requireImagePromptSupport = (st: AcpState, attachments: PromptAttachment[]) => {
-    if (attachments.length === 0 || st.imagePromptCapability === "supported") return;
+    if (attachments.length === 0 || st.imageCapability === "supported") return;
     throw new Error(
-      st.imagePromptCapability === "unknown"
+      st.imageCapability === "unknown"
         ? `${def.label} image prompt capability is not known`
         : `${def.label} does not support image prompts`,
     );
@@ -118,6 +119,9 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
         startingProc.kill();
       }
     },
+    async warmup(sess) {
+      await ensureAcp(sess, def);
+    },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
@@ -203,6 +207,7 @@ interface AcpState {
   acpSessionId: string;
   request(method: string, params: unknown, onWritten?: () => void): Promise<any>;
   notify(method: string, params: unknown): Promise<void>;
+  imageCapability: Exclude<ImagePromptCapability, "unknown">;
   options: SessionOption[];
   sources: Map<string, "config" | "mode" | "model" | "spawnModel">;
   autoApprove: boolean;
@@ -216,7 +221,6 @@ interface AcpState {
   requestNamespace: string;
   suppressSessionReplay: boolean;
   unsupportedUpdates: Set<string>;
-  imagePromptCapability: "unknown" | "supported" | "unsupported";
   writeMsg(msg: unknown): Promise<void>;
 }
 
@@ -336,6 +340,7 @@ async function startAcp(
   const st: AcpState = {
     proc,
     acpSessionId: "",
+    imageCapability: "unsupported",
     request,
     notify,
     options: [],
@@ -351,7 +356,6 @@ async function startAcp(
     requestNamespace: crypto.randomUUID().slice(0, 8),
     suppressSessionReplay: false,
     unsupportedUpdates: new Set(),
-    imagePromptCapability: "unknown",
     writeMsg,
   };
 
@@ -387,6 +391,9 @@ async function startAcp(
     st.respondingElicitations.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
       sess.internal.acp = undefined;
+      // Capability is peer-scoped: a dead peer means unknown again until the
+      // next initialize answers.
+      sess.emit({ kind: "capabilities", image: "unknown" });
     }
   });
   readLines(proc.stderr, () => {});
@@ -408,11 +415,8 @@ async function startAcp(
         elicitation: { form: {} },
       },
     });
-    st.imagePromptCapability =
-      initializeResult?.agentCapabilities?.promptCapabilities?.image === true
-        ? "supported"
-        : "unsupported";
-    if (requiresImageSupport && st.imagePromptCapability !== "supported") {
+    st.imageCapability = imageCapabilityFromInitialize(initializeResult);
+    if (requiresImageSupport && st.imageCapability !== "supported") {
       throw new Error(`${def.label} does not support image prompts`);
     }
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
@@ -658,7 +662,31 @@ function updateLocalOption(st: AcpState, id: string, value: OptionValue) {
   st.options = st.options.map((o) => o.id === id ? { ...o, value } : o);
 }
 
+export function imageCapabilityFromInitialize(result: unknown): Exclude<ImagePromptCapability, "unknown"> {
+  const capabilities = (result as { agentCapabilities?: { promptCapabilities?: { image?: unknown } } } | undefined)
+    ?.agentCapabilities?.promptCapabilities;
+  return capabilities?.image === true ? "supported" : "unsupported";
+}
+
+export function imageCapabilityFromInitializeForTest(result: unknown): ImagePromptCapability {
+  return imageCapabilityFromInitialize(result);
+}
+
+export function imageCapabilityOf(sess: Pick<SessionCtx, "internal">): ImagePromptCapability {
+  const st = sess.internal.acp as AcpState | undefined;
+  return st?.imageCapability ?? "unknown";
+}
+
+export function imageCapabilityOfForTest(sess: { internal: Record<string, unknown> }): ImagePromptCapability {
+  return imageCapabilityOf(sess as Pick<SessionCtx, "internal">);
+}
+
+export function resetImageCapabilityForTest(sess: { internal: Record<string, unknown> }) {
+  sess.internal.acp = undefined;
+}
+
 function emitAcpState(sess: SessionCtx, st: AcpState) {
+  sess.emit({ kind: "capabilities", image: st.imageCapability });
   sess.emit({ kind: "options", options: withAcpLocalOptions(st.options, st.autoApprove) });
   if (st.commands.length) sess.emit({ kind: "commands", trigger: "/", commands: st.commands });
 }
@@ -1029,6 +1057,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
           const st: AcpState = {
             proc,
             acpSessionId: "",
+            imageCapability: "unsupported",
             request: () => Promise.reject(new Error("catalog probe closed")),
             notify: async () => {},
             options: [],
@@ -1044,7 +1073,6 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             requestNamespace: "catalog",
             suppressSessionReplay: false,
             unsupportedUpdates: new Set(),
-            imagePromptCapability: "unknown",
             writeMsg: async () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));

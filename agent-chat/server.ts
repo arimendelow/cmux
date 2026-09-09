@@ -22,6 +22,17 @@ import {
   writePersistedSession,
   type PersistedAgentChatSession,
 } from "./session-persistence";
+import {
+  listBossCandidates,
+  listBossCandidatesInPartition,
+  readCanonicalBossPointer,
+  repointCanonicalBoss,
+  resolveCanonicalBoss,
+  writeCanonicalBossPointer,
+  type BossSkippedRecord,
+  type CanonicalBossPointer,
+  type CanonicalBossState,
+} from "./canonical-boss";
 import { pickAccentColor, resolveGhosttyTheme, resolveGhosttyThemeAsync, type GhosttyTheme } from "./theme";
 import { agentModelCatalog, type AgentModelProviderCatalog } from "./catalog";
 import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
@@ -42,6 +53,17 @@ if (AUTH_TOKEN.includes("/")) throw new Error("CMUX_AGENT_CHAT_TOKEN must be a s
 const AUTH_PREFIX = AUTH_TOKEN ? `/${encodeURIComponent(AUTH_TOKEN)}` : "";
 const STATE_FILE = process.env.CMUX_AGENT_CHAT_STATE_FILE ?? "";
 const SESSION_DIR = process.env.CMUX_AGENT_CHAT_SESSION_DIR ?? "";
+// Session records stay partitioned per Boss agent, but the canonical pointer is
+// app-global: it lives one level above the agent partition so resolution never
+// depends on which agent happens to be configured right now.
+const BOSS_AGENT = (process.env.CMUX_AGENT_CHAT_BOSS_AGENT ?? "").trim();
+// A partitioned store keeps the pointer one level above the agent directory; a
+// legacy flat store keeps it beside its records. Either way one pointer file
+// resolves Boss for the whole app.
+const SESSION_DIR_IS_PARTITIONED = Boolean(SESSION_DIR) && Boolean(BOSS_AGENT)
+  && pathBasename(SESSION_DIR) === BOSS_AGENT;
+const BOSS_POINTER_DIR = (process.env.CMUX_AGENT_CHAT_BOSS_POINTER_DIR ?? "").trim()
+  || (SESSION_DIR ? (SESSION_DIR_IS_PARTITIONED ? dirname(SESSION_DIR) : SESSION_DIR) : "");
 const PRODUCT_ID = process.env.CMUX_AGENT_CHAT_PRODUCT ?? "";
 const ALLOWED_ROOT_PATHS = resolveAllowedRoots(process.env.CMUX_AGENT_CHAT_ALLOWED_ROOTS ?? "");
 
@@ -144,15 +166,34 @@ const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
 ];
 
+export type ExternalAuthorityStatus =
+  | "connected"
+  | "disconnected"
+  | "stopped"
+  | "unavailable"
+  | "unknown";
+
+/**
+ * External control authority is host-supplied. Public Workbench knows only this
+ * generic shape: a display label, an optional open URL, and a status value. The
+ * host injects the real product vocabulary through the environment; the default
+ * stays neutral so removing that configuration degrades to "Controlled
+ * elsewhere / status unknown" rather than to a local inference.
+ */
+export interface ExternalAuthority {
+  label: string;
+  openUrl?: string;
+  openLabel?: string;
+  status: ExternalAuthorityStatus;
+}
+
 export interface WorkbenchExperience {
   productName: string;
   surfaceName: string;
   contextLabel?: string;
   defaultProvider: string;
   localAuthorityLabel: string;
-  hubAuthorityLabel: string;
-  hubUrl: string;
-  hubStatus: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
+  externalAuthority: ExternalAuthority;
 }
 
 interface WorkbenchBossProviderOptions {
@@ -162,10 +203,48 @@ interface WorkbenchBossProviderOptions {
   workbenchMcp?: string;
 }
 
+const DEFAULT_EXTERNAL_AUTHORITY_LABEL = "Controlled elsewhere";
+
+function externalAuthorityOpenUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim() ?? "";
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function externalAuthority(config: {
+  label?: string;
+  url?: string;
+  openLabel?: string;
+  status?: ExternalAuthorityStatus;
+} = {}): ExternalAuthority {
+  const openUrl = externalAuthorityOpenUrl(config.url);
+  const openLabel = config.openLabel?.trim() ?? "";
+  return {
+    label: config.label?.trim() || DEFAULT_EXTERNAL_AUTHORITY_LABEL,
+    ...(openUrl ? { openUrl } : {}),
+    ...(openUrl && openLabel ? { openLabel } : {}),
+    status: config.status ?? "unknown",
+  };
+}
+
+export function externalAuthorityForTest(config: {
+  label?: string;
+  url?: string;
+  openLabel?: string;
+  status?: ExternalAuthorityStatus;
+}): ExternalAuthority {
+  return externalAuthority(config);
+}
+
 function workbenchExperience(
   productId: string,
   contextLabel: string,
-  hubStatus: WorkbenchExperience["hubStatus"] = "unknown",
+  authority: ExternalAuthority = externalAuthority(),
 ): WorkbenchExperience | undefined {
   if (productId !== "ouro-workbench-v1") return undefined;
   return {
@@ -174,9 +253,7 @@ function workbenchExperience(
     ...(contextLabel ? { contextLabel } : {}),
     defaultProvider: "ouro-boss",
     localAuthorityLabel: "Controlled here",
-    hubAuthorityLabel: "Controlled in Agency Hub",
-    hubUrl: "https://aka.ms/agency/hub",
-    hubStatus,
+    externalAuthority: authority,
   };
 }
 
@@ -184,22 +261,27 @@ export function workbenchExperienceForTest(productId: string, contextLabel = "")
   return workbenchExperience(productId, contextLabel);
 }
 
-export function agencyHubStatusFromOutputForTest(
+export function externalAuthorityStatusFromOutputForTest(
   output: string,
   exitCode: number,
-): WorkbenchExperience["hubStatus"] {
+): ExternalAuthorityStatus {
   if (exitCode !== 0) return "unavailable";
-  if (/Connection:\s+connected\b/i.test(output)) return "connected";
-  if (/Connection:\s+\S+/i.test(output)) return "disconnected";
-  if (/\bhub daemon\b.*\b(?:stopped|not running)\b/i.test(output)) return "stopped";
+  const match = /^\s*status:\s*(\S+)\s*$/im.exec(output);
+  const value = match?.[1]?.toLowerCase();
+  if (value === "connected" || value === "disconnected" || value === "stopped") return value;
   return "unknown";
 }
 
-async function agencyHubStatus(
-  command: string[] = ["agency", "hub", "status"],
+/**
+ * Run the host-supplied status helper under a hard timeout. The helper owns the
+ * semantics; Workbench only enforces the bounded contract and fails closed.
+ */
+async function externalAuthorityStatus(
+  command: string[],
   timeoutMs = 3_000,
   killGraceMs = 250,
-): Promise<WorkbenchExperience["hubStatus"]> {
+): Promise<ExternalAuthorityStatus> {
+  if (!command.length) return "unknown";
   try {
     const child = Bun.spawn(command, {
       stdout: "pipe",
@@ -224,7 +306,7 @@ async function agencyHubStatus(
       Bun.sleep(timeoutMs).then(() => undefined),
     ]);
     if (result !== undefined && result !== null) {
-      return agencyHubStatusFromOutputForTest(result.text, result.exitCode);
+      return externalAuthorityStatusFromOutputForTest(result.text, result.exitCode);
     }
     await Promise.race([reader.cancel().catch(() => {}), Bun.sleep(killGraceMs)]);
     try {
@@ -245,22 +327,44 @@ async function agencyHubStatus(
   }
 }
 
-export function agencyHubStatusForTest(
+export function externalAuthorityStatusForTest(
   command: string[],
   timeoutMs: number,
   killGraceMs: number,
-): Promise<WorkbenchExperience["hubStatus"]> {
-  return agencyHubStatus(command, timeoutMs, killGraceMs);
+): Promise<ExternalAuthorityStatus> {
+  return externalAuthorityStatus(command, timeoutMs, killGraceMs);
 }
+
+function externalAuthorityStatusCommand(raw: string | undefined): string[] {
+  const value = raw?.trim() ?? "";
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string" && entry)) return parsed;
+  } catch {}
+  return value.split(/\s+/).filter(Boolean);
+}
+
+const CONFIGURED_EXTERNAL_AUTHORITY = {
+  label: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_LABEL,
+  url: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_URL,
+  openLabel: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_OPEN_LABEL,
+};
 
 let WORKBENCH_EXPERIENCE = workbenchExperience(
   PRODUCT_ID,
   process.env.CMUX_AGENT_CHAT_CONTEXT_LABEL?.trim() ?? "",
+  externalAuthority(CONFIGURED_EXTERNAL_AUTHORITY),
 );
 if (import.meta.main && WORKBENCH_EXPERIENCE) {
   WORKBENCH_EXPERIENCE = {
     ...WORKBENCH_EXPERIENCE,
-    hubStatus: await agencyHubStatus(),
+    externalAuthority: externalAuthority({
+      ...CONFIGURED_EXTERNAL_AUTHORITY,
+      status: await externalAuthorityStatus(
+        externalAuthorityStatusCommand(process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_STATUS_COMMAND),
+      ),
+    }),
   };
 }
 
@@ -280,14 +384,6 @@ function geminiCatalogModels(): { value: string; label: string; description?: st
 function geminiDefaultModel(): string | undefined {
   return agentModelCatalog.provider("gemini")?.defaultModel ?? (agentModelCatalog.hasPayload ? undefined : "gemini-3.1-pro-preview");
 }
-
-const AGENCY_COPILOT_BASE_COMMAND = [
-  "agency",
-  "copilot",
-  "--no-config-plugins",
-  "--no-default-mcps",
-  "--no-aec",
-];
 
 function ouroBossProvider(options: WorkbenchBossProviderOptions = {}): ProviderDef {
   const bossAgent = options.bossAgent?.trim() ?? "";
@@ -316,29 +412,10 @@ function ouroBossProvider(options: WorkbenchBossProviderOptions = {}): ProviderD
 
 const ALL_PROVIDERS: ProviderDef[] = [
   {
-    id: "agency-worker",
-    label: "Agency worker",
-    description: "Desk-aware Workbench boss",
-    role: "boss",
-    adapter: "acp",
-    cmd: [
-      ...AGENCY_COPILOT_BASE_COMMAND,
-      "--plugin",
-      "github:shared-internal-tools/ms-desk:plugins/ms-desk",
-      "-a",
-      "ms-desk:worker",
-      "--acp",
-      "--stdio",
-    ],
-    defaultAutoApprove: false,
-    probeCatalogs: false,
-    startupTimeoutMs: 90_000,
-  },
-  {
     id: "copilot",
     label: "GitHub Copilot",
     adapter: "acp",
-    cmd: [...AGENCY_COPILOT_BASE_COMMAND, "--acp", "--stdio"],
+    cmd: ["copilot", "--acp", "--stdio"],
     defaultAutoApprove: false,
     probeCatalogs: false,
     startupTimeoutMs: 90_000,
@@ -592,6 +669,39 @@ function providerInfo(p: ProviderDef) {
   };
 }
 
+class BossGuardError extends Error {}
+
+// The pointer is written asynchronously after the peer reports its session id,
+// so a synchronous reservation closes the race where two concurrent opens each
+// pass the "no canonical Boss yet" check.
+let bossStartReservation: string | null = null;
+
+/**
+ * Workbench keeps exactly one Boss relationship. A blocked recovery, an
+ * existing canonical session, or an in-flight first start refuses a second Boss
+ * server-side, so no client (browser, CLI, or root route) can create one behind
+ * the UI's back.
+ */
+function assertBossStartAllowed(provider: string): boolean {
+  if (!WORKBENCH_EXPERIENCE || providerDefinitionRole(provider) !== "boss") return false;
+  if (bossClientState.status === "blocked") {
+    throw new BossGuardError(
+      `Boss recovery is blocked (${bossClientState.reason}): ${bossClientState.detail}`,
+    );
+  }
+  if (canonicalBossSessionId() || bossStartReservation) throw new BossGuardError("Boss already exists");
+  bossStartReservation = crypto.randomUUID();
+  return true;
+}
+
+function releaseBossStartReservation() {
+  bossStartReservation = null;
+}
+
+function providerDefinitionRole(provider: string): ProviderDef["role"] {
+  return PROVIDERS.find((candidate) => candidate.id === provider)?.role;
+}
+
 function providerDefinition(provider: string): ProviderDef {
   const definition = PROVIDERS.find((candidate) => candidate.id === provider);
   if (!definition) throw new Error(`unknown provider: ${provider}`);
@@ -783,11 +893,17 @@ function sessionPersistenceEnabled(sess: Pick<Session, "headless" | "internal">)
     && sess.internal.retired !== true;
 }
 
-function queueSessionPersistence(sess: Session): void {
+function queueSessionPersistence(
+  sess: Session,
+  onPersisted?: () => void | Promise<void>,
+): void {
   if (!sessionPersistenceEnabled(sess)) return;
   const previous = sess.internal.persistencePromise as Promise<void> | undefined;
   const next = (previous ?? Promise.resolve()).catch(() => {}).then(async () => {
-    if (sessionPersistenceEnabled(sess)) await persistSession(sess);
+    if (sessionPersistenceEnabled(sess)) {
+      await persistSession(sess);
+      await onPersisted?.();
+    }
   });
   sess.internal.persistencePromise = next;
   void next.catch((error) => {
@@ -820,7 +936,12 @@ function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
   if (!sess.headless && evt.kind === "meta" && evt.providerSessionId) {
     sess.internal.persistedProviderSessionId = evt.providerSessionId;
     if (!sessionPersistenceEnabled(sess)) return;
-    queueSessionPersistence(sess);
+    queueSessionPersistence(
+      sess,
+      providerDefinitionRole(sess.provider) === "boss"
+        ? () => adoptCanonicalBoss(sess)
+        : undefined,
+    );
   }
 }
 
@@ -853,7 +974,153 @@ async function persistSession(sess: Session) {
   if (record) await writePersistedSession(SESSION_DIR, record);
 }
 
+export interface BossClientState {
+  status: "none" | "canonical" | "blocked";
+  agent: string;
+  sessionId?: string;
+  reason?: string;
+  detail?: string;
+  skipped: BossSkippedRecord[];
+}
+
+let canonicalBossPointer: CanonicalBossPointer | null = null;
+let bossClientState: BossClientState = { status: "none", agent: BOSS_AGENT, skipped: [] };
+
+function bossClientStateFrom(state: CanonicalBossState): BossClientState {
+  if (state.status === "blocked") {
+    return {
+      status: "blocked",
+      agent: BOSS_AGENT,
+      reason: state.reason,
+      detail: state.detail,
+      skipped: state.skipped,
+    };
+  }
+  if (state.status === "canonical") {
+    return {
+      status: "canonical",
+      agent: state.pointer.agent,
+      sessionId: state.pointer.sessionId,
+      skipped: state.skipped,
+    };
+  }
+  if (state.status === "adopt") {
+    return {
+      status: "canonical",
+      agent: state.pointer.agent,
+      sessionId: state.pointer.sessionId,
+      skipped: state.skipped,
+    };
+  }
+  return { status: "none", agent: BOSS_AGENT, skipped: state.skipped };
+}
+
+export function bossStateForTest(): BossClientState {
+  return bossClientState;
+}
+
+function canonicalBossSessionId(): string | null {
+  return bossClientState.status === "canonical" ? bossClientState.sessionId ?? null : null;
+}
+
+function isCanonicalBossSession(sess: Session): boolean {
+  return Boolean(WORKBENCH_EXPERIENCE) && canonicalBossSessionId() === sess.id;
+}
+
+function broadcastBossState() {
+  const payload = JSON.stringify({ kind: "boss-state", boss: bossClientState });
+  for (const ws of allSockets) ws.send(payload);
+}
+
+/**
+ * Record the first canonical Boss relationship. Only ever writes when no
+ * canonical pointer exists; an established pointer is repointed exclusively
+ * through the repair contract.
+ */
+async function adoptCanonicalBoss(sess: Session) {
+  if (!WORKBENCH_EXPERIENCE || !BOSS_POINTER_DIR || !BOSS_AGENT) return;
+  if (canonicalBossPointer || bossClientState.status === "blocked") return;
+  const pointer: CanonicalBossPointer = { version: 1, agent: BOSS_AGENT, sessionId: sess.id };
+  await writeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+  bossStartReservation = null;
+  canonicalBossPointer = pointer;
+  bossClientState = {
+    status: "canonical",
+    agent: pointer.agent,
+    sessionId: pointer.sessionId,
+    skipped: bossClientState.skipped,
+  };
+  broadcastBossState();
+}
+
+async function restoreWorkbenchBoss() {
+  const pointerResult = await readCanonicalBossPointer(BOSS_POINTER_DIR);
+  if (pointerResult.error) console.error(`[agent-chat] canonical Boss pointer ignored: ${pointerResult.error}`);
+  const candidates = await listBossCandidates(BOSS_POINTER_DIR);
+  if (!SESSION_DIR_IS_PARTITIONED && SESSION_DIR && BOSS_AGENT) {
+    for (const candidate of await listBossCandidatesInPartition(SESSION_DIR, BOSS_AGENT)) {
+      if (!candidates.some((existing) => existing.id === candidate.id && existing.agent === candidate.agent)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+  const state = resolveCanonicalBoss({
+    pointer: pointerResult.pointer,
+    configuredAgent: BOSS_AGENT,
+    routedSessionId: null,
+    candidates,
+  });
+  bossClientState = bossClientStateFrom(state);
+  for (const record of bossClientState.skipped) {
+    console.error(`[agent-chat] Boss record ${record.agent}/${record.id} skipped: ${record.reason}`);
+  }
+  if (state.status === "blocked") {
+    console.error(`[agent-chat] Boss recovery blocked (${state.reason}): ${state.detail}`);
+    canonicalBossPointer = null;
+    return;
+  }
+  if (state.status === "none") {
+    canonicalBossPointer = null;
+    return;
+  }
+  const session = state.status === "canonical"
+    ? state.session
+    : candidates.find((candidate) => candidate.id === state.pointer.sessionId)!;
+  try {
+    const cwd = await assertCwd(session.cwd);
+    createSession(
+      session.provider,
+      cwd,
+      session.autoApprove,
+      session.title,
+      session.startOptions,
+      {
+        id: session.id,
+        createdAt: session.createdAt,
+        providerSessionId: session.providerSessionId,
+      },
+    );
+  } catch (error) {
+    bossClientState = {
+      status: "blocked",
+      agent: BOSS_AGENT,
+      reason: "cwd-unavailable",
+      detail: `${session.id} cannot load: ${error instanceof Error ? error.message : String(error)}`,
+      skipped: bossClientState.skipped,
+    };
+    canonicalBossPointer = null;
+    return;
+  }
+  canonicalBossPointer = state.pointer;
+  if (state.status === "adopt") await writeCanonicalBossPointer(BOSS_POINTER_DIR, state.pointer);
+}
+
 async function restorePersistedSessions() {
+  if (WORKBENCH_EXPERIENCE) {
+    if (!BOSS_POINTER_DIR) return;
+    await restoreWorkbenchBoss();
+    return;
+  }
   if (!SESSION_DIR) return;
   const result = await readPersistedSessions(SESSION_DIR);
   for (const error of result.errors) console.error(`[agent-chat] persisted session ignored: ${error}`);
@@ -2557,6 +2824,39 @@ async function startServer() {
       setTimeout(shutdown, 10);
       return Response.json({ ok: true });
     }
+    // Deliberately non-prominent repair contract for the canonical Boss. It
+    // inspects candidates and repoints the pointer; it never deletes a
+    // transcript or a candidate record.
+    if (url.pathname === "/api/boss" && req.method === "GET") {
+      if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
+      const pointerResult = await readCanonicalBossPointer(BOSS_POINTER_DIR);
+      const candidates = await listBossCandidates(BOSS_POINTER_DIR);
+      return Response.json({
+        pointer: pointerResult.pointer,
+        pointerError: pointerResult.error,
+        state: bossClientState,
+        candidates,
+      });
+    }
+    if (url.pathname === "/api/boss/repoint" && req.method === "POST") {
+      if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
+      if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const body = await req.json().catch(() => ({}));
+      const result = await repointCanonicalBoss(BOSS_POINTER_DIR, {
+        agent: String(body.agent ?? ""),
+        sessionId: String(body.sessionId ?? ""),
+      });
+      if (!result.ok) return Response.json(result, { status: 400 });
+      canonicalBossPointer = result.pointer;
+      bossClientState = {
+        status: "canonical",
+        agent: result.pointer.agent,
+        sessionId: result.pointer.sessionId,
+        skipped: bossClientState.skipped,
+      };
+      broadcastBossState();
+      return Response.json(result);
+    }
     // REST for the CLI: create a session (optionally with a first prompt) and
     // get back its id/url; list sessions.
     if (url.pathname === "/api/sessions" && req.method === "POST") {
@@ -2566,7 +2866,9 @@ async function startServer() {
       const prompt = String(body.prompt ?? "").trim();
       const requestedCwd = String(body.cwd || defaultCwd);
       let sess: Session | undefined;
+      let reservedBossStart = false;
       try {
+        reservedBossStart = assertBossStartAllowed(provider);
         const start = resolveSessionStart(provider, body.autoApprove);
         const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
@@ -2575,6 +2877,7 @@ async function startServer() {
         if (prompt) await sendPrompt(sess, prompt);
       } catch (err) {
         if (sess) await retireSession(sess).catch(() => {});
+        else if (reservedBossStart) releaseBossStartReservation();
         return Response.json({ error: String(err) }, { status: 400 });
       }
       return Response.json({ id: sess.id, url: `http://127.0.0.1:${server.port}${prefixedPath(`/s/${sess.id}`)}` });
@@ -2596,6 +2899,7 @@ async function startServer() {
         defaultCwd,
         defaultProvider: DEFAULT_PROVIDER,
         experience: WORKBENCH_EXPERIENCE,
+        boss: bossClientState,
         keys: keyConfig,
       }));
       ws.send(JSON.stringify({
@@ -2664,6 +2968,9 @@ function sendWsError(ws: Bun.ServerWebSocket<WsData>, op: string, err: unknown) 
 }
 
 function safeReason(err: unknown): string {
+  // Boss guard messages are server-authored and carry no user or provider data,
+  // so the operator sees the exact refusal instead of "unexpected error".
+  if (err instanceof BossGuardError) return err.message;
   const text = String(err instanceof Error ? err.message : err).toLowerCase();
   if (text.includes("outside configured roots")) return "working directory is outside the configured roots";
   if (text.includes("working directory") || text.includes("enoent")) return "working directory is unavailable";
@@ -2736,6 +3043,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const requestedCwd = String(msg.cwd || DEFAULT_CWD);
       const provider = headless ? "ouro-boss" : String(msg.provider);
+      const reservedBossStart = headless ? false : assertBossStartAllowed(provider);
       const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
       const adapter = adapters.get(provider);
       if (!adapter) throw new Error(`provider not found: ${provider}`);
@@ -2839,8 +3147,21 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
           events: sess.events,
         }));
       }).catch((err) => {
+        if (reservedBossStart) releaseBossStartReservation();
         if (headless && ws.data.closed) return;
         sendWsErrorDetails(ws, "start", err, { provider, requestId });
+      });
+      break;
+    }
+    case "warm-boss": {
+      // Eager capability negotiation: connect the canonical Boss without
+      // sending a user turn so the client learns image support before input.
+      const sessionId = canonicalBossSessionId();
+      const sess = sessionId ? sessions.get(sessionId) : undefined;
+      if (!sess) return;
+      subscribe(ws, sess);
+      Promise.resolve(sess.adapter.warmup?.(sess)).catch((err) => {
+        sendWsErrorDetails(ws, "warm-boss", err, { sessionId: sess.id });
       });
       break;
     }
@@ -2965,6 +3286,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         sendWsErrorDetails(ws, "fork", new Error("no session"), { sessionId: String(msg.sessionId ?? "") });
         return;
       }
+      if (isCanonicalBossSession(sess)) {
+        sendWsErrorDetails(ws, "fork", new BossGuardError("the canonical Boss cannot be forked"), { sessionId: sess.id });
+        return;
+      }
       Promise.resolve(forkSession(sess))
         .then((fork) => ws.send(JSON.stringify({ kind: "session-forked", session: sessionSummary(fork) })))
         .catch((err) => {
@@ -3036,6 +3361,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "delete": {
       const sess = sessions.get(String(msg.sessionId));
       if (!sess) return;
+      if (isCanonicalBossSession(sess)) {
+        sendWsErrorDetails(ws, "delete", new BossGuardError("the canonical Boss cannot be deleted"), { sessionId: sess.id });
+        return;
+      }
       sess.adapter.dispose(sess);
       sessions.delete(sess.id);
       broadcastSessions();
