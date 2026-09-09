@@ -3,7 +3,19 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, pickInitialBossSession, promptDisplayText, providerSessionTitle, providerStartTimeoutMs, rememberRetiredId, resolveProviderSelection, restoreComposerDraft, settlePendingReply } = await import("../src/session");
+const {
+  applyCanonicalBoss,
+  composerDraftKey,
+  consumeOptimisticUserEcho,
+  foldEvent,
+  promptDisplayText,
+  providerSessionTitle,
+  providerStartTimeoutMs,
+  rememberRetiredId,
+  resolveProviderSelection,
+  restoreComposerDraft,
+  settlePendingReply,
+} = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -58,21 +70,20 @@ if (resolveProviderSelection(providers, "", "ouro-boss") !== "ouro-boss") {
 if (resolveProviderSelection(providers, "copilot", "ouro-boss") !== "ouro-boss") {
   throw new Error("a stale provider selection should collapse to the selected Ouro Boss");
 }
-const recoveredBoss = pickInitialBossSession([
-  { id: "stale-newer", provider: "copilot", cwd: "/tmp", title: "GitHub Copilot", status: "idle", createdAt: 20 },
-  { id: "boss-older", provider: "ouro-boss", cwd: "/tmp", title: "Boss", status: "idle", createdAt: 10 },
-], {
+const canonicalBoss = applyCanonicalBoss([
+  { id: "stale-newer", provider: "ouro-boss", cwd: "/work", title: "Boss", status: "idle", createdAt: 20 },
+  { id: "boss-older", provider: "ouro-boss", cwd: "/work", title: "Boss", status: "idle", createdAt: 10 },
+], { status: "canonical", agent: "slugger", sessionId: "boss-older", skipped: [] }, {
   productName: "Ouro Workbench v1",
   surfaceName: "Boss",
   defaultProvider: "ouro-boss",
   localAuthorityLabel: "Controlled here",
-  hubAuthorityLabel: "Controlled in Agency Hub",
-  hubUrl: "https://aka.ms/agency/hub",
+  externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
 });
-if (recoveredBoss?.id !== "boss-older") {
-  throw new Error(`Workbench root should resume its newest Boss, got ${JSON.stringify(recoveredBoss)}`);
+if (canonicalBoss?.id !== "boss-older") {
+  throw new Error(`Workbench root should adopt the server canonical Boss, got ${JSON.stringify(canonicalBoss)}`);
 }
-if (pickInitialBossSession([], null) !== null) {
+if (applyCanonicalBoss([], { status: "none", agent: "", skipped: [] }, null) !== null) {
   throw new Error("generic Agent Chat should not auto-resume a Workbench Boss");
 }
 if (providerSessionTitle(providers, "ouro-boss") !== "slugger") {
@@ -83,8 +94,7 @@ if (providerSessionTitle(providers, "ouro-boss", {
   surfaceName: "Boss",
   defaultProvider: "ouro-boss",
   localAuthorityLabel: "Controlled here",
-  hubAuthorityLabel: "Controlled in Agency Hub",
-  hubUrl: "https://aka.ms/agency/hub",
+  externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
 }) !== "Boss") {
   throw new Error("the Workbench boss should use the product surface title");
 }

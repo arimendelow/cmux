@@ -14,7 +14,7 @@ import { providerInfoForStatusRow } from "../src/components/StatusRow";
 import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 import { ImageAttachmentTray } from "../src/components/ImageAttachments";
 
-test("Workbench header makes local and Hub authority explicit", () => {
+test("Workbench header makes local and external authority explicit", () => {
   const html = renderToStaticMarkup(
     <WorkbenchHeader
       experience={{
@@ -23,9 +23,12 @@ test("Workbench header makes local and Hub authority explicit", () => {
         contextLabel: "Desk / demo-task",
         defaultProvider: "ouro-boss",
         localAuthorityLabel: "Controlled here",
-        hubAuthorityLabel: "Controlled in Agency Hub",
-        hubUrl: "https://aka.ms/agency/hub",
-        hubStatus: "connected",
+        externalAuthority: {
+          label: "Example Control Plane",
+          openUrl: "https://example.invalid/control",
+          openLabel: "Open control plane",
+          status: "connected",
+        },
       }}
     />,
   );
@@ -35,10 +38,10 @@ test("Workbench header makes local and Hub authority explicit", () => {
   expect(html).toContain("Desk / demo-task");
   expect(html).toContain("Controlled here");
   expect(html).toContain("Remote sessions");
-  expect(html).toContain("Controlled in Agency Hub");
-  expect(html).toContain("Hub connected");
-  expect(html).toContain("href=\"https://aka.ms/agency/hub\"");
-  expect(html).toContain("Open Hub");
+  expect(html).toContain("Example Control Plane");
+  expect(html).toContain("Connected");
+  expect(html).toContain("href=\"https://example.invalid/control\"");
+  expect(html).toContain("Open control plane");
   expect(shouldShowProviderPicker(null)).toBe(true);
   expect(shouldShowProviderPicker({ productName: "Ouro Workbench v1" })).toBe(false);
 });
@@ -47,7 +50,7 @@ test("Workbench authority stays readable in a narrow pane", () => {
   const css = readFileSync(join(import.meta.dir, "../public/app.css"), "utf8");
   expect(css).toContain("@media (max-width: 420px)");
   expect(css).toContain(".authority-remote { flex-direction: column; align-items: flex-start; gap: 2px; }");
-  expect(css).toContain(".authority-hub > span:first-child { flex-basis: 100%; }");
+  expect(css).toContain(".authority-external > span:first-child { flex-basis: 100%; }");
 });
 
 test("Workbench composer shows the selected Boss name instead of its internal provider id", () => {
@@ -149,4 +152,38 @@ test("chat provider switches preserve images only for image-capable providers", 
     attachments: [],
     error: "Staged images were removed because the provider does not support image attachments.",
   });
+});
+
+test("Workbench header falls back to a neutral external authority with no link", () => {
+  const html = renderToStaticMarkup(
+    <WorkbenchHeader
+      experience={{
+        productName: "Ouro Workbench v1",
+        surfaceName: "Boss",
+        defaultProvider: "ouro-boss",
+        localAuthorityLabel: "Controlled here",
+        externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
+      }}
+    />,
+  );
+
+  expect(html).toContain("Controlled elsewhere");
+  expect(html).toContain("Status unknown");
+  expect(html).not.toContain("<a ");
+});
+
+test("Workbench names the Boss surface as app-wide in its header", () => {
+  const html = renderToStaticMarkup(
+    <WorkbenchHeader
+      experience={{
+        productName: "Ouro Workbench v1",
+        surfaceName: "Boss",
+        defaultProvider: "ouro-boss",
+        localAuthorityLabel: "Controlled here",
+        externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
+      }}
+    />,
+  );
+  expect(html).toContain("App-wide");
+  expect(html).toContain("App-wide");
 });

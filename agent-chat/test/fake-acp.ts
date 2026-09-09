@@ -7,6 +7,8 @@ const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
 const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
+const imageCapabilityFlag = Bun.argv.findIndex((arg) => arg === "--image-capability");
+const imageCapability = imageCapabilityFlag >= 0 ? Bun.argv[imageCapabilityFlag + 1] ?? "" : "";
 const failLoad = Bun.argv.includes("--fail-load");
 const requestPermission = Bun.argv.includes("--request-permission");
 const exitAfterPermission = Bun.argv.includes("--exit-after-permission");
@@ -41,7 +43,11 @@ for await (const line of rl) {
       result: {
         protocolVersion: 1,
         agentCapabilities: {
-          promptCapabilities: { image: imageSupport },
+          promptCapabilities: {
+            image: imageCapability
+              ? imageCapability === "supported"
+              : imageSupport,
+          },
         },
       },
     });
