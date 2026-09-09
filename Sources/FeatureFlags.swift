@@ -189,16 +189,19 @@ enum OuroWorkbenchProduct {
         let usable = usableAgentNames
             .filter(isSafeAgentName)
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        // An explicit selection decides on its own: if it is not usable the
+        // relationship blocks rather than silently adopting the legacy record
+        // or the only other installed agent. The legacy record only applies to
+        // a configured upgrade that has no explicit selection yet.
         let configured = [selectedBossName, legacyBossName]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && isSafeAgentName($0) }
-        for candidate in configured where usable.contains(candidate) {
-            return .selected(candidate)
-        }
-        if let configuredName = configured.first {
-            return .unavailable(
-                "Boss agent \(configuredName) is not available. Reinstall it or choose a Boss again."
-            )
+            .map { $0?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+            .map { isSafeAgentName($0) ? $0 : "" }
+        if let configuredName = configured.first(where: { !$0.isEmpty }) {
+            return usable.contains(configuredName)
+                ? .selected(configuredName)
+                : .unavailable(
+                    "Boss agent \(configuredName) is not available. Reinstall it or choose a Boss again."
+                )
         }
         if usable.isEmpty {
             return .unavailable("No enabled Ouro agents are installed.")

@@ -909,7 +909,7 @@ extension AppDelegate {
         case rehome
     }
 
-    static func workbenchBossSummonAction(
+    nonisolated static func workbenchBossSummonAction(
         ownerWindowId: UUID?,
         requestingWindowId: UUID?
     ) -> WorkbenchBossSummonAction {

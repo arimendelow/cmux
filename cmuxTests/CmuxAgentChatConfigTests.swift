@@ -127,21 +127,23 @@ struct CmuxAgentChatConfigTests {
         ))
     }
 
-    @Test func ouroWorkbenchBossSelectionPreservesValidLegacyThenFallsBackOnlyWhenUnique() {
+    @Test func ouroWorkbenchBossSelectionPrefersTheExplicitChoiceThenTheLegacyRecord() {
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             selectedBossName: "ouroboros",
             legacyBossName: "slugger",
             usableAgentNames: ["ouroboros", "slugger"]
         ) == .selected("ouroboros"))
+        // An explicit choice that is not installed blocks; it never falls
+        // through to the legacy record or to the only other usable agent.
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             selectedBossName: "missing",
             legacyBossName: "slugger",
             usableAgentNames: ["ouroboros", "slugger"]
-        ) == .selected("slugger"))
+        ) == .unavailable("Boss agent missing is not available. Reinstall it or choose a Boss again."))
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: "missing",
             usableAgentNames: ["ouroboros"]
-        ) == .selected("ouroboros"))
+        ) == .unavailable("Boss agent missing is not available. Reinstall it or choose a Boss again."))
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: nil,
             usableAgentNames: []
@@ -160,7 +162,7 @@ struct CmuxAgentChatConfigTests {
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: "disabled",
             usableAgentNames: ["ouroboros"]
-        ) == .selected("ouroboros"))
+        ) == .unavailable("Boss agent disabled is not available. Reinstall it or choose a Boss again."))
     }
 
     @Test func ouroWorkbenchPersistsExplicitBossSelectionAndScopesItsSessions() throws {
