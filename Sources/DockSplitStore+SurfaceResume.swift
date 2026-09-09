@@ -11,6 +11,12 @@ extension DockSplitStore {
         let cachedManagedBinding =
             detachedSurfaceTransfersByPanelId[panelId]?.resolvedManagedAgentResumeBinding
         if binding.isAgentHookBinding,
+           restoredAgentLifecycle.snapshotsByPanelId[panelId] == nil,
+           restoredAgentLifecycle.resumeStatesByPanelId[panelId] != nil,
+           managedAgentResumeBinding(panelId: panelId)?.isSameManagedSession(as: binding) != true {
+            clearRestoredAgentContinuationState(panelId: panelId)
+        }
+        if binding.isAgentHookBinding,
            let cachedTransfer = detachedSurfaceTransfersByPanelId[panelId] {
             let cachedSessionMetadataExists =
                 cachedManagedBinding != nil ||

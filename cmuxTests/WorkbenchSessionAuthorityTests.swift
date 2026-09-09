@@ -665,29 +665,55 @@ struct WorkbenchSessionAuthorityTests {
 
     @MainActor
     @Test func ReplacementDockBindingCanTakeOverTheReplacementSession() throws {
+        let source = Workspace()
+        let terminal = try #require(source.focusedTerminalPanel)
+        let oldSessionID = "88888888-8888-4888-8888-888888888888"
+        source.restoredAgentSnapshotsByPanelId[terminal.id] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: oldSessionID,
+                workbenchAuthority: .controlledExternally
+            )
+        source.restoredAgentResumeStatesByPanelId[terminal.id] = .completedAgentExit
+        source.panelShellActivityStates[terminal.id] = .promptIdle
+        terminal.updateShellActivityState(.promptIdle)
+        source.surfaceResumeBindingsByPanelId[terminal.id] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(oldSessionID)",
+                checkpointId: oldSessionID,
+                source: "agent-hook",
+                workbenchAuthority: .controlledExternally
+            )
+        let detached = try #require(source.detachSurface(panelId: terminal.id))
         let store = DockSplitStore(
             workspaceId: UUID(),
             baseDirectoryProvider: { nil }
         )
-        let terminal = TerminalPanel(workspaceId: store.workspaceId)
-        store.panels[terminal.id] = terminal
+        defer { store.closeAllPanels() }
+        let rootPane = try #require(store.bonsplitController.allPaneIds.first)
+        #expect(
+            store.attachDetachedSurface(
+                detached,
+                inPane: rootPane,
+                focus: false
+            ) == terminal.id
+        )
         let replacementSessionID = "88888888-8888-4888-8888-888888888889"
-        store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id] =
-            SessionRestorableAgentSnapshot(
-                kind: .copilot,
-                sessionId: "superseded-session",
-                workbenchAuthority: .controlledExternally
+        #expect(
+            store.setSurfaceResumeBinding(
+                SurfaceResumeBindingSnapshot(
+                    kind: "copilot",
+                    command: "copilot --resume \(replacementSessionID)",
+                    checkpointId: replacementSessionID,
+                    source: "agent-hook",
+                    workbenchAuthority: .controlledExternally
+                ),
+                panelId: terminal.id
             )
-        store.restoredAgentLifecycle.resumeStatesByPanelId[terminal.id] = .completedAgentExit
+        )
+        #expect(store.replacedCachedTransferAgentSessionPanelIds.contains(terminal.id))
         terminal.updateShellActivityState(.promptIdle)
-        store.surfaceResumeBindingsByPanelId[terminal.id] =
-            SurfaceResumeBindingSnapshot(
-                kind: "copilot",
-                command: "copilot --resume \(replacementSessionID)",
-                checkpointId: replacementSessionID,
-                source: "agent-hook",
-                workbenchAuthority: .controlledExternally
-            )
         var sent = ""
 
         #expect(store.canTakeControlOfExternalSession(panelId: terminal.id))
@@ -696,14 +722,53 @@ struct WorkbenchSessionAuthorityTests {
             return true
         })
         #expect(sent.contains(replacementSessionID))
+        #expect(!store.invalidatedCachedTransferAgentSessionPanelIds.contains(terminal.id))
+        #expect(!store.replacedCachedTransferAgentSessionPanelIds.contains(terminal.id))
+        let rebasedTransfer = try #require(
+            store.detachedSurfaceTransfersByPanelId[terminal.id]
+        )
+        #expect(rebasedTransfer.restorableAgent?.sessionId == replacementSessionID)
+        #expect(
+            rebasedTransfer.restorableAgent?.workbenchAuthority ==
+                .controlledHere
+        )
+        #expect(
+            rebasedTransfer.restorableAgentResumeState ==
+                .awaitingAutoResumeCommand
+        )
+        #expect(rebasedTransfer.resumeBinding == nil)
+        #expect(rebasedTransfer.managedAgentResumeBinding == nil)
         #expect(
             store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id]?.sessionId ==
                 replacementSessionID
         )
-        #expect(
-            store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id]?.workbenchAuthority ==
-                .controlledHere
+    }
+
+    @MainActor
+    @Test func SnapshotlessCompletedStateClearsWhenNewBindingArrives() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        workspace.restoredAgentResumeStatesByPanelId[panelId] = .completedAgentExit
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume new-session",
+            checkpointId: "new-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
         )
+        #expect(workspace.setSurfaceResumeBinding(binding, panelId: panelId))
+        #expect(workspace.restoredAgentResumeStatesByPanelId[panelId] == nil)
+
+        let dock = DockSplitStore(
+            workspaceId: UUID(),
+            baseDirectoryProvider: { nil }
+        )
+        let terminal = TerminalPanel(workspaceId: dock.workspaceId)
+        dock.panels[terminal.id] = terminal
+        dock.restoredAgentLifecycle.resumeStatesByPanelId[terminal.id] =
+            .completedAgentExit
+        #expect(dock.setSurfaceResumeBinding(binding, panelId: terminal.id))
+        #expect(dock.restoredAgentLifecycle.resumeStatesByPanelId[terminal.id] == nil)
     }
 
     private func localSnapshot() -> SessionRestorableAgentSnapshot {

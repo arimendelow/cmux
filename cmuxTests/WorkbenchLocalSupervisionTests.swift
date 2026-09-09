@@ -2203,6 +2203,27 @@ struct WorkbenchLocalActionTests {
         #expect(context["can_take_over"] as? Bool == true)
     }
 
+    @Test func snapshotlessCompletedStateDoesNotMarkBindingEnded() {
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume replacement-session",
+            checkpointId: "replacement-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: binding,
+            state: .completedAgentExit,
+            canTakeOver: true
+        )
+
+        #expect(context["state"] as? String == "waiting_for_supervisor")
+        #expect(context["session_id"] as? String == "replacement-session")
+        #expect(context["can_take_over"] as? Bool == true)
+    }
+
     @Test func resumeContextLeavesOrdinaryTerminalsUnmanaged() {
         let context = WorkbenchLocalActionRouter.resumeContextForTesting(
             agent: nil,

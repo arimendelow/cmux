@@ -265,7 +265,8 @@ extension Workspace {
         by binding: SurfaceResumeBindingSnapshot,
         panelId: UUID
     ) {
-        guard restoredAgentLifecycle.ownsInFlightRestoredCommand(panelId: panelId) else {
+        guard restoredAgentResumeStatesByPanelId[panelId] != nil ||
+            restoredAgentSnapshotsByPanelId[panelId] != nil else {
             return
         }
         let continuesRestoredSession: Bool

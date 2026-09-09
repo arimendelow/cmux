@@ -805,7 +805,10 @@ enum WorkbenchLocalActionRouter {
         } ?? agent
         let bindingSupersedesAgent =
             agent != nil && managedBinding != nil && compatibleAgent == nil
-        let effectiveState = bindingSupersedesAgent ? nil : state
+        let snapshotlessCompletedBinding =
+            agent == nil && managedBinding != nil && state == .completedAgentExit
+        let effectiveState =
+            bindingSupersedesAgent || snapshotlessCompletedBinding ? nil : state
         let hasManagedResume = compatibleAgent != nil || managedBinding != nil
         guard hasManagedResume else {
             return [
