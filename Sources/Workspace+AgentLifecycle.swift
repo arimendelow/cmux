@@ -313,11 +313,16 @@ extension Workspace {
             return false
         }
         let liveIndex = restorableAgentIndex ?? SharedLiveAgentIndex.shared.index
-        return !AgentResumeLiveness.hasLiveProcess(
-            for: liveIndex?.entry(workspaceId: id, panelId: panelId),
-            kind: kind,
-            sessionId: checkpointId
-        )
+        guard let liveEntry = liveIndex?.entry(workspaceId: id, panelId: panelId),
+              liveEntry.snapshot.kind.rawValue == kind,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: kind,
+                  lhs: liveEntry.snapshot.sessionId,
+                  rhs: checkpointId
+              ) else {
+            return false
+        }
+        return liveEntry.processLiveness == .exited
     }
 
     func seedSessionRestoredAgentState(
