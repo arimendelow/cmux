@@ -322,7 +322,10 @@ extension Workspace {
               ) else {
             return false
         }
-        guard liveEntry.updatedAt >= binding.updatedAt else {
+        guard Self.sameAgentLaunchGeneration(
+            binding.launchCommand,
+            liveEntry.snapshot.launchCommand
+        ) else {
             return false
         }
         if let bindingKind = RestorableAgentKind(rawValue: kind),
@@ -338,6 +341,23 @@ extension Workspace {
             return false
         }
         return liveEntry.processLiveness == .exited
+    }
+
+    private nonisolated static func sameAgentLaunchGeneration(
+        _ bindingLaunch: AgentLaunchCommandSnapshot?,
+        _ observedLaunch: AgentLaunchCommandSnapshot?
+    ) -> Bool {
+        guard let bindingLaunch,
+              let observedLaunch,
+              let bindingCapturedAt = bindingLaunch.capturedAt,
+              let observedCapturedAt = observedLaunch.capturedAt,
+              bindingCapturedAt > 0,
+              bindingCapturedAt == observedCapturedAt else {
+            return false
+        }
+        return bindingLaunch.launcher == observedLaunch.launcher &&
+            bindingLaunch.executablePath == observedLaunch.executablePath &&
+            bindingLaunch.arguments == observedLaunch.arguments
     }
 
     func seedSessionRestoredAgentState(

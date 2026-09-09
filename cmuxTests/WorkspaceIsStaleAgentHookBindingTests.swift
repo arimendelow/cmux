@@ -46,15 +46,24 @@ struct WorkspaceIsStaleAgentHookBindingTests {
     private static func codexAgentHookBinding(
         sessionID: String,
         autoResume: Bool? = nil,
-        updatedAt: TimeInterval = Date().timeIntervalSince1970
+        launchCapturedAt: TimeInterval? = nil
     ) -> SurfaceResumeBindingSnapshot {
         SurfaceResumeBindingSnapshot(
             kind: "codex",
             command: "codex resume \(sessionID)",
             checkpointId: sessionID,
             source: "agent-hook",
-            autoResume: autoResume,
-            updatedAt: updatedAt
+            launchCommand: launchCapturedAt.map {
+                AgentLaunchCommandSnapshot(
+                    launcher: "codex",
+                    executablePath: "/usr/local/bin/codex",
+                    arguments: ["/usr/local/bin/codex"],
+                    workingDirectory: "/tmp/repo",
+                    capturedAt: $0,
+                    source: "test"
+                )
+            },
+            autoResume: autoResume
         )
     }
 
@@ -114,7 +123,7 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let binding = Self.codexAgentHookBinding(
             sessionID: sessionID,
-            updatedAt: fixture.updatedAt
+            launchCapturedAt: fixture.updatedAt
         )
 
         #expect(
@@ -139,8 +148,30 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let binding = Self.codexAgentHookBinding(
             sessionID: sessionID,
-            updatedAt: fixture.updatedAt + 1
+            launchCapturedAt: fixture.updatedAt + 1
         )
+
+        #expect(
+            workspace.isStaleAgentHookBinding(
+                binding,
+                panelId: panelId,
+                restorableAgentIndex: fixture.index
+            ) == false
+        )
+    }
+
+    @Test
+    func commandOnlyBindingIsNotRetiredWithoutLaunchGeneration() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "command-only-generation-unknown"
+        let fixture = try Self.exitedCodexIndex(
+            workspaceID: workspace.id,
+            panelID: panelId,
+            sessionID: sessionID
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let binding = Self.codexAgentHookBinding(sessionID: sessionID)
 
         #expect(
             workspace.isStaleAgentHookBinding(
@@ -164,7 +195,7 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let binding = Self.codexAgentHookBinding(
             sessionID: sessionID,
-            updatedAt: fixture.updatedAt
+            launchCapturedAt: fixture.updatedAt
         )
         let processID = getpid()
         let processIdentity = try #require(AgentPIDProcessIdentity(pid: processID))
@@ -256,7 +287,7 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         let binding = Self.codexAgentHookBinding(
             sessionID: sessionID,
             autoResume: true,
-            updatedAt: fixture.updatedAt
+            launchCapturedAt: fixture.updatedAt
         )
         #expect(workspace.setSurfaceResumeBinding(binding, panelId: panelId))
 
