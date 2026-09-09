@@ -5,6 +5,7 @@ import { StatusRow } from "./components/StatusRow";
 import { ActivityIndicatorBlock, Blocks, ElicitationBlock, PermissionBlock, PlanBlock, ToolBlock, TurnActions, type ToolBlockVariant } from "./components/Transcript";
 import { WorkbenchHeader } from "./components/WorkbenchHeader";
 import { RecoveryBanner } from "./components/RecoveryBanner";
+import { BossStatusBanner } from "./components/BossStatusBanner";
 import { BarsIcon, PinwheelSpinner, ProviderIcon } from "./components/icons";
 import { HintTooltip } from "./components/Tooltips";
 import { useOverlayScrollbars } from "./hooks/useOverlayScrollbars";
@@ -295,6 +296,30 @@ export function GalleryApp() {
                   openLabel: "Open control plane",
                   status: "connected",
                 },
+              }} />
+            </div>
+            <div>
+              <div className="gallery-label">Boss identity with no external integration</div>
+              <WorkbenchHeader experience={{
+                productName: "Ouro Workbench v1",
+                surfaceName: "Boss",
+                contextLabel: "Desk / demo-task",
+                defaultProvider: "ouro-boss",
+                localAuthorityLabel: "Controlled here",
+                externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
+              }} />
+            </div>
+            <div>
+              <div className="gallery-label">Blocked Boss recovery</div>
+              <BossStatusBanner boss={{
+                status: "blocked",
+                agent: "demo-agent",
+                reason: "ambiguous-candidates",
+                detail: "2 persisted Boss sessions match agent demo-agent: boss-1, boss-2",
+                skipped: [
+                  { id: "boss-1", agent: "demo-agent", reason: "not-canonical" },
+                  { id: "boss-9", agent: "other-agent", reason: "agent-mismatch" },
+                ],
               }} />
             </div>
             <div>

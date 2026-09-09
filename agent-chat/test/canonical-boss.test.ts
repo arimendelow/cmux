@@ -5,6 +5,8 @@ import {
   bossCandidateReason,
   canonicalBossPointerPath,
   listBossCandidates,
+  listBossCandidatesInPartition,
+  parseCanonicalBossPointer,
   readCanonicalBossPointer,
   repointCanonicalBoss,
   resolveCanonicalBoss,
@@ -372,6 +374,120 @@ test("repair repoints the canonical pointer atomically and preserves every trans
     expect((await readCanonicalBossPointer(root)).pointer?.sessionId).toBe("boss-2");
   } finally {
     await chmod(root, 0o700).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pointer parsing rejects non-object and non-v1 payloads", () => {
+  expect(() => parseCanonicalBossPointer(null)).toThrow("canonical Boss pointer must be an object");
+  expect(() => parseCanonicalBossPointer([])).toThrow("canonical Boss pointer must be an object");
+  expect(() => parseCanonicalBossPointer({ version: 2, agent: "a", sessionId: "b" }))
+    .toThrow("canonical Boss pointer version must be 1");
+});
+
+test("a routed session that is itself unusable blocks with its own reason", () => {
+  const state = resolveCanonicalBoss({
+    pointer: null,
+    configuredAgent: "slugger",
+    routedSessionId: "broken",
+    candidates: [
+      candidate({ id: "broken", loadError: "broken.json: bad JSON" }),
+      candidate({ id: "boss-1" }),
+    ],
+  });
+  expect(state.status).toBe("blocked");
+  if (state.status !== "blocked") throw new Error("expected blocked");
+  expect(state.reason).toBe("corrupt-record");
+  expect(state.detail).toBe("broken.json: bad JSON");
+
+  // A routed id with no matching record falls through to normal migration.
+  expect(resolveCanonicalBoss({
+    pointer: null,
+    configuredAgent: "slugger",
+    routedSessionId: "absent",
+    candidates: [candidate({ id: "boss-1" })],
+  })).toEqual({
+    status: "adopt",
+    pointer: { version: 1, agent: "slugger", sessionId: "boss-1" },
+    skipped: [],
+  });
+});
+
+test("candidate listing tolerates a missing root, a missing partition, and malformed records", async () => {
+  const root = await tempRoot("candidates-missing-");
+  try {
+    expect(await listBossCandidates(join(root, "absent"))).toEqual([]);
+    expect(await listBossCandidatesInPartition(join(root, "absent"), "slugger")).toEqual([]);
+
+    const partition = join(root, "slugger");
+    await mkdir(partition, { recursive: true });
+    await writeFile(join(partition, "no-autoapprove.json"), JSON.stringify({
+      id: "no-autoapprove",
+      provider: "ouro-boss",
+      providerSessionId: "p",
+      cwd: root,
+      title: "Boss",
+      createdAt: 1,
+    }), { mode: 0o600 });
+    await writeFile(join(partition, "no-createdat.json"), JSON.stringify({
+      id: "no-createdat",
+      provider: "ouro-boss",
+      providerSessionId: "p",
+      cwd: root,
+      title: "Boss",
+      autoApprove: false,
+    }), { mode: 0o600 });
+    await writeFile(join(partition, "not-an-object.json"), "[]", { mode: 0o600 });
+    await writeFile(join(partition, "canonical-boss.json"), "{}", { mode: 0o600 });
+
+    const candidates = await listBossCandidates(root);
+    expect(candidates.map((entry) => entry.id).sort()).toEqual([
+      "no-autoapprove",
+      "no-createdat",
+      "not-an-object",
+    ]);
+    expect(candidates.find((entry) => entry.id === "no-autoapprove")?.loadError)
+      .toContain("autoApprove must be boolean");
+    expect(candidates.find((entry) => entry.id === "no-createdat")?.loadError)
+      .toContain("createdAt must be finite");
+    expect(candidates.find((entry) => entry.id === "not-an-object")?.loadError)
+      .toContain("session record must be an object");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("repair rejects an unsafe target and a corrupt candidate without writing a pointer", async () => {
+  const root = await tempRoot("repair-invalid-");
+  try {
+    const partition = join(root, "slugger");
+    await mkdir(partition, { recursive: true });
+    await writeFile(join(partition, "broken.json"), "{oops", { mode: 0o600 });
+
+    expect(await repointCanonicalBoss(root, { agent: "../escape", sessionId: "boss-1" })).toEqual({
+      ok: false,
+      error: "invalid canonical Boss agent: ../escape",
+    });
+    const corrupt = await repointCanonicalBoss(root, { agent: "slugger", sessionId: "broken" });
+    expect(corrupt.ok).toBe(false);
+    expect(corrupt.ok === false ? corrupt.error : "").toContain("broken.json");
+    expect(await readCanonicalBossPointer(root)).toEqual({ pointer: null, error: null });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an atomic pointer write cleans up after a failed rename", async () => {
+  const root = await tempRoot("pointer-failure-");
+  try {
+    await mkdir(canonicalBossPointerPath(root), { recursive: true });
+    await expect(writeCanonicalBossPointer(root, {
+      version: 1,
+      agent: "slugger",
+      sessionId: "boss-1",
+    })).rejects.toThrow();
+    expect(await readdir(root)).toEqual(["canonical-boss.json"]);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
