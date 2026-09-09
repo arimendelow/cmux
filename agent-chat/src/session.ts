@@ -13,6 +13,7 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  | { kind: "capabilities"; image: ImagePromptCapability }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string }
@@ -100,16 +101,42 @@ export interface Provider {
   installCommand?: string;
   startupTimeoutMs?: number;
 }
+export type ExternalAuthorityStatus =
+  | "connected"
+  | "disconnected"
+  | "stopped"
+  | "unavailable"
+  | "unknown";
+export interface ExternalAuthority {
+  label: string;
+  openUrl?: string;
+  openLabel?: string;
+  status: ExternalAuthorityStatus;
+}
 export interface WorkbenchExperience {
   productName: string;
   surfaceName: string;
   contextLabel?: string;
   defaultProvider: string;
   localAuthorityLabel: string;
-  hubAuthorityLabel: string;
-  hubUrl: string;
-  hubStatus?: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
+  externalAuthority: ExternalAuthority;
 }
+export type ImagePromptCapability = "unknown" | "supported" | "unsupported";
+export type BossSkipReason =
+  | "corrupt-record"
+  | "cwd-unavailable"
+  | "agent-mismatch"
+  | "not-canonical";
+export interface BossSkippedRecord { id: string; agent: string; reason: BossSkipReason; }
+export interface BossState {
+  status: "none" | "canonical" | "blocked";
+  agent: string;
+  sessionId?: string;
+  reason?: string;
+  detail?: string;
+  skipped: BossSkippedRecord[];
+}
+export interface WorkbenchActionAvailability { fork: boolean; compose: boolean; delete: boolean; }
 export interface RecoveryState { mode: "resumed" | "respawned"; title: string; message: string; }
 export interface ConnectionState { state: "starting"; title: string; message?: string; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; createdAt?: number; capabilities?: ProviderCapabilities; }
@@ -193,6 +220,7 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
       );
     case "recovery":
     case "connection":
+    case "capabilities":
       return blocks;
     default:
       return blocks;
@@ -204,6 +232,7 @@ interface Hello {
   defaultCwd: string;
   defaultProvider?: string;
   experience?: WorkbenchExperience;
+  boss?: BossState;
   keys?: { ctrlJ?: CtrlJMode };
 }
 
@@ -215,6 +244,9 @@ export interface SessionState {
   defaultCwd: string;
   defaultProvider: string;
   experience: WorkbenchExperience | null;
+  boss: BossState | null;
+  imageCapability: ImagePromptCapability;
+  actionsAllowed: WorkbenchActionAvailability;
   connection: ConnectionState | null;
   recovery: RecoveryState | null;
   ctrlJ: CtrlJMode;
@@ -308,14 +340,35 @@ export function resolveProviderSelection(providers: Provider[], current: string,
   return installed[0]?.id ?? current;
 }
 
-export function pickInitialBossSession(
+/**
+ * The canonical Boss always comes from the server. Recency heuristics are gone
+ * on purpose: a newer session must never win over the server's pointer.
+ */
+export function applyCanonicalBoss(
   sessions: SessionSummary[],
+  boss: BossState | null,
   experience: WorkbenchExperience | null,
 ): SessionSummary | null {
-  if (!experience) return null;
-  return sessions
-    .filter((session) => session.provider === experience.defaultProvider)
-    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0] ?? null;
+  if (!experience || !boss || boss.status !== "canonical" || !boss.sessionId) return null;
+  return sessions.find((session) => session.id === boss.sessionId) ?? null;
+}
+
+export function bossBlockedMessage(boss: BossState | null): string {
+  if (!boss || boss.status !== "blocked") return "";
+  return `Boss recovery is blocked (${boss.reason}): ${boss.detail}`;
+}
+
+/** Workbench has one continuous Boss relationship: no new, reset, delete, fork. */
+export function workbenchActionsAllowed(
+  experience: WorkbenchExperience | null,
+): WorkbenchActionAvailability {
+  const allowed = !experience;
+  return { fork: allowed, compose: allowed, delete: allowed };
+}
+
+/** While capability is still unknown the composer holds the draft and waits. */
+export function canSendWhileNegotiating(capability: ImagePromptCapability): boolean {
+  return capability !== "unknown";
 }
 
 export function useSession(): SessionState {
@@ -326,6 +379,8 @@ export function useSession(): SessionState {
   const [defaultCwd, setDefaultCwd] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("");
   const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
+  const [boss, setBoss] = useState<BossState | null>(null);
+  const [imageCapability, setImageCapability] = useState<ImagePromptCapability>("unknown");
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
@@ -359,6 +414,7 @@ export function useSession(): SessionState {
   const pendingStartTimeoutRef = useRef<number | null>(null);
   const optimisticUsersRef = useRef<string[]>([]);
   const experienceRef = useRef<WorkbenchExperience | null>(null);
+  const bossRef = useRef<BossState | null>(null);
   const initialSessionListHandledRef = useRef(false);
 
   const clearPendingStartTimeout = useCallback(() => {
@@ -410,7 +466,10 @@ export function useSession(): SessionState {
       wsRef.current = ws;
       ws.onopen = () => {
         const pending = pendingStartRef.current;
-        if (sessionIdRef.current) sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
+        if (sessionIdRef.current) {
+          sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
+          sendRaw({ op: "warm-boss" });
+        }
         else if (pending && !pending.failed) {
           sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, options: pending.options });
           armPendingStartTimeout(pending.provider);
@@ -428,6 +487,9 @@ export function useSession(): SessionState {
             setDefaultProvider(h.defaultProvider ?? "");
             experienceRef.current = h.experience ?? null;
             setExperience(experienceRef.current);
+            bossRef.current = h.boss ?? null;
+            setBoss(bossRef.current);
+            if (h.boss?.status === "blocked") setLastError(bossBlockedMessage(h.boss));
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
@@ -488,11 +550,16 @@ export function useSession(): SessionState {
             setPhase("composer");
             optimisticUsersRef.current = [];
             break;
+          case "boss-state":
+            bossRef.current = (msg.boss as BossState) ?? null;
+            setBoss(bossRef.current);
+            if (bossRef.current?.status === "blocked") setLastError(bossBlockedMessage(bossRef.current));
+            break;
           case "sessions": {
             if (initialSessionListHandledRef.current) break;
             initialSessionListHandledRef.current = true;
             if (routedSessionId || sessionIdRef.current || pendingStartRef.current) break;
-            const recovered = pickInitialBossSession(msg.sessions ?? [], experienceRef.current);
+            const recovered = applyCanonicalBoss(msg.sessions ?? [], bossRef.current, experienceRef.current);
             if (!recovered) break;
             sessionIdRef.current = recovered.id;
             history.replaceState(null, "", appPath("/s/" + recovered.id));
@@ -520,6 +587,10 @@ export function useSession(): SessionState {
               }
               if (evt.kind === "recovery") {
                 setRecovery({ mode: evt.mode, title: evt.title, message: evt.message });
+                break;
+              }
+              if (evt.kind === "capabilities") {
+                setImageCapability(evt.image);
                 break;
               }
               if (evt.kind === "user" && consumeOptimisticUserEcho(optimisticUsersRef.current, evt.text)) {
@@ -629,6 +700,7 @@ export function useSession(): SessionState {
     return true;
   }, [armPendingStartTimeout, experience, providers, sendRaw]);
   const compose = useCallback(() => {
+    if (experienceRef.current) return;
     clearPendingStartTimeout();
     pendingStartRef.current = null;
     history.replaceState(null, "", appPath("/"));
@@ -689,6 +761,7 @@ export function useSession(): SessionState {
     }
   }, [sendRaw]);
   const fork = useCallback(() => {
+    if (experienceRef.current) return;
     if (sessionIdRef.current) {
       if (sendRaw({ op: "fork", sessionId: sessionIdRef.current })) setForkPending(true);
     }
@@ -721,6 +794,9 @@ export function useSession(): SessionState {
     defaultCwd,
     defaultProvider,
     experience,
+    boss,
+    imageCapability,
+    actionsAllowed: workbenchActionsAllowed(experience),
     connection,
     recovery,
     ctrlJ,

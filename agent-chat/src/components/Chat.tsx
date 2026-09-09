@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useCtx } from "../context";
 import { readStoredProviderOptions, persistOptionsSnapshot, updateStoredProviderOption } from "../options-store";
-import type { OptionValue, SessionOption } from "../session";
+import { canSendWhileNegotiating, type OptionValue, type SessionOption } from "../session";
 import { ArrowUp } from "./icons";
 import { isCtrlJ, insertNewlineAtCaret, useCommandMenu } from "./CommandMenu";
 import { optionAcceptsValue } from "./options";
 import { StatusRow } from "./StatusRow";
 import { Blocks } from "./Transcript";
 import { WorkbenchHeader } from "./WorkbenchHeader";
+import { BossStatusBanner } from "./BossStatusBanner";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ShortcutOverlay, useKeymap } from "../hooks/useKeymap";
 import { useAutoGrow } from "../hooks/useAutoGrow";
@@ -56,7 +57,7 @@ function useStickToBottom(scrollRef: RefObject<HTMLDivElement | null>, stickRef:
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, boss, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
   const [text, setText] = useState("");
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -69,6 +70,9 @@ export function Chat() {
   const commandMenu = useCommandMenu(text, setText, commandGroups, taRef, ctrlJ);
   const allProviderOptions = providerOptionMap(providers, providerOptions, capabilities);
   const running = session?.status === "running";
+  // Workbench holds the draft (never discards it) until the peer answers the
+  // capability negotiation, so an image-capable turn is never sent blind.
+  const negotiating = Boolean(experience) && !canSendWhileNegotiating(imageCapability);
 
   useRestoreModelScopedOptions({ provider: session?.provider, options, setOption, pendingModelRestoreRef });
   usePersistSessionOptions(session?.provider, options, pendingModelRestoreRef.current !== null);
@@ -98,7 +102,7 @@ export function Chat() {
   };
   const submit = () => {
     const t = text.trim();
-    if (!t) return;
+    if (!t || negotiating) return;
     stickRef.current = true;
     reply(t);
     setText("");
@@ -114,6 +118,7 @@ export function Chat() {
       setOpenOptionId(null);
       return;
     }
+    if (!actionsAllowed.compose) return;
     updateStoredProviderOption(provider, "model", model, allProviderOptions[provider] ?? []);
     localStorage.setItem("agentui.provider", provider);
     localStorage.setItem("agentui.cwd", session.cwd);
@@ -124,6 +129,7 @@ export function Chat() {
   return (
     <section id="chat-view">
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
+      <BossStatusBanner boss={boss} />
       {connection ? (
         <div className="recovery-banner-wrap">
           <div className="recovery-banner startup-banner" role="status">
@@ -136,7 +142,7 @@ export function Chat() {
         <Blocks
           blocks={blocks}
           status={session?.status}
-          actions={actions}
+          actions={actionsAllowed.fork ? actions : {}}
           onFork={fork}
           forkPending={forkPending}
           fileDiffs={fileDiffs}
@@ -180,7 +186,7 @@ export function Chat() {
             trailing={(
               <div className="chat-actions">
                 {running ? <button id="stop-btn" type="button" onClick={stop}>Stop</button> : null}
-                <button className="send" type="button" aria-label="Send" disabled={!text.trim()} onClick={submit}>
+                <button className="send" type="button" aria-label={negotiating ? "Connecting" : "Send"} disabled={!text.trim() || negotiating} onClick={submit}>
                   <ArrowUp />
                 </button>
               </div>

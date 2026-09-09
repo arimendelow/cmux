@@ -289,9 +289,12 @@ export function GalleryApp() {
                 contextLabel: "Desk / demo-task",
                 defaultProvider: "ouro-boss",
                 localAuthorityLabel: "Controlled here",
-                hubAuthorityLabel: "Controlled in Agency Hub",
-                hubUrl: "https://aka.ms/agency/hub",
-                hubStatus: "connected",
+                externalAuthority: {
+                  label: "Example Control Plane",
+                  openUrl: "https://example.invalid/control",
+                  openLabel: "Open control plane",
+                  status: "connected",
+                },
               }} />
             </div>
             <div>

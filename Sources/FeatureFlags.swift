@@ -177,6 +177,10 @@ enum OuroWorkbenchProduct {
         }
     }
 
+    /// Boss selection is one-time onboarding. A configured agent that is not
+    /// currently usable blocks visibly; it never falls back to "the only other
+    /// installed agent", because that would silently start a second Boss
+    /// relationship under a different identity.
     static func resolveBossSelection(
         selectedBossName: String? = nil,
         legacyBossName: String?,
@@ -185,23 +189,59 @@ enum OuroWorkbenchProduct {
         let usable = usableAgentNames
             .filter(isSafeAgentName)
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        if let selectedBossName = selectedBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           isSafeAgentName(selectedBossName),
-           usable.contains(selectedBossName) {
-            return .selected(selectedBossName)
+        let configured = [selectedBossName, legacyBossName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && isSafeAgentName($0) }
+        for candidate in configured where usable.contains(candidate) {
+            return .selected(candidate)
         }
-        if let legacyBossName = legacyBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           isSafeAgentName(legacyBossName),
-           usable.contains(legacyBossName) {
-            return .selected(legacyBossName)
-        }
-        if usable.count == 1 {
-            return .selected(usable[0])
+        if let configuredName = configured.first {
+            return .unavailable(
+                "Boss agent \(configuredName) is not available. Reinstall it or choose a Boss again."
+            )
         }
         if usable.isEmpty {
             return .unavailable("No enabled Ouro agents are installed.")
         }
         return .unavailable("Choose one Ouro agent as Boss: \(usable.joined(separator: ", ")).")
+    }
+
+    /// The canonical Boss pointer is owned by the Agent Chat server; the app
+    /// only needs to know whether a canonical relationship exists yet.
+    static func bossSessionsRootURL(
+        applicationSupportURL: URL
+    ) -> URL {
+        applicationSupportURL
+            .appendingPathComponent("Ouro Workbench v1", isDirectory: true)
+            .appendingPathComponent("Agent Chat", isDirectory: true)
+            .appendingPathComponent("Sessions", isDirectory: true)
+    }
+
+    static func canonicalBossPointerURL(
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        let appSupport = applicationSupportURL
+            ?? homeURL.appendingPathComponent("Library/Application Support")
+        return bossSessionsRootURL(applicationSupportURL: appSupport)
+            .appendingPathComponent("canonical-boss.json")
+    }
+
+    static func hasCanonicalBoss(
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        fileManager.fileExists(atPath: canonicalBossPointerURL(
+            applicationSupportURL: applicationSupportURL,
+            homeURL: homeURL
+        ).path)
     }
 
     static func usableBossAgentNames(
@@ -282,6 +322,8 @@ enum OuroWorkbenchProduct {
                 .path,
             "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
         ]
+        let sessionsRoot = bossSessionsRootURL(applicationSupportURL: appSupport)
+        environment["CMUX_AGENT_CHAT_BOSS_POINTER_DIR"] = sessionsRoot.path
         switch currentBossSelection(
             homeURL: homeURL,
             applicationSupportURL: appSupport,
@@ -290,12 +332,20 @@ enum OuroWorkbenchProduct {
         ) {
         case .selected(let agentName):
             environment["CMUX_AGENT_CHAT_BOSS_AGENT"] = agentName
-            environment["CMUX_AGENT_CHAT_SESSION_DIR"] = appSupport
-                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
+            environment["CMUX_AGENT_CHAT_SESSION_DIR"] = sessionsRoot
                 .appendingPathComponent(agentName, isDirectory: true)
                 .path
         case .unavailable(let message):
             environment["CMUX_AGENT_CHAT_BOSS_ERROR"] = message
+            // An unavailable selection keeps its last-good agent-scoped records
+            // so the blocked state never points at a different session root.
+            if let lastGood = defaults.string(forKey: selectedBossDefaultsKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                isSafeAgentName(lastGood) {
+                environment["CMUX_AGENT_CHAT_SESSION_DIR"] = sessionsRoot
+                    .appendingPathComponent(lastGood, isDirectory: true)
+                    .path
+            }
         }
         let ouroCandidates = [
             homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),
@@ -384,15 +434,14 @@ enum OuroWorkbenchProduct {
             }
             return boss["agentName"] as? String
         }()
-        let selection = resolveBossSelection(
+        // Resolution is read-only: it never writes the selection back to
+        // defaults, so a legacy or transiently usable agent cannot silently
+        // become the persisted choice.
+        return resolveBossSelection(
             selectedBossName: defaults.string(forKey: selectedBossDefaultsKey),
             legacyBossName: legacyBossName,
             usableAgentNames: usableBossAgentNames(homeURL: homeURL, fileManager: fileManager)
         )
-        if case .selected(let agentName) = selection {
-            defaults.set(agentName, forKey: selectedBossDefaultsKey)
-        }
-        return selection
     }
 
     private static func isSafeAgentName(_ name: String) -> Bool {

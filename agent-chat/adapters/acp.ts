@@ -1,5 +1,6 @@
 import type {
   Adapter,
+  ImagePromptCapability,
   CommandEntry,
   ElicitationAction,
   ElicitationField,
@@ -70,6 +71,9 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
         startingProc.kill();
       }
     },
+    async warmup(sess) {
+      await ensureAcp(sess, def);
+    },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
@@ -137,6 +141,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
 interface AcpState {
   proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   acpSessionId: string;
+  imageCapability: Exclude<ImagePromptCapability, "unknown">;
   request(method: string, params: unknown): Promise<any>;
   notify(method: string, params: unknown): void;
   options: SessionOption[];
@@ -254,6 +259,7 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
   const st: AcpState = {
     proc,
     acpSessionId: "",
+    imageCapability: "unsupported",
     request,
     notify,
     options: [],
@@ -296,6 +302,9 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     st.pendingElicitations.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
       sess.internal.acp = undefined;
+      // Capability is peer-scoped: a dead peer means unknown again until the
+      // next initialize answers.
+      sess.emit({ kind: "capabilities", image: "unknown" });
     }
   });
   readLines(proc.stderr, () => {});
@@ -310,13 +319,14 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     proc.kill();
   }, startupTimeoutMs);
   try {
-    await request("initialize", {
+    const initializeResult = await request("initialize", {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         elicitation: { form: {} },
       },
     });
+    st.imageCapability = imageCapabilityFromInitialize(initializeResult);
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
       ? sess.internal.acpResumeSessionId
       : "";
@@ -560,7 +570,31 @@ function updateLocalOption(st: AcpState, id: string, value: OptionValue) {
   st.options = st.options.map((o) => o.id === id ? { ...o, value } : o);
 }
 
+export function imageCapabilityFromInitialize(result: unknown): Exclude<ImagePromptCapability, "unknown"> {
+  const capabilities = (result as { agentCapabilities?: { promptCapabilities?: { image?: unknown } } } | undefined)
+    ?.agentCapabilities?.promptCapabilities;
+  return capabilities?.image === true ? "supported" : "unsupported";
+}
+
+export function imageCapabilityFromInitializeForTest(result: unknown): ImagePromptCapability {
+  return imageCapabilityFromInitialize(result);
+}
+
+export function imageCapabilityOf(sess: Pick<SessionCtx, "internal">): ImagePromptCapability {
+  const st = sess.internal.acp as AcpState | undefined;
+  return st?.imageCapability ?? "unknown";
+}
+
+export function imageCapabilityOfForTest(sess: { internal: Record<string, unknown> }): ImagePromptCapability {
+  return imageCapabilityOf(sess as Pick<SessionCtx, "internal">);
+}
+
+export function resetImageCapabilityForTest(sess: { internal: Record<string, unknown> }) {
+  sess.internal.acp = undefined;
+}
+
 function emitAcpState(sess: SessionCtx, st: AcpState) {
+  sess.emit({ kind: "capabilities", image: st.imageCapability });
   sess.emit({ kind: "options", options: withAcpLocalOptions(st.options, st.autoApprove) });
   if (st.commands.length) sess.emit({ kind: "commands", trigger: "/", commands: st.commands });
 }
@@ -919,6 +953,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
           const st: AcpState = {
             proc,
             acpSessionId: "",
+            imageCapability: "unsupported",
             request: () => Promise.reject(new Error("catalog probe closed")),
             notify: () => {},
             options: [],
