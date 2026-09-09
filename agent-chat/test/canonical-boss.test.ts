@@ -360,10 +360,10 @@ test("repair repoints the canonical pointer atomically and preserves every trans
     await writeCanonicalBossPointer(root, { version: 1, agent: "slugger", sessionId: "boss-1" });
 
     const repointed = await repointCanonicalBoss(root, { agent: "slugger", sessionId: "boss-2" });
-    expect(repointed).toEqual({
-      ok: true,
-      pointer: { version: 1, agent: "slugger", sessionId: "boss-2" },
-    });
+    expect(repointed.ok).toBe(true);
+    expect(repointed.ok === true ? repointed.pointer : null)
+      .toEqual({ version: 1, agent: "slugger", sessionId: "boss-2" });
+    expect(repointed.ok === true ? repointed.session.id : "").toBe("boss-2");
     expect((await readCanonicalBossPointer(root)).pointer?.sessionId).toBe("boss-2");
     expect((await readdir(join(root, "slugger"))).sort()).toEqual(["boss-1.json", "boss-2.json"]);
 
@@ -371,6 +371,12 @@ test("repair repoints the canonical pointer atomically and preserves every trans
       ok: false,
       error: "no persisted Boss session slugger/boss-9",
     });
+    // Repair cannot write a pointer the next start would reject.
+    expect(await repointCanonicalBoss(
+      root,
+      { agent: "slugger", sessionId: "boss-2" },
+      { configuredAgent: "other" },
+    )).toEqual({ ok: false, error: "slugger is not the configured agent other" });
     expect((await readCanonicalBossPointer(root)).pointer?.sessionId).toBe("boss-2");
   } finally {
     await chmod(root, 0o700).catch(() => {});

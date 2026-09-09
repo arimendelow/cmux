@@ -44,13 +44,19 @@ test("no Agent Chat source, fixture, or test names a private product or internal
   expect(offenders).toEqual([]);
 });
 
-test("the native Agent Chat entry points carry no private keyword", () => {
+test("every native file this slice changes stays free of private vocabulary", () => {
   const repo = join(import.meta.dir, "../..");
+  const offenders: string[] = [];
   for (const file of [
     "Sources/ContentView+AgentChatCommandPalette.swift",
     "Sources/CmuxSurfaceTabBarBuiltInAction.swift",
+    "Sources/FeatureFlags.swift",
+    "Sources/AppDelegate+AgentChat.swift",
   ]) {
     const contents = readFileSync(join(repo, file), "utf8");
-    expect(contents).not.toMatch(new RegExp(`"${forbiddenPublicTerms[0]}"`, "i"));
+    for (const [index, line] of contents.split("\n").entries()) {
+      if (forbiddenPublicPattern.test(line)) offenders.push(`${file}:${index + 1}: ${line.trim()}`);
+    }
   }
+  expect(offenders).toEqual([]);
 });

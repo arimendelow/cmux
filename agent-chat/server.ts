@@ -29,6 +29,7 @@ import {
   repointCanonicalBoss,
   resolveCanonicalBoss,
   writeCanonicalBossPointer,
+  type BossCandidate,
   type BossSkippedRecord,
   type CanonicalBossPointer,
   type CanonicalBossState,
@@ -673,8 +674,29 @@ class BossGuardError extends Error {}
 
 // The pointer is written asynchronously after the peer reports its session id,
 // so a synchronous reservation closes the race where two concurrent opens each
-// pass the "no canonical Boss yet" check.
-let bossStartReservation: string | null = null;
+// pass the "no canonical Boss yet" check. The reservation names its session as
+// soon as one exists and is released when that session goes away, so a peer
+// that never reports a session id cannot wedge Boss creation for the process.
+let bossStartReservation: { token: string; sessionId: string | null } | null = null;
+
+function bossReservationIsLive(): boolean {
+  if (!bossStartReservation) return false;
+  if (bossStartReservation.sessionId === null) return true;
+  if (sessions.has(bossStartReservation.sessionId)) return true;
+  bossStartReservation = null;
+  return false;
+}
+
+function claimBossStartReservation(sessionId: string) {
+  if (bossStartReservation && bossStartReservation.sessionId === null) {
+    bossStartReservation.sessionId = sessionId;
+  }
+}
+
+function releaseBossStartReservation(token?: string) {
+  if (token && bossStartReservation?.token !== token) return;
+  bossStartReservation = null;
+}
 
 /**
  * Workbench keeps exactly one Boss relationship. A blocked recovery, an
@@ -682,20 +704,17 @@ let bossStartReservation: string | null = null;
  * server-side, so no client (browser, CLI, or root route) can create one behind
  * the UI's back.
  */
-function assertBossStartAllowed(provider: string): boolean {
-  if (!WORKBENCH_EXPERIENCE || providerDefinitionRole(provider) !== "boss") return false;
+function assertBossStartAllowed(provider: string): string | null {
+  if (!WORKBENCH_EXPERIENCE || providerDefinitionRole(provider) !== "boss") return null;
   if (bossClientState.status === "blocked") {
     throw new BossGuardError(
       `Boss recovery is blocked (${bossClientState.reason}): ${bossClientState.detail}`,
     );
   }
-  if (canonicalBossSessionId() || bossStartReservation) throw new BossGuardError("Boss already exists");
-  bossStartReservation = crypto.randomUUID();
-  return true;
-}
-
-function releaseBossStartReservation() {
-  bossStartReservation = null;
+  if (canonicalBossSessionId() || bossReservationIsLive()) throw new BossGuardError("Boss already exists");
+  const token = crypto.randomUUID();
+  bossStartReservation = { token, sessionId: null };
+  return token;
 }
 
 function providerDefinitionRole(provider: string): ProviderDef["role"] {
@@ -1023,8 +1042,17 @@ function canonicalBossSessionId(): string | null {
   return bossClientState.status === "canonical" ? bossClientState.sessionId ?? null : null;
 }
 
+/**
+ * The pointer lands asynchronously, so a session that is still waiting for its
+ * provider session id is not yet "canonical" — but in Workbench it is already
+ * the one Boss relationship. Protect every live Boss-role session from fork and
+ * delete, otherwise a client could destroy or duplicate the transcript in the
+ * window before adoption completes.
+ */
 function isCanonicalBossSession(sess: Session): boolean {
-  return Boolean(WORKBENCH_EXPERIENCE) && canonicalBossSessionId() === sess.id;
+  if (!WORKBENCH_EXPERIENCE) return false;
+  return canonicalBossSessionId() === sess.id
+    || (!sess.headless && providerDefinitionRole(sess.provider) === "boss");
 }
 
 function broadcastBossState() {
@@ -1042,7 +1070,7 @@ async function adoptCanonicalBoss(sess: Session) {
   if (canonicalBossPointer || bossClientState.status === "blocked") return;
   const pointer: CanonicalBossPointer = { version: 1, agent: BOSS_AGENT, sessionId: sess.id };
   await writeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
-  bossStartReservation = null;
+  if (bossStartReservation?.sessionId === sess.id) bossStartReservation = null;
   canonicalBossPointer = pointer;
   bossClientState = {
     status: "canonical",
@@ -1053,10 +1081,42 @@ async function adoptCanonicalBoss(sess: Session) {
   broadcastBossState();
 }
 
+/** Load a persisted Boss record into the live session map, idempotently. */
+async function loadCanonicalBossSession(
+  session: BossCandidate,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  if (sessions.has(session.id)) return { ok: true };
+  try {
+    const cwd = await assertCwd(session.cwd);
+    createSession(
+      session.provider,
+      cwd,
+      session.autoApprove,
+      session.title,
+      session.startOptions,
+      {
+        id: session.id,
+        createdAt: session.createdAt,
+        providerSessionId: session.providerSessionId,
+      },
+    );
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `${session.id} cannot load: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 async function restoreWorkbenchBoss() {
   const pointerResult = await readCanonicalBossPointer(BOSS_POINTER_DIR);
   if (pointerResult.error) console.error(`[agent-chat] canonical Boss pointer ignored: ${pointerResult.error}`);
   const candidates = await listBossCandidates(BOSS_POINTER_DIR);
+  // Legacy flat stores carry no agent attribution at all — the directory is the
+  // only signal, and there is none. Their records are read as belonging to the
+  // configured agent so a pre-partition install can still migrate; a host that
+  // renames its Boss agent should partition its store first.
   if (!SESSION_DIR_IS_PARTITIONED && SESSION_DIR && BOSS_AGENT) {
     for (const candidate of await listBossCandidatesInPartition(SESSION_DIR, BOSS_AGENT)) {
       if (!candidates.some((existing) => existing.id === candidate.id && existing.agent === candidate.agent)) {
@@ -1086,26 +1146,13 @@ async function restoreWorkbenchBoss() {
   const session = state.status === "canonical"
     ? state.session
     : candidates.find((candidate) => candidate.id === state.pointer.sessionId)!;
-  try {
-    const cwd = await assertCwd(session.cwd);
-    createSession(
-      session.provider,
-      cwd,
-      session.autoApprove,
-      session.title,
-      session.startOptions,
-      {
-        id: session.id,
-        createdAt: session.createdAt,
-        providerSessionId: session.providerSessionId,
-      },
-    );
-  } catch (error) {
+  const loaded = await loadCanonicalBossSession(session);
+  if (loaded.ok === false) {
     bossClientState = {
       status: "blocked",
       agent: BOSS_AGENT,
       reason: "cwd-unavailable",
-      detail: `${session.id} cannot load: ${error instanceof Error ? error.message : String(error)}`,
+      detail: loaded.detail,
       skipped: bossClientState.skipped,
     };
     canonicalBossPointer = null;
@@ -2842,12 +2889,28 @@ async function startServer() {
       if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
       if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
       const body = await req.json().catch(() => ({}));
-      const result = await repointCanonicalBoss(BOSS_POINTER_DIR, {
-        agent: String(body.agent ?? ""),
-        sessionId: String(body.sessionId ?? ""),
-      });
+      const result = await repointCanonicalBoss(
+        BOSS_POINTER_DIR,
+        { agent: String(body.agent ?? ""), sessionId: String(body.sessionId ?? "") },
+        { configuredAgent: BOSS_AGENT },
+      );
       if (!result.ok) return Response.json(result, { status: 400 });
+      // A repointed pointer is only canonical once its record is actually
+      // loaded; otherwise the app would report a Boss no client can open and
+      // refuse to create one.
+      const loaded = await loadCanonicalBossSession(result.session);
       canonicalBossPointer = result.pointer;
+      if (loaded.ok === false) {
+        bossClientState = {
+          status: "blocked",
+          agent: BOSS_AGENT,
+          reason: "cwd-unavailable",
+          detail: loaded.detail,
+          skipped: bossClientState.skipped,
+        };
+        broadcastBossState();
+        return Response.json({ ok: false, error: loaded.detail }, { status: 400 });
+      }
       bossClientState = {
         status: "canonical",
         agent: result.pointer.agent,
@@ -2855,7 +2918,8 @@ async function startServer() {
         skipped: bossClientState.skipped,
       };
       broadcastBossState();
-      return Response.json(result);
+      broadcastSessions();
+      return Response.json({ ok: true, pointer: result.pointer });
     }
     // REST for the CLI: create a session (optionally with a first prompt) and
     // get back its id/url; list sessions.
@@ -2866,20 +2930,22 @@ async function startServer() {
       const prompt = String(body.prompt ?? "").trim();
       const requestedCwd = String(body.cwd || defaultCwd);
       let sess: Session | undefined;
-      let reservedBossStart = false;
+      let bossStartToken: string | null = null;
       try {
-        reservedBossStart = assertBossStartAllowed(provider);
+        bossStartToken = assertBossStartAllowed(provider);
         const start = resolveSessionStart(provider, body.autoApprove);
         const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
         sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
+        if (bossStartToken) claimBossStartReservation(sess.id);
         refreshSession(sess);
         if (prompt) await sendPrompt(sess, prompt);
       } catch (err) {
         if (sess) await retireSession(sess).catch(() => {});
-        else if (reservedBossStart) releaseBossStartReservation();
+        if (bossStartToken) releaseBossStartReservation(bossStartToken);
         return Response.json({ error: String(err) }, { status: 400 });
       }
+      if (!sess) return Response.json({ error: "session start failed" }, { status: 500 });
       return Response.json({ id: sess.id, url: `http://127.0.0.1:${server.port}${prefixedPath(`/s/${sess.id}`)}` });
     }
     if (url.pathname === "/api/sessions" && req.method === "GET") {
@@ -3043,7 +3109,11 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const requestedCwd = String(msg.cwd || DEFAULT_CWD);
       const provider = headless ? "ouro-boss" : String(msg.provider);
-      const reservedBossStart = headless ? false : assertBossStartAllowed(provider);
+      pruneStartRequests();
+      const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
+      // A replayed request id is the same start, not a second Boss: a client
+      // that reconnects mid-start must re-attach instead of being refused.
+      const bossStartToken = headless || existing ? null : assertBossStartAllowed(provider);
       const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
       const adapter = adapters.get(provider);
       if (!adapter) throw new Error(`provider not found: ${provider}`);
@@ -3051,8 +3121,6 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         throw new Error(`${providerDisplayLabel(provider)} does not support image prompts`);
       }
       const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
-      pruneStartRequests();
-      const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
       const createStart = (entry?: StartRequest) => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
         const cwd = await assertCwd(requestedCwd);
@@ -3073,6 +3141,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
           requestId,
         );
         if (entry) entry.session = sess;
+        if (bossStartToken) claimBossStartReservation(sess.id);
         if (!headless) {
           try {
             if (!sess.adapter.sendWithAdmission) refreshSession(sess);
@@ -3147,7 +3216,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
           events: sess.events,
         }));
       }).catch((err) => {
-        if (reservedBossStart) releaseBossStartReservation();
+        if (bossStartToken) releaseBossStartReservation(bossStartToken);
         if (headless && ws.data.closed) return;
         sendWsErrorDetails(ws, "start", err, { provider, requestId });
       });

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject }
 import { useCtx } from "../context";
 import { readStoredProviderOptions, persistOptionsSnapshot, updateStoredProviderOption } from "../options-store";
 import {
-  canSendWhileNegotiating,
+  imageAttachmentAllowed,
   type OptionValue,
   type PromptAttachment,
   type SessionOption,
@@ -97,16 +97,14 @@ export function Chat() {
   const commandGroups = useMemo(() => withFileTrigger(commands, filesByCwd[cwd] ?? []), [commands, cwd, filesByCwd]);
   const commandMenu = useCommandMenu(text, setText, commandGroups, taRef, ctrlJ);
   const admissionPending = sendPending || session?.id.startsWith("pending-") === true;
+  const imagesAllowed = imageAttachmentAllowed(imageCapability);
   const imageAttachments = useImageAttachments(
-    capabilities[session?.provider ?? ""]?.imageAttachments === true,
+    capabilities[session?.provider ?? ""]?.imageAttachments === true && imagesAllowed,
     [],
     admissionPending,
   );
   const allProviderOptions = providerOptionMap(providers, providerOptions, capabilities);
   const running = session?.status === "running";
-  // Workbench holds the draft (never discards it) until the peer answers the
-  // capability negotiation, so an image-capable turn is never sent blind.
-  const negotiating = Boolean(experience) && !canSendWhileNegotiating(imageCapability);
 
   useRestoreModelScopedOptions({ provider: session?.provider, options, setOption, pendingModelRestoreRef });
   usePersistSessionOptions(session?.provider, options, pendingModelRestoreRef.current !== null);
@@ -137,7 +135,8 @@ export function Chat() {
   };
   const submit = async () => {
     const t = text.trim();
-    if (!actionsAllowed.compose || admissionPending || negotiating || !imagePromptCanSubmit(
+    const hasImages = imageAttachments.attachments.length > 0;
+    if (!actionsAllowed.compose || admissionPending || (hasImages && !imagesAllowed) || !imagePromptCanSubmit(
       t,
       imageAttachments.attachments.length,
       imageAttachments.loading,
@@ -182,7 +181,7 @@ export function Chat() {
   };
 
   return (
-    <section id="chat-view">
+    <section id="chat-view" data-image-capability={imageCapability} data-images-allowed={imagesAllowed ? "1" : "0"}>
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
       <BossStatusBanner boss={boss} />
       {connection ? (
@@ -214,7 +213,7 @@ export function Chat() {
         >
           <ImageAttachmentTray
             attachments={imageAttachments.attachments}
-            enabled={capabilities[session?.provider ?? ""]?.imageAttachments === true}
+            enabled={capabilities[session?.provider ?? ""]?.imageAttachments === true && imagesAllowed}
             error={imageAttachments.error}
             locked={admissionPending}
             loading={imageAttachments.loading}
@@ -263,8 +262,8 @@ export function Chat() {
                 <button
                   className="send"
                   type="button"
-                  aria-label={negotiating ? "Connecting" : "Send"}
-                  disabled={!actionsAllowed.compose || admissionPending || negotiating || !imagePromptCanSubmit(
+                  aria-label="Send"
+                  disabled={!actionsAllowed.compose || admissionPending || (imageAttachments.attachments.length > 0 && !imagesAllowed) || !imagePromptCanSubmit(
                     text,
                     imageAttachments.attachments.length,
                     imageAttachments.loading,

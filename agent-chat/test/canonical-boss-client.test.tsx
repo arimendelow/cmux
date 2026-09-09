@@ -3,8 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   applyCanonicalBoss,
   bossBlockedMessage,
-  canSendWhileNegotiating,
+  draftSurvivesCapabilityChange,
+  imageAttachmentAllowed,
+  latestImageCapability,
   workbenchActionsAllowed,
+  type AgentEvent,
   type BossState,
   type SessionSummary,
 } from "../src/session";
@@ -68,10 +71,25 @@ test("Workbench hides new, reset, delete, and fork while stock Agent Chat keeps 
   expect(workbenchActionsAllowed(null)).toEqual({ fork: true, compose: true, delete: true });
 });
 
-test("send is withheld while image capability is unknown and the draft survives", () => {
-  expect(canSendWhileNegotiating("unknown")).toBe(false);
-  expect(canSendWhileNegotiating("supported")).toBe(true);
-  expect(canSendWhileNegotiating("unsupported")).toBe(true);
+test("image attachment waits for a positive capability while text always sends", () => {
+  expect(imageAttachmentAllowed("unknown")).toBe(false);
+  expect(imageAttachmentAllowed("unsupported")).toBe(false);
+  expect(imageAttachmentAllowed("supported")).toBe(true);
+  // A dead peer resets capability to unknown; Workbench has no new/reset
+  // action, so text submission must never be gated on negotiation.
+  expect(draftSurvivesCapabilityChange()).toBe(true);
+});
+
+test("a reconnect rebuilds the negotiated capability from replayed history", () => {
+  const events: AgentEvent[] = [
+    { kind: "capabilities", image: "unsupported" },
+    { kind: "user", text: "hello" },
+    { kind: "capabilities", image: "supported" },
+    { kind: "assistant", text: "hi" },
+  ];
+  expect(latestImageCapability(events)).toBe("supported");
+  expect(latestImageCapability([{ kind: "user", text: "hello" }])).toBe("unknown");
+  expect(latestImageCapability([])).toBe("unknown");
 });
 
 test("the Workbench header renders injected external authority and stays neutral by default", () => {

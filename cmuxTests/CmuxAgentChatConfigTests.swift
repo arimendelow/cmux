@@ -292,7 +292,10 @@ struct CmuxAgentChatConfigTests {
             controlSocketReady: true,
             sourceFilePath: sourceFilePath,
             defaults: defaults,
-            environment: ["PATH": "/usr/bin"],
+            environment: [
+                "PATH": "/usr/bin",
+                "CMUX_WORKBENCH_WORKSPACE_ROOT": home.appendingPathComponent("workspace").path,
+            ],
             fileManager: fileManager
         )
         #expect(selected["CMUX_AGENT_CHAT_DEFAULT_PROVIDER"] == "ouro-boss")
@@ -300,7 +303,11 @@ struct CmuxAgentChatConfigTests {
         #expect(selected["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
         #expect(selected["CMUX_AGENT_CHAT_OURO_COMMAND"] == ouro.path)
         #expect(selected["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == workbenchMCP.path)
-        #expect(selected["CMUX_AGENT_UI_CWD"] == home.appendingPathComponent("ms-desk").path)
+        // The workspace root is host-injected; the public default is neutral.
+        #expect(selected["CMUX_AGENT_UI_CWD"] == home.appendingPathComponent("workspace").path)
+        #expect(selected["CMUX_AGENT_CHAT_ALLOWED_ROOTS"]?
+            .split(separator: ":")
+            .contains(Substring(home.appendingPathComponent("workspace").path)) == true)
         #expect(selected["CMUX_BUNDLED_CLI_PATH"] == bundledCLI.path)
         #expect(selected["CMUX_SOCKET_PATH"] == "/tmp/workbench-control.sock")
         #expect(selected["CMUX_SOCKET_CAPABILITY"] == "capability-token")
@@ -1397,5 +1404,40 @@ struct CmuxAgentChatConfigTests {
             applicationSupportURL: appSupport,
             fileManager: fileManager
         ))
+    }
+
+    @Test func workbenchWorkspaceRootFallsBackToHomeWithoutHostConfiguration() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-workspace-root-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+        let defaultsName = "CmuxAgentChatConfigTests.workspaceRoot.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+
+        let neutral = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(neutral["CMUX_AGENT_UI_CWD"] == home.path)
+
+        let configured = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: ["CMUX_WORKBENCH_WORKSPACE_ROOT": "  "],
+            fileManager: fileManager
+        )
+        #expect(configured["CMUX_AGENT_UI_CWD"] == home.path)
     }
 }
