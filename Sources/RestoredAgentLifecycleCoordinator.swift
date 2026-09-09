@@ -16,7 +16,8 @@ final class RestoredAgentLifecycleCoordinator {
     var snapshotsByPanelId: [UUID: SessionRestorableAgentSnapshot] = [:] {
         didSet {
             completedGenerationsByPanelId = completedGenerationsByPanelId.filter { panelId, _ in
-                snapshotsByPanelId[panelId] != nil
+                snapshotsByPanelId[panelId] != nil ||
+                    resumeStatesByPanelId[panelId] == .completedAgentExit
             }
         }
     }

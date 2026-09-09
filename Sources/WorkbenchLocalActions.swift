@@ -784,7 +784,8 @@ enum WorkbenchLocalActionRouter {
         }
         return resumeContextResponse(
             agent: owner.workspace.restoredAgentSnapshotsByPanelId[surfaceID],
-            binding: owner.workspace.surfaceResumeBinding(panelId: surfaceID),
+            binding: owner.workspace.managedAgentResumeBinding(panelId: surfaceID)
+                ?? owner.workspace.surfaceResumeBinding(panelId: surfaceID),
             state: owner.workspace.restoredAgentResumeStatesByPanelId[surfaceID],
             canTakeOver: owner.workspace.canTakeControlOfExternalSession(panelId: surfaceID)
         )
@@ -1198,8 +1199,12 @@ enum WorkbenchLocalActionRouter {
               workspace.panels[surfaceId] is TerminalPanel else {
             return nil
         }
-        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
-        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let binding = workspace.managedAgentResumeBinding(panelId: surfaceId)
+            ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let agent = Workspace.restorableAgentForSessionRestore(
+            workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+            resumeBinding: binding
+        )
         guard workspace.restoredAgentResumeStatesByPanelId[surfaceId] != .completedAgentExit else {
             return nil
         }
@@ -1223,8 +1228,12 @@ enum WorkbenchLocalActionRouter {
               terminal.surface.hasLiveSurface else {
             return nil
         }
-        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
-        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let binding = workspace.managedAgentResumeBinding(panelId: surfaceId)
+            ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let agent = Workspace.restorableAgentForSessionRestore(
+            workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+            resumeBinding: binding
+        )
         let kind: String
         let expectedSessionId: String
         if let agent {
@@ -1245,6 +1254,20 @@ enum WorkbenchLocalActionRouter {
             rhs: sessionId
         ) else {
             return nil
+        }
+        if let agentKind = RestorableAgentKind(rawValue: kind) {
+            let runtimeIdentities = workspace.confirmedRuntimeAgentProcessIdentities(
+                kind: agentKind,
+                sessionId: expectedSessionId,
+                panelId: surfaceId,
+                currentProcessIdentity: {
+                    guard let pid = pid_t(exactly: $0) else { return nil }
+                    return Workspace.agentPIDProcessIdentity(pid: pid)
+                }
+            )
+            if !runtimeIdentities.isEmpty {
+                return runtimeIdentities
+            }
         }
         return AgentResumeLiveness.exactProcessGeneration(
             for: SharedLiveAgentIndex.shared.index?.entry(
@@ -1280,7 +1303,8 @@ enum WorkbenchLocalActionRouter {
         }
         return WorkbenchSessionAuthority.resolved(
             agent: agent,
-            binding: workspace.surfaceResumeBindingsByPanelId[surfaceId]
+            binding: workspace.managedAgentResumeBinding(panelId: surfaceId)
+                ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
         )
     }
 

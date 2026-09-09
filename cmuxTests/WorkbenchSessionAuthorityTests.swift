@@ -326,6 +326,68 @@ struct WorkbenchSessionAuthorityTests {
     }
 
     @MainActor
+    @Test func ManualLocalRestoreRebindsWithoutInjectingStartupInput() throws {
+        let suiteName = "workbench-manual-local-rebind-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(
+            false,
+            forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sessionID = "manual-local-rebind-session"
+        let source = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let panelID = try #require(source.focusedPanelId)
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: sessionID,
+            workingDirectory: "/tmp",
+            workbenchAuthority: .controlledHere
+        )
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume \(sessionID)",
+            cwd: "/tmp",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        source.restoredAgentSnapshotsByPanelId[panelID] = agent
+        source.restoredAgentResumeStatesByPanelId[panelID] =
+            .observedAgentCommandRunning
+        source.surfaceResumeBindingsByPanelId[panelID] = binding
+        source.managedAgentResumeBindingsByPanelId[panelID] = binding
+        let snapshot = source.sessionSnapshot(includeScrollback: false)
+        var resumeIntentCount = 0
+        AgentChatTranscriptService.recordResumeIntentObserverForTesting = {
+            observedSessionID,
+            _,
+            _ in
+            if observedSessionID == sessionID {
+                resumeIntentCount += 1
+            }
+        }
+        defer {
+            AgentChatTranscriptService.recordResumeIntentObserverForTesting = nil
+        }
+
+        let restored = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let restoredPanelID = try #require(
+            restored.restoreSessionSnapshot(snapshot)[panelID]
+        )
+
+        #expect(
+            restored.terminalPanel(for: restoredPanelID)?
+                .surface.debugInitialInputForTesting() == nil
+        )
+        #expect(resumeIntentCount == 1)
+        #expect(
+            restored.restoredAgentResumeStatesByPanelId[restoredPanelID] ==
+                .manualResumeAvailable
+        )
+    }
+
+    @MainActor
     @Test func BindingOnlyExternalRestoreCannotBypassAuthority() throws {
         let defaults = UserDefaults.standard
         let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
@@ -491,6 +553,100 @@ struct WorkbenchSessionAuthorityTests {
     }
 
     @MainActor
+    @Test func DockRestoreUsesProtectedManagedAgentHookBinding() throws {
+        let suiteName = "workbench-dock-protected-restore-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let savedPanelID = UUID()
+        let sessionID = "dock-protected-session"
+        let safeManagedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume \(sessionID)",
+            cwd: "/tmp/safe",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        let observedEffectiveBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "external-wrapper agent --resume \(sessionID)",
+            cwd: "/tmp/observed",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "external-wrapper",
+                executablePath: "/usr/local/bin/external-wrapper",
+                arguments: ["external-wrapper", "agent"],
+                workingDirectory: "/tmp/observed"
+            ),
+            autoResume: true,
+            workbenchAuthority: .unknown
+        )
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Dock protected restore",
+            directory: "/tmp/safe",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp/safe",
+                agent: SessionRestorableAgentSnapshot(
+                    kind: .copilot,
+                    sessionId: sessionID,
+                    workingDirectory: "/tmp/safe",
+                    workbenchAuthority: .controlledHere
+                ),
+                resumeBinding: observedEffectiveBinding,
+                managedAgentResumeBinding: safeManagedBinding,
+                wasAgentRunning: true
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let store = DockSplitStore(
+            workspaceId: UUID(),
+            baseDirectoryProvider: { nil },
+            agentSessionAutoResumeDefaults: defaults
+        )
+        defer { store.closeAllPanels() }
+        let restoredPanelID = try #require(store.restoreSessionSnapshot(
+            SessionSplitContainerSnapshot(
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                panels: [panelSnapshot]
+            )
+        )[savedPanelID])
+        let initialInput = try #require(
+            (store.panels[restoredPanelID] as? TerminalPanel)?
+                .surface.debugInitialInputForTesting()
+        )
+
+        #expect(initialInput.contains("copilot"))
+        #expect(!initialInput.contains("external-wrapper"))
+        let restoredManagedBinding = try #require(
+            store.managedAgentResumeBinding(panelId: restoredPanelID)
+        )
+        #expect(restoredManagedBinding.checkpointId == sessionID)
+        #expect(restoredManagedBinding.workbenchAuthority == .controlledHere)
+        #expect(restoredManagedBinding.launchCommand == nil)
+        #expect(!restoredManagedBinding.command.contains("external-wrapper"))
+    }
+
+    @MainActor
     @Test func ExplicitLocalTakeoverResumesRawCopilotAndPersistsTheAuthorityChange() throws {
         let workspace = Workspace()
         let panelId = try #require(workspace.focusedPanelId)
@@ -542,6 +698,54 @@ struct WorkbenchSessionAuthorityTests {
         #expect(localBinding.workbenchAuthority == .controlledHere)
         #expect(localBinding.launchCommand == nil)
         #expect(!localBinding.command.contains("external-wrapper"))
+        #expect(workspace.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                name: "Refreshed Copilot",
+                kind: "copilot",
+                command: "external-wrapper agent --resume \(sessionId)",
+                cwd: "/tmp/refreshed",
+                checkpointId: sessionId,
+                source: "agent-hook",
+                launchCommand: externalLaunch,
+                permissionMode: "acceptEdits",
+                autoResume: true,
+                workbenchAuthority: .unknown,
+                updatedAt: 99
+            ),
+            panelId: panelId
+        ))
+        let refreshedBinding = try #require(
+            workspace.managedAgentResumeBinding(panelId: panelId)
+        )
+        #expect(refreshedBinding.name == "Refreshed Copilot")
+        #expect(refreshedBinding.cwd == "/tmp/refreshed")
+        #expect(refreshedBinding.permissionMode == "acceptEdits")
+        #expect(refreshedBinding.updatedAt == 99)
+        #expect(refreshedBinding.workbenchAuthority == .controlledHere)
+        #expect(refreshedBinding.launchCommand == nil)
+        #expect(!refreshedBinding.command.contains("external-wrapper"))
+        #expect(refreshedBinding.command.contains("/tmp/refreshed"))
+        let selectorTarget = ControlSurfaceResumeTarget.workspace(
+            tabManager: TabManager(autoWelcomeIfNeeded: false),
+            workspace: workspace,
+            surfaceID: panelId
+        )
+        let unqualifiedBinding = selectorTarget.bindingForGet(
+            expectedKind: nil,
+            expectedCheckpointID: nil
+        )
+        #expect(unqualifiedBinding?.command.contains("external-wrapper") == true)
+        #expect(
+            selectorTarget.protectedRestoreBinding(
+                selectedBinding: unqualifiedBinding
+            ) == refreshedBinding
+        )
+        #expect(
+            selectorTarget.bindingForGet(
+                expectedKind: "copilot",
+                expectedCheckpointID: sessionId
+            ) == refreshedBinding
+        )
         #expect(
             workspace.restoredAgentResumeStatesByPanelId[panelId] ==
                 .awaitingAutoResumeCommand
@@ -579,6 +783,12 @@ struct WorkbenchSessionAuthorityTests {
             to: stateDirectory.appendingPathComponent("copilot-hook-sessions.json"),
             options: .atomic
         )
+        workspace.restoredAgentResumeStatesByPanelId[panelId] =
+            .observedAgentCommandRunning
+        workspace.panelShellActivityStates[panelId] = .commandRunning
+        workspace.terminalPanel(for: panelId)?.updateShellActivityState(
+            .commandRunning
+        )
         let persisted = workspace.sessionSnapshot(
             includeScrollback: false,
             restorableAgentIndex: RestorableAgentSessionIndex.load(
@@ -591,6 +801,31 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(persistedAgent.workbenchAuthority == .controlledHere)
         #expect(persistedAgent.launchCommand == nil)
+        let restoreDefaultsName = "workbench-protected-takeover-\(UUID().uuidString)"
+        let restoreDefaults = try #require(
+            UserDefaults(suiteName: restoreDefaultsName)
+        )
+        restoreDefaults.set(
+            true,
+            forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        )
+        defer {
+            restoreDefaults.removePersistentDomain(
+                forName: restoreDefaultsName
+            )
+        }
+        let protectedRestore = Workspace(
+            agentSessionAutoResumeDefaults: restoreDefaults
+        )
+        let protectedPanelID = try #require(
+            protectedRestore.restoreSessionSnapshot(persisted)[panelId]
+        )
+        let protectedInput = try #require(
+            protectedRestore.terminalPanel(for: protectedPanelID)?
+                .surface.debugInitialInputForTesting()
+        )
+        #expect(protectedInput.contains("copilot"))
+        #expect(!protectedInput.contains("external-wrapper"))
 
         workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority =
             .controlledExternally
@@ -689,6 +924,48 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(workspace.agentPIDKeysByPanelId[panelId] == nil)
         #expect(workspace.agentPIDs[staleRuntimeKey] == nil)
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        workspace.reconcileSurfaceResumeBindings(
+            using: SurfaceResumeBindingIndex(bindingsByPanel: [
+                .init(workspaceId: workspace.id, panelId: panelId): tmuxBinding,
+            ])
+        )
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == tmuxBinding)
+        #expect(
+            workspace.managedAgentResumeBinding(panelId: panelId)?.checkpointId ==
+                replacementSessionID
+        )
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .awaitingAutoResumeCommand
+        )
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) != nil)
+        #expect(workspace.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(replacementSessionID)",
+                checkpointId: replacementSessionID,
+                source: "agent-hook",
+                workbenchAuthority: .unknown
+            ),
+            panelId: panelId
+        ))
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .awaitingAutoResumeCommand
+        )
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) != nil)
+        workspace.reconcileSurfaceResumeBindings(
+            using: SurfaceResumeBindingIndex(bindingsByPanel: [
+                .init(workspaceId: workspace.id, panelId: panelId): tmuxBinding,
+            ])
+        )
         let staleIndex = RestorableAgentSessionIndex.load(
             homeDirectory: "/tmp/workbench-takeover-stale-index",
             fileManager: .default,
@@ -713,7 +990,12 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(
             persisted.panels.first(where: { $0.id == panelId })?
-                .terminal?.resumeBinding?.checkpointId == replacementSessionID
+                .terminal?.resumeBinding?.kind == "tmux"
+        )
+        #expect(
+            persisted.panels.first(where: { $0.id == panelId })?
+                .terminal?.managedAgentResumeBinding?.checkpointId ==
+                replacementSessionID
         )
         #expect(workspace.restoredAgentSnapshotsByPanelId[panelId]?.sessionId == replacementSessionID)
         #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) != nil)
@@ -820,6 +1102,31 @@ struct WorkbenchSessionAuthorityTests {
             store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id]?.sessionId ==
                 replacementSessionID
         )
+        #expect(store.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "external-wrapper agent --resume \(replacementSessionID)",
+                cwd: "/tmp/refreshed-dock",
+                checkpointId: replacementSessionID,
+                source: "agent-hook",
+                launchCommand: AgentLaunchCommandSnapshot(
+                    launcher: "external-wrapper",
+                    executablePath: "/usr/local/bin/external-wrapper",
+                    arguments: ["external-wrapper", "agent"],
+                    workingDirectory: "/tmp/refreshed-dock"
+                ),
+                workbenchAuthority: .unknown,
+                updatedAt: 100
+            ),
+            panelId: terminal.id
+        ))
+        let refreshedManagedBinding = try #require(
+            store.managedAgentResumeBinding(panelId: terminal.id)
+        )
+        #expect(refreshedManagedBinding.cwd == "/tmp/refreshed-dock")
+        #expect(refreshedManagedBinding.workbenchAuthority == .controlledHere)
+        #expect(refreshedManagedBinding.launchCommand == nil)
+        #expect(!refreshedManagedBinding.command.contains("external-wrapper"))
     }
 
     @MainActor
@@ -847,6 +1154,1330 @@ struct WorkbenchSessionAuthorityTests {
             .completedAgentExit
         #expect(dock.setSurfaceResumeBinding(binding, panelId: terminal.id))
         #expect(dock.restoredAgentLifecycle.resumeStatesByPanelId[terminal.id] == nil)
+    }
+
+    @MainActor
+    @Test func AgentHookClearPreservesEffectiveTmuxBinding() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume managed-session",
+            checkpointId: "managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = tmuxBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+        let checkpointCandidate = target.bindingForClear(
+            expectedCheckpointID: "managed-session",
+            expectedSource: nil,
+            agentSessionEnded: false
+        )
+
+        #expect(checkpointCandidate == managedBinding)
+        target.clearBinding(checkpointCandidate, agentSessionEnded: true)
+
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == tmuxBinding)
+        #expect(workspace.managedAgentResumeBinding(panelId: panelId) == nil)
+    }
+
+    @MainActor
+    @Test func EffectiveTmuxClearPreservesManagedAgentBinding() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume managed-session",
+            checkpointId: "managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = tmuxBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(
+            target.bindingForClear(
+                expectedCheckpointID: nil,
+                expectedSource: nil,
+                agentSessionEnded: false
+            ) == tmuxBinding
+        )
+        target.clearBinding(tmuxBinding, agentSessionEnded: false)
+
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == nil)
+        #expect(workspace.managedAgentResumeBinding(panelId: panelId) == managedBinding)
+        #expect(!target.clearBinding(nil, agentSessionEnded: false))
+        #expect(
+            target.bindingForGet(
+                expectedKind: nil,
+                expectedCheckpointID: nil
+            ) == nil
+        )
+        #expect(
+            target.bindingForGet(
+                expectedKind: "copilot",
+                expectedCheckpointID: "managed-session"
+            ) == managedBinding
+        )
+        #expect(
+            target.bindingForGet(
+                expectedKind: "copilot",
+                expectedCheckpointID: "different-session"
+            ) == nil
+        )
+        let collidingCustomBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "echo custom-copilot-command",
+            checkpointId: "managed-session",
+            source: "cli",
+            autoResume: true
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] =
+            collidingCustomBinding
+        #expect(
+            target.bindingForGet(
+                expectedKind: "copilot",
+                expectedCheckpointID: "managed-session"
+            ) == collidingCustomBinding
+        )
+        #expect(
+            target.bindingForClear(
+                expectedCheckpointID: "managed-session",
+                expectedSource: nil,
+                agentSessionEnded: false
+            ) == collidingCustomBinding
+        )
+    }
+
+    @MainActor
+    @Test func ManagedAgentEndClearsContinuationButPreservesTmux() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "ended-managed-session"
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume \(sessionID)",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = tmuxBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        workspace.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: sessionID,
+                workbenchAuthority: .controlledHere
+            )
+        workspace.restoredAgentResumeStatesByPanelId[panelId] =
+            .awaitingAutoResumeCommand
+        workspace.restoredAgentLifecycle.registerStartupInput(
+            " copilot --resume \(sessionID)\n",
+            panelId: panelId
+        )
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        target.clearBinding(managedBinding, agentSessionEnded: true)
+
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == tmuxBinding)
+        #expect(workspace.managedAgentResumeBinding(panelId: panelId) == nil)
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .completedAgentExit
+        )
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) == nil)
+    }
+
+    @MainActor
+    @Test func NormalManagedClearPreservesCompletedGeneration() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let snapshot = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "completed-session",
+            workbenchAuthority: .controlledHere
+        )
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume completed-session",
+            checkpointId: "completed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.restoredAgentSnapshotsByPanelId[panelId] = snapshot
+        workspace.surfaceResumeBindingsByPanelId[panelId] = binding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = binding
+        workspace.markRestoredAgentCompleted(panelId: panelId, snapshot: snapshot)
+        let completedAt = try #require(
+            workspace.restoredAgentLifecycle.completedGeneration(
+                panelId: panelId
+            )?.completedAt
+        )
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(target.clearBinding(binding, agentSessionEnded: false))
+
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .completedAgentExit
+        )
+        #expect(
+            workspace.restoredAgentLifecycle.completedGeneration(
+                panelId: panelId
+            )?.completedAt == completedAt
+        )
+    }
+
+    @MainActor
+    @Test func LateManagedClearDoesNotDestroyReplacementContinuation() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let oldBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume old-session",
+            checkpointId: "old-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = oldBinding
+        workspace.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: "replacement-session",
+                workbenchAuthority: .controlledHere
+            )
+        workspace.restoredAgentResumeStatesByPanelId[panelId] =
+            .awaitingAutoResumeCommand
+        workspace.restoredResumeSessionWorkingDirectoriesByPanelId[panelId] =
+            "/tmp/replacement"
+        workspace.restoredAgentLifecycle.registerStartupInput(
+            " copilot --resume replacement-session\n",
+            panelId: panelId
+        )
+
+        #expect(workspace.clearManagedAgentResumeBinding(
+            panelId: panelId,
+            matching: oldBinding,
+            agentSessionEnded: true
+        ))
+
+        #expect(
+            workspace.restoredAgentSnapshotsByPanelId[panelId]?.sessionId ==
+                "replacement-session"
+        )
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .awaitingAutoResumeCommand
+        )
+        #expect(
+            workspace.restoredResumeSessionWorkingDirectoriesByPanelId[panelId] ==
+                "/tmp/replacement"
+        )
+        #expect(workspace.restoredAgentLifecycle.startupInput(panelId: panelId) != nil)
+    }
+
+    @MainActor
+    @Test func LegacyAgentBindingSeedsManagedIdentityOnRestore() throws {
+        let workspace = Workspace()
+        let savedPanelID = UUID()
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume legacy-managed-session",
+            checkpointId: "legacy-managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Legacy managed binding",
+            directory: "/tmp",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp",
+                agent: nil,
+                resumeBinding: binding,
+                managedAgentResumeBinding: nil,
+                wasAgentRunning: true
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let restoredID = try #require(workspace.restoreSessionSnapshot(
+            SessionWorkspaceSnapshot(
+                workspaceId: workspace.id,
+                processTitle: "Legacy",
+                customTitle: nil,
+                customDescription: nil,
+                customColor: nil,
+                isPinned: false,
+                groupId: nil,
+                currentDirectory: "/tmp",
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                layoutMode: nil,
+                panels: [panelSnapshot],
+                statusEntries: [],
+                logEntries: []
+            )
+        )[savedPanelID])
+
+        #expect(
+            workspace.managedAgentResumeBinding(panelId: restoredID) ==
+                binding
+        )
+    }
+
+    @MainActor
+    @Test func ConflictingManagedRestoreFailsClosed() throws {
+        let suiteName = "workbench-conflicting-managed-restore-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let workspace = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let replacementSessionID = "blocked-conflict-session"
+        var replacementResumeIntentCount = 0
+        AgentChatTranscriptService.recordResumeIntentObserverForTesting = {
+            sessionID,
+            _,
+            _ in
+            if sessionID == replacementSessionID {
+                replacementResumeIntentCount += 1
+            }
+        }
+        defer {
+            AgentChatTranscriptService.recordResumeIntentObserverForTesting = nil
+        }
+        let savedPanelID = UUID()
+        let effectiveTmux = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let staleManaged = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume stale-session",
+            checkpointId: "stale-session",
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        let replacementAgent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: replacementSessionID,
+            workbenchAuthority: .controlledExternally
+        )
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Conflicting managed restore",
+            directory: "/tmp",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp",
+                agent: replacementAgent,
+                resumeBinding: effectiveTmux,
+                managedAgentResumeBinding: staleManaged,
+                wasAgentRunning: true
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let restoredID = try #require(workspace.restoreSessionSnapshot(
+            SessionWorkspaceSnapshot(
+                workspaceId: workspace.id,
+                processTitle: "Conflict",
+                customTitle: nil,
+                customDescription: nil,
+                customColor: nil,
+                isPinned: false,
+                groupId: nil,
+                currentDirectory: "/tmp",
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                layoutMode: nil,
+                panels: [panelSnapshot],
+                statusEntries: [],
+                logEntries: []
+            )
+        )[savedPanelID])
+
+        #expect(
+            workspace.terminalPanel(for: restoredID)?
+                .surface.debugInitialInputForTesting() == nil
+        )
+        #expect(workspace.managedAgentResumeBinding(panelId: restoredID) == nil)
+        #expect(
+            workspace.surfaceResumeBinding(panelId: restoredID)?
+                .workbenchAuthority == .unknown
+        )
+        #expect(
+            workspace.restoredAgentSnapshotsByPanelId[restoredID]?.sessionId ==
+                replacementSessionID
+        )
+        #expect(
+            workspace.restoredAgentSnapshotsByPanelId[restoredID]?
+                .workbenchAuthority == .unknown
+        )
+        #expect(replacementResumeIntentCount == 0)
+    }
+
+    @MainActor
+    @Test func LegacyAliasedManagedConflictDropsStaleBinding() throws {
+        let workspace = Workspace()
+        let savedPanelID = UUID()
+        let staleBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume stale-session",
+            checkpointId: "stale-session",
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        let replacementAgent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "replacement-session",
+            workbenchAuthority: .controlledExternally
+        )
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Legacy aliased conflict",
+            directory: "/tmp",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp",
+                agent: replacementAgent,
+                resumeBinding: staleBinding,
+                managedAgentResumeBinding: nil,
+                wasAgentRunning: true
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let restoredID = try #require(workspace.restoreSessionSnapshot(
+            SessionWorkspaceSnapshot(
+                workspaceId: workspace.id,
+                processTitle: "Legacy conflict",
+                customTitle: nil,
+                customDescription: nil,
+                customColor: nil,
+                isPinned: false,
+                groupId: nil,
+                currentDirectory: "/tmp",
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                layoutMode: nil,
+                panels: [panelSnapshot],
+                statusEntries: [],
+                logEntries: []
+            )
+        )[savedPanelID])
+
+        #expect(workspace.surfaceResumeBinding(panelId: restoredID) == nil)
+        #expect(workspace.managedAgentResumeBinding(panelId: restoredID) == nil)
+        #expect(
+            workspace.restoredAgentSnapshotsByPanelId[restoredID]?.sessionId ==
+                "replacement-session"
+        )
+        let staleIndex = RestorableAgentSessionIndex.load(
+            homeDirectory: "/tmp/workbench-legacy-conflict-index",
+            fileManager: .default,
+            registry: CmuxVaultAgentRegistry(registrations: []),
+            detectedSnapshots: [
+                .init(workspaceId: workspace.id, panelId: restoredID): (
+                    snapshot: SessionRestorableAgentSnapshot(
+                        kind: .copilot,
+                        sessionId: "stale-session",
+                        workbenchAuthority: .controlledHere
+                    ),
+                    updatedAt: 1,
+                    processIDs: [],
+                    agentProcessIDs: [],
+                    sessionIDSource: .explicit
+                ),
+            ]
+        )
+        let roundTrip = workspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: staleIndex
+        )
+        let roundTripPanel = try #require(
+            roundTrip.panels.first(where: { $0.id == restoredID })?.terminal
+        )
+        #expect(roundTripPanel.resumeBinding == nil)
+        #expect(roundTripPanel.managedAgentResumeBinding == nil)
+        #expect(roundTripPanel.agent?.sessionId == "replacement-session")
+        #expect(roundTripPanel.agent?.workbenchAuthority == .unknown)
+    }
+
+    @MainActor
+    @Test func ManagedBindingMutationChangesAutosaveFingerprint() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        workspace.surfaceResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "tmux",
+                command: "tmux attach-session -t workbench",
+                checkpointId: "workbench",
+                source: "process-detected",
+                autoResume: true
+            )
+        var managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume managed-session",
+            checkpointId: "managed-session",
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        let before = manager.sessionAutosaveFingerprint()
+
+        managedBinding.autoResume = false
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        let after = manager.sessionAutosaveFingerprint()
+
+        #expect(before != after)
+    }
+
+    @MainActor
+    @Test func IncompleteAgentHookBindingClearsItsEffectiveRecord() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let incompleteBinding = SurfaceResumeBindingSnapshot(
+            command: "copilot",
+            source: "agent-hook",
+            workbenchAuthority: .unknown
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = incompleteBinding
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(target.clearBinding(incompleteBinding, agentSessionEnded: false))
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == nil)
+    }
+
+    @MainActor
+    @Test func RespawnClearsManagedAgentBinding() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        workspace.managedAgentResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume stale-session",
+                checkpointId: "stale-session",
+                source: "agent-hook",
+                workbenchAuthority: .controlledHere
+            )
+
+        let respawned = try #require(
+            workspace.respawnTerminalSurface(
+                panelId: panelId,
+                command: "true"
+            )
+        )
+
+        #expect(respawned.id == panelId)
+        #expect(workspace.managedAgentResumeBinding(panelId: panelId) == nil)
+    }
+
+    @Test func ManagedAgentDirectoryOutranksTmuxFallbackForResumeIntent() {
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume managed-session",
+            cwd: "/tmp/managed-agent",
+            checkpointId: "managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+
+        #expect(
+            Workspace.resumeIntentWorkingDirectory(
+                managedResumeBinding: managedBinding,
+                restorableAgent: nil,
+                fallback: "/tmp/tmux-client"
+            ) == "/tmp/managed-agent"
+        )
+    }
+
+    @MainActor
+    @Test func ManagedRestoreRecordDirectoryOutranksTmuxTransientDirectory() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            cwd: "/tmp/tmux-client",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume managed-session",
+            cwd: "/tmp/managed-agent",
+            checkpointId: "managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = tmuxBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        workspace.restoredResumeSessionWorkingDirectoriesByPanelId[panelId] =
+            "/tmp/tmux-transient"
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(
+            target.bindingForGet(
+                expectedKind: nil,
+                expectedCheckpointID: nil
+            ) == tmuxBinding
+        )
+        #expect(
+            target.bindingForGet(
+                expectedKind: "tmux",
+                expectedCheckpointID: "workbench"
+            ) == tmuxBinding
+        )
+        #expect(
+            target.bindingForGet(
+                expectedKind: "copilot",
+                expectedCheckpointID: "managed-session"
+            ) == managedBinding
+        )
+        #expect(
+            target.restoreWorkingDirectory(
+                binding: managedBinding,
+                agent: nil
+            ) == "/tmp/managed-agent"
+        )
+    }
+
+    @MainActor
+    @Test func EffectiveTmuxRestoreStillRequiresManagedAuthority() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = tmuxBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume managed-session",
+                checkpointId: "managed-session",
+                source: "agent-hook",
+                workbenchAuthority: .controlledExternally
+            )
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(
+            target.restoreAuthority(selectedBinding: tmuxBinding) ==
+                .controlledExternally
+        )
+        workspace.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: "replacement-session",
+                workbenchAuthority: .controlledExternally
+            )
+        workspace.managedAgentResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume stale-session",
+                checkpointId: "stale-session",
+                source: "agent-hook",
+                workbenchAuthority: .controlledHere
+            )
+        #expect(
+            target.restoreAuthority(selectedBinding: tmuxBinding) ==
+                .unknown
+        )
+        #expect(
+            target.restoreAuthority(selectedBinding: nil) ==
+                .controlledExternally
+        )
+        workspace.managedAgentResumeBindingsByPanelId.removeValue(
+            forKey: panelId
+        )
+        workspace.restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
+        #expect(
+            target.restoreAuthority(selectedBinding: tmuxBinding) ==
+                .controlledHere
+        )
+        let customBinding = SurfaceResumeBindingSnapshot(
+            kind: "custom-command",
+            command: "echo custom",
+            checkpointId: "custom",
+            source: "cli",
+            autoResume: true
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = customBinding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume external-session",
+                checkpointId: "external-session",
+                source: "agent-hook",
+                workbenchAuthority: .controlledExternally
+            )
+        #expect(
+            target.restoreAuthority(selectedBinding: customBinding) ==
+                .controlledHere
+        )
+    }
+
+    @MainActor
+    @Test func TypedRestoreAllowsMatchingSnapshotWithoutBinding() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "snapshot-only-session"
+        workspace.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: sessionID,
+                workbenchAuthority: .controlledHere
+            )
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(target.bindingForGet(
+            expectedKind: "copilot",
+            expectedCheckpointID: sessionID
+        ) == nil)
+        #expect(target.restorableAgentMatches(
+            expectedKind: "copilot",
+            expectedCheckpointID: sessionID
+        ))
+        #expect(!target.restorableAgentMatches(
+            expectedKind: "copilot",
+            expectedCheckpointID: "different-session"
+        ))
+    }
+
+    @MainActor
+    @Test func PiEquivalentCheckpointSelectsManagedClearCandidate() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "019fbf0f-7fcd-70aa-9388-f44c4e27fa0c"
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "pi",
+            command: "pi --session \(sessionID)",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = binding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = binding
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+        let path = "/tmp/2026-09-09_\(sessionID).jsonl"
+
+        #expect(target.checkpointMatches(path, binding: binding))
+        #expect(
+            target.bindingForClear(
+                expectedCheckpointID: path,
+                expectedSource: nil,
+                agentSessionEnded: false
+            ) == binding
+        )
+    }
+
+    @Test func DuplicateActiveSessionSuppressesManagedResumeRebinding() {
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume active-session",
+            checkpointId: "active-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+
+        #expect(
+            Workspace.resumeReboundSession(
+                restorableAgent: nil,
+                managedResumeBinding: managedBinding,
+                effectiveResumeBinding: nil,
+                agentSessionAlreadyActive: true,
+                shouldRebindSession: true
+            ) == nil
+        )
+        #expect(
+            Workspace.resumeReboundSession(
+                restorableAgent: nil,
+                managedResumeBinding: managedBinding,
+                effectiveResumeBinding: nil,
+                agentSessionAlreadyActive: false,
+                shouldRebindSession: true
+            )?.sessionID == "active-session"
+        )
+        #expect(
+            Workspace.resumeReboundSession(
+                restorableAgent: nil,
+                managedResumeBinding: managedBinding,
+                effectiveResumeBinding: nil,
+                agentSessionAlreadyActive: false,
+                shouldRebindSession: false
+            ) == nil
+        )
+    }
+
+    @Test func LocalAuthorityRefreshRetargetsTrustedExecutionDirectory() {
+        let sessionID = "trusted-refresh-session"
+        let current = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "cd -- '/tmp/old' 2>/dev/null || [ ! -d '/tmp/old' ] && /opt/agency copilot",
+            cwd: "/tmp/old",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "agency",
+                executablePath: "/opt/agency",
+                arguments: ["/opt/agency", "copilot"],
+                workingDirectory: "/tmp/old"
+            ),
+            workbenchAuthority: .controlledHere
+        )
+        let observed = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "external-wrapper copilot",
+            cwd: "/tmp/new",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            permissionMode: "acceptEdits",
+            workbenchAuthority: .unknown,
+            updatedAt: 200
+        )
+
+        let refreshed =
+            WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                observed: observed,
+                current: current
+            )
+
+        #expect(refreshed.cwd == "/tmp/new")
+        #expect(refreshed.command.contains("/tmp/new"))
+        #expect(!refreshed.command.contains("/tmp/old"))
+        #expect(refreshed.command.contains("/opt/agency"))
+        #expect(!refreshed.command.contains("external-wrapper"))
+        #expect(refreshed.launchCommand?.workingDirectory == "/tmp/new")
+        #expect(refreshed.permissionMode == "acceptEdits")
+        #expect(refreshed.updatedAt == 200)
+        #expect(refreshed.workbenchAuthority == .controlledHere)
+    }
+
+    @MainActor
+    @Test func SnapshotlessManagedEndRecordsCompletionFence() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelId = try #require(workspace.focusedPanelId)
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume ended-session",
+            checkpointId: "ended-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.surfaceResumeBindingsByPanelId[panelId] = binding
+        workspace.managedAgentResumeBindingsByPanelId[panelId] = binding
+        workspace.restoredAgentResumeStatesByPanelId[panelId] =
+            .awaitingAutoResumeCommand
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelId
+        )
+
+        #expect(target.clearBinding(binding, agentSessionEnded: true))
+
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[panelId] ==
+                .completedAgentExit
+        )
+        #expect(
+            workspace.restoredAgentLifecycle.completedGeneration(panelId: panelId) != nil
+        )
+    }
+
+    @MainActor
+    @Test func RestoredTmuxOverlayKeepsManagedAgentLifecycle() throws {
+        let suiteName = "workbench-managed-tmux-restore-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let source = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let panelId = try #require(source.focusedPanelId)
+        let sessionID = "tmux-managed-session"
+        source.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: sessionID,
+                workbenchAuthority: .controlledHere
+            )
+        source.restoredAgentResumeStatesByPanelId[panelId] =
+            .observedAgentCommandRunning
+        source.surfaceResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "tmux",
+                command: "tmux attach-session -t workbench",
+                cwd: "/tmp/tmux-client",
+                checkpointId: "workbench",
+                source: "process-detected",
+                autoResume: true
+            )
+        source.managedAgentResumeBindingsByPanelId[panelId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(sessionID)",
+                cwd: "/tmp/managed-agent",
+                checkpointId: sessionID,
+                source: "agent-hook",
+                autoResume: true,
+                workbenchAuthority: .controlledHere
+            )
+        let snapshot = source.sessionSnapshot(includeScrollback: false)
+        let restored = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let restoredPanelId = try #require(
+            restored.restoreSessionSnapshot(snapshot)[panelId]
+        )
+
+        #expect(
+            restored.restoredAgentResumeStatesByPanelId[restoredPanelId] ==
+                .awaitingAutoResumeCommand
+        )
+        #expect(
+            restored.managedAgentResumeBinding(panelId: restoredPanelId)?
+                .checkpointId == sessionID
+        )
+        #expect(
+            restored.restoredAgentLifecycle.startupInput(panelId: restoredPanelId) != nil
+        )
+        #expect(
+            restored.restoredResumeSessionWorkingDirectoriesByPanelId[
+                restoredPanelId
+            ] == "/tmp/managed-agent"
+        )
+        #expect(restored.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(sessionID)",
+                cwd: "/tmp/managed-refreshed",
+                checkpointId: sessionID,
+                source: "agent-hook",
+                autoResume: true,
+                workbenchAuthority: .controlledHere
+            ),
+            panelId: restoredPanelId
+        ))
+        #expect(
+            restored.restoredResumeSessionWorkingDirectoriesByPanelId[
+                restoredPanelId
+            ] == "/tmp/managed-refreshed"
+        )
+    }
+
+    @MainActor
+    @Test func RetiredManagedAgentIsNotReboundWhenTmuxRestores() throws {
+        let suiteName = "workbench-retired-managed-tmux-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sessionID = "retired-managed-tmux-session"
+        var resumeIntentCount = 0
+        AgentChatTranscriptService.recordResumeIntentObserverForTesting = {
+            observedSessionID,
+            _,
+            _ in
+            if observedSessionID == sessionID {
+                resumeIntentCount += 1
+            }
+        }
+        defer {
+            AgentChatTranscriptService.recordResumeIntentObserverForTesting = nil
+        }
+        let savedPanelID = UUID()
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Retired managed tmux",
+            directory: "/tmp",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp",
+                agent: nil,
+                resumeBinding: SurfaceResumeBindingSnapshot(
+                    kind: "tmux",
+                    command: "tmux attach-session -t workbench",
+                    checkpointId: "workbench",
+                    source: "process-detected",
+                    autoResume: true
+                ),
+                managedAgentResumeBinding: SurfaceResumeBindingSnapshot(
+                    kind: "copilot",
+                    command: "copilot --resume \(sessionID)",
+                    checkpointId: sessionID,
+                    source: "agent-hook",
+                    autoResume: false,
+                    workbenchAuthority: .controlledHere
+                ),
+                wasAgentRunning: false
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let workspace = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let restoredID = try #require(workspace.restoreSessionSnapshot(
+            SessionWorkspaceSnapshot(
+                workspaceId: workspace.id,
+                processTitle: "Retired",
+                customTitle: nil,
+                customDescription: nil,
+                customColor: nil,
+                isPinned: false,
+                groupId: nil,
+                currentDirectory: "/tmp",
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                layoutMode: nil,
+                panels: [panelSnapshot],
+                statusEntries: [],
+                logEntries: []
+            )
+        )[savedPanelID])
+
+        #expect(resumeIntentCount == 0)
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[restoredID] !=
+                .awaitingAutoResumeCommand
+        )
+        #expect(
+            workspace.restoredAgentLifecycle.startupInput(panelId: restoredID) ==
+                nil
+        )
+    }
+
+    @Test func OnlyProcessDetectedTmuxLaunchIsAttributedToManagedAgent() {
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let customBinding = SurfaceResumeBindingSnapshot(
+            kind: "custom-command",
+            command: "echo hello",
+            checkpointId: "custom",
+            source: "cli",
+            autoResume: true
+        )
+
+        #expect(Workspace.effectiveBindingLaunchesManagedAgent(tmuxBinding))
+        #expect(!Workspace.effectiveBindingLaunchesManagedAgent(customBinding))
+        #expect(!Workspace.effectiveBindingLaunchesManagedAgent(nil))
+    }
+
+    @Test func ConfirmedManagedAgentExitOverridesRunningTmuxContainer() {
+        let sessionID = "managed-agent-exited"
+        let tmuxBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t workbench",
+            checkpointId: "workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume \(sessionID)",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            autoResume: true,
+            workbenchAuthority: .controlledHere
+        )
+        let observedAgent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: sessionID,
+            workbenchAuthority: .controlledHere
+        )
+
+        #expect(Workspace.managedAgentExitOverridesContainerLifecycle(
+            effectiveBinding: tmuxBinding,
+            managedBinding: managedBinding,
+            observedAgent: observedAgent,
+            processLiveness: .exited
+        ))
+        #expect(!Workspace.managedAgentExitOverridesContainerLifecycle(
+            effectiveBinding: tmuxBinding,
+            managedBinding: managedBinding,
+            observedAgent: observedAgent,
+            processLiveness: .running
+        ))
+        #expect(!Workspace.managedAgentExitOverridesContainerLifecycle(
+            effectiveBinding: nil,
+            managedBinding: managedBinding,
+            observedAgent: observedAgent,
+            processLiveness: .exited
+        ))
+        #expect(!Workspace.managedAgentExitOverridesContainerLifecycle(
+            effectiveBinding: tmuxBinding,
+            managedBinding: managedBinding,
+            observedAgent: observedAgent,
+            processLiveness: .exited,
+            hasConfirmedRuntimeProcess: true
+        ))
+    }
+
+    @MainActor
+    @Test func CustomRestoreRunsWithoutRebindingRetainedManagedAgent() throws {
+        let suiteName = "workbench-custom-managed-restore-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let managedSessionID = "retained-external-session"
+        var resumeIntentCount = 0
+        AgentChatTranscriptService.recordResumeIntentObserverForTesting = {
+            observedSessionID,
+            _,
+            _ in
+            if observedSessionID == managedSessionID {
+                resumeIntentCount += 1
+            }
+        }
+        defer {
+            AgentChatTranscriptService.recordResumeIntentObserverForTesting = nil
+        }
+        let savedPanelID = UUID()
+        let panelSnapshot = SessionPanelSnapshot(
+            id: savedPanelID,
+            type: .terminal,
+            title: "Custom restore",
+            directory: "/tmp",
+            isPinned: false,
+            isManuallyUnread: false,
+            gitBranch: nil,
+            listeningPorts: [],
+            ttyName: nil,
+            terminal: SessionTerminalPanelSnapshot(
+                workingDirectory: "/tmp",
+                agent: SessionRestorableAgentSnapshot(
+                    kind: .copilot,
+                    sessionId: managedSessionID,
+                    workbenchAuthority: .controlledExternally
+                ),
+                resumeBinding: SurfaceResumeBindingSnapshot(
+                    kind: "custom-command",
+                    command: "echo custom-restore",
+                    checkpointId: "custom",
+                    source: "process-detected",
+                    autoResume: false
+                ),
+                managedAgentResumeBinding: SurfaceResumeBindingSnapshot(
+                    kind: "copilot",
+                    command: "copilot --resume \(managedSessionID)",
+                    checkpointId: managedSessionID,
+                    source: "agent-hook",
+                    autoResume: true,
+                    workbenchAuthority: .controlledExternally
+                ),
+                wasAgentRunning: true
+            ),
+            browser: nil,
+            markdown: nil,
+            filePreview: nil,
+            rightSidebarTool: nil,
+            project: nil
+        )
+        let workspace = Workspace(agentSessionAutoResumeDefaults: defaults)
+        let restoredID = try #require(workspace.restoreSessionSnapshot(
+            SessionWorkspaceSnapshot(
+                workspaceId: workspace.id,
+                processTitle: "Custom",
+                customTitle: nil,
+                customDescription: nil,
+                customColor: nil,
+                isPinned: false,
+                groupId: nil,
+                currentDirectory: "/tmp",
+                focusedPanelId: savedPanelID,
+                layout: .pane(
+                    SessionPaneLayoutSnapshot(
+                        panelIds: [savedPanelID],
+                        selectedPanelId: savedPanelID
+                    )
+                ),
+                layoutMode: nil,
+                panels: [panelSnapshot],
+                statusEntries: [],
+                logEntries: []
+            )
+        )[savedPanelID])
+
+        #expect(
+            Workspace.restoreWorkbenchAuthority(
+                effectiveBinding: panelSnapshot.terminal?.resumeBinding,
+                agentCompatibilityBinding:
+                    panelSnapshot.terminal?.managedAgentResumeBinding,
+                restorableAgent: panelSnapshot.terminal?.agent,
+                managedBindingConflictsWithSnapshot: false
+            ) == .controlledHere
+        )
+        #expect(resumeIntentCount == 0)
+        #expect(
+            workspace.restoredAgentResumeStatesByPanelId[restoredID] !=
+                .awaitingAutoResumeCommand
+        )
+    }
+
+    @MainActor
+    @Test func PersistentRemoteReattachRestoresBothBindingLayers() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let effectiveBinding = SurfaceResumeBindingSnapshot(
+            kind: "tmux",
+            command: "tmux attach-session -t remote-workbench",
+            checkpointId: "remote-workbench",
+            source: "process-detected",
+            autoResume: true
+        )
+        let managedBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume remote-managed-session",
+            checkpointId: "remote-managed-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+        workspace.restorePersistentReattachResumeBindings(
+            panelId: panelId,
+            effectiveBinding: effectiveBinding,
+            managedBinding: managedBinding
+        )
+
+        #expect(workspace.surfaceResumeBinding(panelId: panelId) == effectiveBinding)
+        #expect(
+            workspace.managedAgentResumeBinding(panelId: panelId) ==
+                managedBinding
+        )
     }
 
     private func localSnapshot() -> SessionRestorableAgentSnapshot {

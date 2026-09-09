@@ -189,6 +189,54 @@ struct CompletedRestoredAgentGenerationTests {
     }
 
     @Test
+    func snapshotlessCompletionFenceSurvivesUnrelatedSnapshotMutation() {
+        let panelId = UUID()
+        let otherPanelId = UUID()
+        let snapshot = agentSnapshot(
+            sessionId: "snapshotless-completed-session",
+            workingDirectory: "/tmp/snapshotless-completed-session",
+            capturedAt: 90
+        )
+        let lifecycle = RestoredAgentLifecycleCoordinator(dateProvider: { 100 })
+        lifecycle.markCompleted(
+            panelId: panelId,
+            observation: nil,
+            runtimeProcessIdentities: []
+        )
+        let completedGeneration = lifecycle.completedGeneration(panelId: panelId)
+
+        lifecycle.snapshotsByPanelId[otherPanelId] = agentSnapshot(
+            sessionId: "unrelated-session",
+            workingDirectory: "/tmp/unrelated-session",
+            capturedAt: 100
+        )
+
+        #expect(completedGeneration != nil)
+        #expect(
+            lifecycle.completedGeneration(panelId: panelId)?.completedAt ==
+                completedGeneration?.completedAt
+        )
+        let replacementIdentity = AgentPIDProcessIdentity(
+            pid: 654,
+            startSeconds: 150,
+            startMicroseconds: 0
+        )
+        #expect(lifecycle.reconcileCompletedAgent(
+            panelId: panelId,
+            observation: indexEntry(
+                snapshot: snapshot,
+                updatedAt: 160,
+                identity: replacementIdentity
+            ),
+            currentProcessIdentity: { _ in replacementIdentity }
+        ))
+        #expect(
+            lifecycle.resumeStatesByPanelId[panelId] ==
+                .observedAgentCommandRunning
+        )
+    }
+
+    @Test
     func shellStateReportRoutesMovedSurfaceToCurrentWorkspace() async throws {
         let previousAppDelegate = AppDelegate.shared
         let appDelegate = AppDelegate()

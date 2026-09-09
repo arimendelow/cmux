@@ -231,6 +231,10 @@ final class AgentChatTranscriptService {
     private static var pendingResumeIntents: [PendingResumeIntent] = []
     /// The started service, used to apply resume re-binds immediately once live.
     private static weak var liveInstance: AgentChatTranscriptService?
+#if DEBUG
+    static var recordResumeIntentObserverForTesting:
+        ((_ sessionID: String, _ surfaceID: String?, _ workspaceID: String?) -> Void)?
+#endif
     static func isValidResumeSessionID(_ value: String) -> Bool {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -249,6 +253,13 @@ final class AgentChatTranscriptService {
         workingDirectory: String?
     ) {
         guard isValidResumeSessionID(sessionID) else { return }
+#if DEBUG
+        recordResumeIntentObserverForTesting?(
+            sessionID,
+            surfaceID,
+            workspaceID
+        )
+#endif
         if let live = liveInstance {
             live.noteResumeInitiated(
                 sessionID: sessionID,

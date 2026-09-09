@@ -115,7 +115,12 @@ extension ControlCommandCoordinator {
             context?.controlSurfaceResumeGet(
                 routing: routing,
                 explicitTargetID: surfaceResumeExplicitTargetID(params),
-                hasResolvedWindowID: uuid(params, "window_id") != nil
+                hasResolvedWindowID: uuid(params, "window_id") != nil,
+                expectedKind: optionalTrimmedRawString(params, "kind"),
+                expectedCheckpointID: optionalTrimmedRawString(
+                    params,
+                    "checkpoint_id"
+                )
             ) ?? .surfaceNotFound
         )
     }

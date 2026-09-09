@@ -439,7 +439,10 @@ struct ControlCommandCoordinatorSurfaceTests {
         let result = coordinator.handle(ControlRequest(
             id: .int(1),
             method: "surface.resume.get",
-            params: [:]
+            params: [
+                "kind": .string("custom"),
+                "checkpoint_id": .string("checkpoint"),
+            ]
         ))
         guard case .ok(.object(let payload)) = result,
               case .object(let record)? = payload["restore_record"],
@@ -454,6 +457,8 @@ struct ControlCommandCoordinatorSurfaceTests {
         #expect(record["prepared_arguments_working_directory"] == .string("/tmp/日本語"))
         #expect(launch["arguments"] == .array(command.arguments.map(JSONValue.string)))
         #expect(record["legacy_command"] == .null)
+        #expect(context.resumeGetExpectedKind == "custom")
+        #expect(context.resumeGetExpectedCheckpointID == "checkpoint")
     }
 
     @Test func surfaceResumeClearForwardsManagedSessionEndProvenance() {

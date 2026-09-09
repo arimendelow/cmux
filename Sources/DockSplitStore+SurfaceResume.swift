@@ -62,7 +62,11 @@ extension DockSplitStore {
             )
         }
         if binding.hasCompleteManagedSessionIdentity {
-            managedAgentResumeBindingsByPanelId[panelId] = binding
+            managedAgentResumeBindingsByPanelId[panelId] =
+                WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                    observed: binding,
+                    current: managedAgentResumeBindingsByPanelId[panelId]
+                )
         } else if binding.isAgentHookBinding {
             managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
         }
@@ -154,10 +158,15 @@ extension DockSplitStore {
               effectiveBinding.hasCompleteManagedSessionIdentity else {
             return managedBinding
         }
-        if managedBinding != effectiveBinding {
-            managedAgentResumeBindingsByPanelId[panelId] = effectiveBinding
+        let resolvedBinding =
+            WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                observed: effectiveBinding,
+                current: managedBinding
+            )
+        if managedBinding != resolvedBinding {
+            managedAgentResumeBindingsByPanelId[panelId] = resolvedBinding
         }
-        return effectiveBinding
+        return resolvedBinding
     }
 
     private static func dockResumeBindingsRepresentSameManagedSession(

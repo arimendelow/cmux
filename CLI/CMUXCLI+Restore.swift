@@ -62,6 +62,12 @@ extension CMUXCLI {
         } else {
             throw currentRestoreSurfaceUnknownError()
         }
+        if let kind = selector.kind {
+            params["kind"] = kind
+        }
+        if let checkpointID = selector.checkpointID {
+            params["checkpoint_id"] = checkpointID
+        }
 
         let payload = try client.sendV2(method: "surface.resume.get", params: params)
         guard let rawRecord = payload["restore_record"] as? [String: Any] else {
@@ -85,7 +91,11 @@ extension CMUXCLI {
             )
         }
         if let expectedCheckpointID = selector.checkpointID,
-           expectedCheckpointID != record.checkpointID {
+           !restoreCheckpointIDsMatch(
+               kind: record.kind,
+               lhs: expectedCheckpointID,
+               rhs: record.checkpointID
+           ) {
             throw loggedRestoreError(
                 stage: "record.checkpoint-mismatch",
                 detail: "expected=\(expectedCheckpointID) actual=\(record.checkpointID ?? "none")",
@@ -99,6 +109,7 @@ extension CMUXCLI {
         let environment = processEnvironment.merging(record.environment) { _, restored in
             restored
         }
+
         if record.launchCommand == nil,
            record.preparedArguments == nil,
            let legacyCommand = record.legacyCommand {
@@ -179,6 +190,37 @@ extension CMUXCLI {
             invocation,
             appliedWorkingDirectory: effectiveWorkingDirectory
         )
+    }
+
+    private func restoreCheckpointIDsMatch(
+        kind: String,
+        lhs: String,
+        rhs: String?
+    ) -> Bool {
+        guard let rhs else { return false }
+        let normalizedLHS = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedRHS = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedLHS != normalizedRHS else { return true }
+        guard kind == "pi" || kind == "omp",
+              let lhsUUID = restoreCheckpointUUID(normalizedLHS),
+              let rhsUUID = restoreCheckpointUUID(normalizedRHS) else {
+            return false
+        }
+        return lhsUUID == rhsUUID
+    }
+
+    private func restoreCheckpointUUID(_ value: String) -> UUID? {
+        if let uuid = UUID(uuidString: value) {
+            return uuid
+        }
+        let filename = (value as NSString).lastPathComponent
+        guard filename.hasSuffix(".jsonl") else { return nil }
+        let stem = String(filename.dropLast(".jsonl".count))
+        if let uuid = UUID(uuidString: stem) {
+            return uuid
+        }
+        guard let separator = stem.lastIndex(of: "_") else { return nil }
+        return UUID(uuidString: String(stem[stem.index(after: separator)...]))
     }
 
     private func currentRestoreSurfaceID(

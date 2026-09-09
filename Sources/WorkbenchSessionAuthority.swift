@@ -102,6 +102,31 @@ enum WorkbenchSessionAuthority: String, Sendable {
         )
     }
 
+    static func preservingExplicitLocalBindingAuthority(
+        observed: SurfaceResumeBindingSnapshot,
+        current: SurfaceResumeBindingSnapshot?
+    ) -> SurfaceResumeBindingSnapshot {
+        guard let current,
+              current.workbenchAuthority == .controlledHere,
+              current.isSameManagedSession(as: observed) else {
+            return observed
+        }
+        let refreshedWorkingDirectory = observed.cwd ?? current.cwd
+        let trustedExecution = current.retargetingWorkingDirectory(
+            refreshedWorkingDirectory
+        )
+        var preserved = observed
+        preserved.cwd = refreshedWorkingDirectory
+        preserved.workbenchAuthority = .controlledHere
+        preserved.launchFlavor = current.launchFlavor
+        preserved.launchCommand = trustedExecution.launchCommand
+        preserved.command = trustedExecution.command
+        preserved.environment = current.environment
+        preserved.approvalPolicy = current.approvalPolicy
+        preserved.approvalRecordId = current.approvalRecordId
+        return preserved
+    }
+
     func allowsLocalAutoResume(globalEnabled: Bool, wasRunning: Bool) -> Bool {
         globalEnabled && wasRunning && self == .controlledHere
     }

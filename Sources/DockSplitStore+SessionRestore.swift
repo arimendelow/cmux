@@ -130,55 +130,117 @@ extension DockSplitStore {
     ) -> UUID? {
         guard let terminalSnapshot = snapshot.terminal else { return nil }
         let policy = Workspace.makeSessionRestorePolicyService()
-        let restorableAgent = Workspace.restorableAgentForSessionRestore(
-            terminalSnapshot.agent,
-            resumeBinding: terminalSnapshot.resumeBinding
-        )
-        let hibernation = restorableAgent != nil ? terminalSnapshot.hibernation : nil
-        let resumeBinding = Workspace.resumeBindingForSessionRestore(
-            terminalSnapshot.resumeBinding,
-            restorableAgent: restorableAgent
-        )
-        let managedResumeBinding = (
+        let snapshotRestorableAgent = terminalSnapshot.agent
+        let persistedEffectiveResumeBinding = terminalSnapshot.resumeBinding
+        let persistedManagedResumeBindingCandidate = (
             terminalSnapshot.managedAgentResumeBinding.flatMap {
                 $0.hasCompleteManagedSessionIdentity ? $0 : nil
             }
                 ?? terminalSnapshot.resumeBinding.flatMap {
                     $0.hasCompleteManagedSessionIdentity ? $0 : nil
                 }
-        ).flatMap { candidate -> SurfaceResumeBindingSnapshot? in
-            if restorableAgent != nil,
-               Workspace.restorableAgentForSessionRestore(
-                   restorableAgent,
-                   resumeBinding: candidate
-               ) == nil {
-                return nil
-            }
-            return Workspace.resumeBindingForSessionRestore(
-                candidate,
-                restorableAgent: restorableAgent
+        )
+        let managedBindingConflictsWithSnapshot =
+            snapshotRestorableAgent != nil &&
+            persistedManagedResumeBindingCandidate != nil &&
+            Workspace.restorableAgentForSessionRestore(
+                snapshotRestorableAgent,
+                resumeBinding: persistedManagedResumeBindingCandidate
+            ) == nil
+        let persistedManagedResumeBinding = managedBindingConflictsWithSnapshot
+            ? nil
+            : persistedManagedResumeBindingCandidate
+        var persistedResumeBinding = persistedEffectiveResumeBinding
+            ?? persistedManagedResumeBinding
+        let effectiveBindingUsesManagedAuthority =
+            persistedEffectiveResumeBinding == nil ||
+            persistedEffectiveResumeBinding?.isAgentHookBinding == true ||
+            Workspace.effectiveBindingLaunchesManagedAgent(
+                persistedEffectiveResumeBinding
             )
+        if managedBindingConflictsWithSnapshot &&
+            effectiveBindingUsesManagedAuthority {
+            if persistedResumeBinding?.isAgentHookBinding == true {
+                persistedResumeBinding = nil
+            } else {
+                persistedResumeBinding?.workbenchAuthority = .unknown
+            }
         }
+        let persistedAgentCompatibilityBinding =
+            persistedManagedResumeBinding ?? persistedResumeBinding
+        let restorableAgent: SessionRestorableAgentSnapshot? =
+            if managedBindingConflictsWithSnapshot {
+                snapshotRestorableAgent.map {
+                    var blocked = $0
+                    blocked.workbenchAuthority = .unknown
+                    return blocked
+                }
+            } else {
+                Workspace.restorableAgentForSessionRestore(
+                    snapshotRestorableAgent,
+                    resumeBinding: persistedAgentCompatibilityBinding
+                )
+            }
+        let hibernation = restorableAgent != nil ? terminalSnapshot.hibernation : nil
+        let resumeBinding = Workspace.resumeBindingForSessionRestore(
+            persistedResumeBinding,
+            restorableAgent: restorableAgent
+        )
+        let managedResumeBinding = Workspace.resumeBindingForSessionRestore(
+            persistedManagedResumeBinding,
+            restorableAgent: restorableAgent
+        )
         let agentWasRunning = terminalSnapshot.wasAgentRunning ?? true
         let autoResumeEnabled = AgentSessionAutoResumeSettings.isEnabled(
             defaults: agentSessionAutoResumeDefaults
         )
-        let workbenchAuthority = WorkbenchSessionAuthority.resolved(
-            agent: restorableAgent,
-            binding: resumeBinding
+        let workbenchAuthority = Workspace.restoreWorkbenchAuthority(
+            effectiveBinding: resumeBinding,
+            agentCompatibilityBinding: managedResumeBinding ?? resumeBinding,
+            restorableAgent: restorableAgent,
+            managedBindingConflictsWithSnapshot:
+                managedBindingConflictsWithSnapshot
         )
-        let shouldAutoResumeAgent = workbenchAuthority.allowsLocalAutoResume(
+        let effectiveBindingUsesManagedAgentAuthority =
+            resumeBinding == nil ||
+            resumeBinding?.isAgentHookBinding == true ||
+            Workspace.effectiveBindingLaunchesManagedAgent(resumeBinding)
+        let shouldAutoResumeEffectiveBinding =
+            workbenchAuthority.allowsLocalAutoResume(
+                globalEnabled: autoResumeEnabled,
+                wasRunning: effectiveBindingUsesManagedAgentAuthority
+                    ? agentWasRunning
+                    : true
+            )
+        let managedAgentAuthority = WorkbenchSessionAuthority.resolved(
+            agent: restorableAgent,
+            binding: managedResumeBinding ?? resumeBinding
+        )
+        let locallyOwnedRunningSession =
+            effectiveBindingUsesManagedAgentAuthority &&
+            managedAgentAuthority == .controlledHere &&
+            agentWasRunning
+        let shouldAutoResumeManagedAgent =
+            locallyOwnedRunningSession &&
+            managedAgentAuthority.allowsLocalAutoResume(
             globalEnabled: autoResumeEnabled,
             wasRunning: agentWasRunning
         )
+        let startupResumeBinding = Workspace.protectedAgentHookStartupBinding(
+            effectiveBinding: resumeBinding,
+            managedBinding: managedResumeBinding
+        )
         let resumeBindingForStartup = workbenchAuthority != .controlledHere ||
             hibernation != nil ||
-            (resumeBinding?.isProcessDetected == true && resumeBinding?.autoResume != true)
+            (
+                startupResumeBinding?.isProcessDetected == true &&
+                startupResumeBinding?.autoResume != true
+            )
             ? nil
-            : resumeBinding
+            : startupResumeBinding
         let approvedResumeBinding = policy.approvedSurfaceResumeBinding(
             resumeBindingForStartup,
-            autoResumeAgentSessions: shouldAutoResumeAgent,
+            autoResumeAgentSessions: shouldAutoResumeEffectiveBinding,
             promptForApproval: true,
             approvalStoreURL: SurfaceResumeApprovalStore.defaultURL()
         )
@@ -217,10 +279,15 @@ extension DockSplitStore {
         let restoredTmuxStartCommand = tmuxLauncher == nil ? nil : tmuxStartCommand
         let agentSessionAlreadyActive = sessionAgentAlreadyActive(
             restorableAgent: restorableAgent,
+            managedResumeBinding: managedResumeBinding,
             snapshotPanelId: snapshot.id,
-            shouldAutoResume: shouldAutoResumeAgent && hibernation == nil && bindingLaunch == nil
+            shouldCheck: locallyOwnedRunningSession && hibernation == nil,
+            shouldClaimLaunch:
+                shouldAutoResumeManagedAgent &&
+                hibernation == nil &&
+                bindingLaunch == nil
         )
-        let agentLaunch = shouldAutoResumeAgent && hibernation == nil && bindingLaunch == nil
+        let agentLaunch = shouldAutoResumeManagedAgent && hibernation == nil && bindingLaunch == nil
             && !agentSessionAlreadyActive
             ? restorableAgent?.resumeStartupInput(
                 restoringWorkingDirectory: resumeSessionWorkingDirectory
@@ -294,10 +361,25 @@ extension DockSplitStore {
         if let restoredScrollback {
             restoredTerminalScrollbackByPanelId[terminal.id] = restoredScrollback
         }
+        let managedAgentExpectedToContinue =
+            managedResumeBinding != nil &&
+            managedResumeBinding?.autoResume != false &&
+            agentWasRunning
+        let effectiveBindingLaunchesManagedAgent =
+            Workspace.effectiveBindingLaunchesManagedAgent(resumeBinding)
         let willRunAgentCommand = false
         let willRunAgentInput =
             agentLaunch?.initialInput != nil ||
-            (bindingLaunch?.initialInput != nil && resumeBinding?.isAgentHookBinding == true)
+            (
+                bindingLaunch?.initialInput != nil &&
+                (
+                    startupResumeBinding?.isAgentHookBinding == true ||
+                    (
+                        effectiveBindingLaunchesManagedAgent &&
+                        managedAgentExpectedToContinue
+                    )
+                )
+            )
         seedSessionRestoredAgentState(
             panelId: terminal.id,
             restorableAgent: restorableAgent,
@@ -315,17 +397,42 @@ extension DockSplitStore {
                 hibernatedAt: Date(timeIntervalSince1970: hibernation.hibernatedAt)
             )
         }
+        let restoredAgentResumeWorkingDirectory =
+            if effectiveBindingLaunchesManagedAgent &&
+                managedAgentExpectedToContinue {
+                Workspace.resumeIntentWorkingDirectory(
+                    managedResumeBinding: managedResumeBinding,
+                    restorableAgent: restorableAgent,
+                    fallback: nil
+                )
+            } else {
+                resumeSessionWorkingDirectory
+            }
         if willRunAgentCommand || willRunAgentInput,
-           let resumeSessionWorkingDirectory {
-            restoredResumeSessionWorkingDirectoriesByPanelId[terminal.id] = resumeSessionWorkingDirectory
+           let restoredAgentResumeWorkingDirectory {
+            restoredResumeSessionWorkingDirectoriesByPanelId[terminal.id] =
+                restoredAgentResumeWorkingDirectory
         }
-        recordSessionResumeIntent(
-            panelId: terminal.id,
+        let resumeReboundSession = Workspace.resumeReboundSession(
             restorableAgent: restorableAgent,
-            resumeBinding: resumeBinding,
-            workingDirectory: resumeSessionWorkingDirectory,
-            agentSessionAlreadyActive: agentSessionAlreadyActive
+            managedResumeBinding: managedResumeBinding,
+            effectiveResumeBinding: resumeBinding,
+            agentSessionAlreadyActive: agentSessionAlreadyActive,
+            shouldRebindSession: locallyOwnedRunningSession
         )
+        if let resumeReboundSession {
+            AgentChatTranscriptService.recordResumeIntent(
+                sessionID: resumeReboundSession.sessionID,
+                source: resumeReboundSession.source,
+                surfaceID: terminal.id.uuidString,
+                workspaceID: workspaceId.uuidString,
+                workingDirectory: Workspace.resumeIntentWorkingDirectory(
+                    managedResumeBinding: managedResumeBinding,
+                    restorableAgent: restorableAgent,
+                    fallback: resumeSessionWorkingDirectory
+                )
+            )
+        }
         return terminal.id
     }
 
@@ -417,54 +524,41 @@ extension DockSplitStore {
 
     private func sessionAgentAlreadyActive(
         restorableAgent: SessionRestorableAgentSnapshot?,
+        managedResumeBinding: SurfaceResumeBindingSnapshot?,
         snapshotPanelId: UUID,
-        shouldAutoResume: Bool
+        shouldCheck: Bool,
+        shouldClaimLaunch: Bool
     ) -> Bool {
-        guard shouldAutoResume, let restorableAgent else { return false }
+        guard shouldCheck else { return false }
+        let sessionIdentity: (kind: String, sessionID: String)? =
+            if let restorableAgent {
+                (
+                    restorableAgent.kind.rawValue,
+                    restorableAgent.sessionId
+                )
+            } else if let managedResumeBinding,
+                      let kind = managedResumeBinding.kind,
+                      let sessionID = managedResumeBinding.checkpointId {
+                (kind, sessionID)
+            } else {
+                nil
+            }
+        guard let sessionIdentity else { return false }
         let index = SharedLiveAgentIndex.shared.currentIndexSchedulingRefresh()
             ?? RestorableAgentSessionIndex.load()
         if AgentResumeLiveness.hasLiveProcess(
             for: index.entry(workspaceId: workspaceId, panelId: snapshotPanelId),
-            kind: restorableAgent.kind.rawValue,
-            sessionId: restorableAgent.sessionId
+            kind: sessionIdentity.kind,
+            sessionId: sessionIdentity.sessionID
         ) {
             return true
         }
-        return !AgentResumeLaunchGuard.shared.claimResumeLaunch(
-            kind: restorableAgent.kind.rawValue,
-            sessionId: restorableAgent.sessionId
-        )
-    }
-
-    private func recordSessionResumeIntent(
-        panelId: UUID,
-        restorableAgent: SessionRestorableAgentSnapshot?,
-        resumeBinding: SurfaceResumeBindingSnapshot?,
-        workingDirectory: String?,
-        agentSessionAlreadyActive: Bool
-    ) {
-        guard !agentSessionAlreadyActive else { return }
-        let session: (id: String, source: String)? = if let restorableAgent {
-            (restorableAgent.sessionId, restorableAgent.kind.rawValue)
-        } else if resumeBinding?.isAgentHookBinding == true,
-                  let id = resumeBinding?.checkpointId?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !id.isEmpty,
-                  let source = resumeBinding?.kind?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !source.isEmpty {
-            (id, source)
-        } else {
-            nil
+        guard shouldClaimLaunch, restorableAgent != nil else {
+            return false
         }
-        guard let session else { return }
-        AgentChatTranscriptService.recordResumeIntent(
-            sessionID: session.id,
-            source: session.source,
-            surfaceID: panelId.uuidString,
-            workspaceID: workspaceId.uuidString,
-            workingDirectory: workingDirectory
+        return !AgentResumeLaunchGuard.shared.claimResumeLaunch(
+            kind: sessionIdentity.kind,
+            sessionId: sessionIdentity.sessionID
         )
-#if DEBUG
-        cmuxDebugLog("session.restore.dock.resumeBinding workspace=\(workspaceId.uuidString.prefix(8)) surface=\(panelId.uuidString.prefix(8)) source=\(session.source) session=\(session.id.prefix(8))")
-#endif
     }
 }

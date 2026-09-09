@@ -45,6 +45,15 @@ enum ControlSurfaceResumeTarget {
         }
     }
 
+    var managedBinding: SurfaceResumeBindingSnapshot? {
+        switch self {
+        case .workspace(_, let workspace, let surfaceID):
+            workspace.managedAgentResumeBinding(panelId: surfaceID)
+        case .dock(_, let dock, let surfaceID):
+            dock.managedAgentResumeBinding(panelId: surfaceID)
+        }
+    }
+
     var restorableAgent: SessionRestorableAgentSnapshot? {
         switch self {
         case .workspace(_, let workspace, let surfaceID):
@@ -63,6 +72,70 @@ enum ControlSurfaceResumeTarget {
         }
     }
 
+    func restoreWorkingDirectory(
+        binding: SurfaceResumeBindingSnapshot?,
+        agent: SessionRestorableAgentSnapshot?
+    ) -> String? {
+        let managedBindingOwnsDirectory =
+            binding.map {
+                managedBinding?.isSameManagedSession(as: $0) == true &&
+                    self.binding?.isSameManagedSession(as: $0) != true
+            } ?? false
+        if managedBindingOwnsDirectory {
+            return binding?.cwd
+                ?? agent?.workingDirectory
+                ?? binding?.launchCommand?.workingDirectory
+                ?? restoredResumeWorkingDirectory
+        }
+        return restoredResumeWorkingDirectory
+            ?? binding?.cwd
+            ?? agent?.workingDirectory
+            ?? binding?.launchCommand?.workingDirectory
+    }
+
+    func bindingForGet(
+        expectedKind: String?,
+        expectedCheckpointID: String?
+    ) -> SurfaceResumeBindingSnapshot? {
+        let effectiveBinding = binding
+        guard expectedKind != nil || expectedCheckpointID != nil else {
+            return effectiveBinding
+        }
+        func matches(_ candidate: SurfaceResumeBindingSnapshot) -> Bool {
+            let kindMatches =
+                expectedKind == nil ||
+                candidate.kind == expectedKind
+            let checkpointMatches: Bool
+            if let expectedCheckpointID,
+               let kind = candidate.kind,
+               let checkpointID = candidate.checkpointId {
+                checkpointMatches = ManagedAgentSessionIdentity.sessionIDsMatch(
+                    kind: kind,
+                    lhs: checkpointID,
+                    rhs: expectedCheckpointID
+                )
+            } else {
+                checkpointMatches =
+                    expectedCheckpointID == nil ||
+                    candidate.checkpointId == expectedCheckpointID
+            }
+            return kindMatches && checkpointMatches
+        }
+        if let effectiveBinding, matches(effectiveBinding) {
+            if effectiveBinding.isAgentHookBinding,
+               let managedBinding,
+               managedBinding.isSameManagedSession(as: effectiveBinding),
+               matches(managedBinding) {
+                return managedBinding
+            }
+            return effectiveBinding
+        }
+        if let managedBinding, matches(managedBinding) {
+            return managedBinding
+        }
+        return nil
+    }
+
     @discardableResult
     func setBinding(_ binding: SurfaceResumeBindingSnapshot) -> Bool {
         switch self {
@@ -74,29 +147,167 @@ enum ControlSurfaceResumeTarget {
     }
 
     func bindingForClear(
+        expectedCheckpointID: String?,
         expectedSource: String?,
         agentSessionEnded: Bool
     ) -> SurfaceResumeBindingSnapshot? {
-        switch self {
-        case .workspace:
-            return binding
-        case .dock(_, let dock, let surfaceID):
-            if expectedSource == "agent-hook" || agentSessionEnded {
-                return dock.managedAgentResumeBinding(panelId: surfaceID)
-            }
-            return binding
+        if agentSessionEnded {
+            return managedBinding ?? binding
         }
+        if expectedCheckpointID != nil || expectedSource != nil {
+            func matches(_ candidate: SurfaceResumeBindingSnapshot) -> Bool {
+                let matchesCheckpoint =
+                    expectedCheckpointID == nil ||
+                    checkpointMatches(
+                        expectedCheckpointID,
+                        binding: candidate
+                    )
+                let sourceMatches =
+                    expectedSource == nil ||
+                    candidate.source == expectedSource
+                return matchesCheckpoint && sourceMatches
+            }
+            if let effectiveBinding = binding, matches(effectiveBinding) {
+                if effectiveBinding.isAgentHookBinding,
+                   let managedBinding,
+                   managedBinding.isSameManagedSession(as: effectiveBinding),
+                   matches(managedBinding) {
+                    return managedBinding
+                }
+                return effectiveBinding
+            }
+            if let managedBinding, matches(managedBinding) {
+                return managedBinding
+            }
+            return nil
+        }
+        return binding
     }
 
+    func checkpointMatches(
+        _ expectedCheckpointID: String?,
+        binding: SurfaceResumeBindingSnapshot?
+    ) -> Bool {
+        guard let expectedCheckpointID else { return true }
+        guard let binding,
+              let checkpointID = binding.checkpointId else {
+            return false
+        }
+        guard let kind = binding.kind else {
+            return checkpointID == expectedCheckpointID
+        }
+        return ManagedAgentSessionIdentity.sessionIDsMatch(
+            kind: kind,
+            lhs: checkpointID,
+            rhs: expectedCheckpointID
+        )
+    }
+
+    func restoreAuthority(
+        selectedBinding: SurfaceResumeBindingSnapshot?
+    ) -> WorkbenchSessionAuthority {
+        let agent = restorableAgent
+        let authorityBinding: SurfaceResumeBindingSnapshot?
+        if let selectedBinding, !selectedBinding.isAgentHookBinding {
+            if Workspace.effectiveBindingLaunchesManagedAgent(selectedBinding),
+               let managedBinding {
+                if agent == nil || Workspace.restorableAgentForSessionRestore(
+                    agent,
+                    resumeBinding: managedBinding
+                ) != nil {
+                    authorityBinding = managedBinding
+                } else {
+                    return .unknown
+                }
+            } else {
+                authorityBinding = selectedBinding
+            }
+        } else if let selectedBinding, selectedBinding.isAgentHookBinding {
+            if let managedBinding,
+               managedBinding.isSameManagedSession(as: selectedBinding) {
+                authorityBinding = managedBinding
+            } else {
+                authorityBinding = selectedBinding
+            }
+        } else if let managedBinding,
+                  Workspace.restorableAgentForSessionRestore(
+                      agent,
+                      resumeBinding: managedBinding
+                  ) != nil {
+            authorityBinding = managedBinding
+        } else {
+            authorityBinding = nil
+        }
+        let authorityAgent: SessionRestorableAgentSnapshot? =
+            if let selectedBinding,
+               !selectedBinding.isAgentHookBinding,
+               !Workspace.effectiveBindingLaunchesManagedAgent(
+                   selectedBinding
+               ) {
+                nil
+            } else {
+                Workspace.restorableAgentForSessionRestore(
+                    agent,
+                    resumeBinding: authorityBinding
+                )
+            }
+        return WorkbenchSessionAuthority.resolved(
+            agent: authorityAgent,
+            binding: authorityBinding
+        )
+    }
+
+    func protectedRestoreBinding(
+        selectedBinding: SurfaceResumeBindingSnapshot?
+    ) -> SurfaceResumeBindingSnapshot? {
+        guard let selectedBinding,
+              selectedBinding.isAgentHookBinding,
+              let managedBinding,
+              managedBinding.isSameManagedSession(as: selectedBinding) else {
+            return selectedBinding
+        }
+        return managedBinding
+    }
+
+    func restorableAgentMatches(
+        expectedKind: String?,
+        expectedCheckpointID: String?
+    ) -> Bool {
+        guard let agent = restorableAgent else { return false }
+        if let expectedKind, agent.kind.rawValue != expectedKind {
+            return false
+        }
+        guard let expectedCheckpointID else { return true }
+        return ManagedAgentSessionIdentity.sessionIDsMatch(
+            kind: agent.kind.rawValue,
+            lhs: agent.sessionId,
+            rhs: expectedCheckpointID
+        )
+    }
+
+    @discardableResult
     func clearBinding(
         _ binding: SurfaceResumeBindingSnapshot?,
         agentSessionEnded: Bool
-    ) {
+    ) -> Bool {
+        guard let binding else { return false }
         switch self {
         case .workspace(_, let workspace, let surfaceID):
-            _ = workspace.clearSurfaceResumeBinding(panelId: surfaceID)
+            if binding.isAgentHookBinding,
+               workspace.managedAgentResumeBinding(panelId: surfaceID)?
+                   .isSameManagedSession(as: binding) == true {
+                return workspace.clearManagedAgentResumeBinding(
+                    panelId: surfaceID,
+                    matching: binding,
+                    agentSessionEnded: agentSessionEnded
+                )
+            }
+            return workspace.clearSurfaceResumeBinding(
+                panelId: surfaceID,
+                matching: binding
+            )
         case .dock(_, let dock, let surfaceID):
-            _ = dock.clearSurfaceResumeBinding(
+            return dock.clearSurfaceResumeBinding(
                 panelId: surfaceID,
                 binding: binding,
                 agentSessionEnded: agentSessionEnded
@@ -250,7 +461,8 @@ extension TerminalController {
     private func surfaceResumeSnapshot(
         target: ControlSurfaceResumeTarget,
         binding: SurfaceResumeBindingSnapshot?,
-        cleared: Bool
+        cleared: Bool,
+        allowsAgentSnapshotFallback: Bool = true
     ) -> ControlSurfaceResumeSnapshot {
         ControlSurfaceResumeSnapshot(
             windowID: target.windowID(using: self),
@@ -261,20 +473,28 @@ extension TerminalController {
             binding: controlResumeBinding(from: binding),
             restoreRecord: cleared
                 ? nil
-                : controlSurfaceRestoreRecord(target: target, binding: binding)
+                : controlSurfaceRestoreRecord(
+                    target: target,
+                    binding: binding,
+                    allowsAgentSnapshotFallback: allowsAgentSnapshotFallback
+                )
         )
     }
 
     private func controlSurfaceRestoreRecord(
         target: ControlSurfaceResumeTarget,
-        binding: SurfaceResumeBindingSnapshot?
+        binding selectedBinding: SurfaceResumeBindingSnapshot?,
+        allowsAgentSnapshotFallback: Bool
     ) -> ControlSurfaceRestoreRecord? {
-        guard WorkbenchSessionAuthority.resolved(
-            agent: target.restorableAgent,
-            binding: binding
-        ) == .controlledHere else {
+        if selectedBinding == nil, !allowsAgentSnapshotFallback {
             return nil
         }
+        guard target.restoreAuthority(selectedBinding: selectedBinding) == .controlledHere else {
+            return nil
+        }
+        let binding = target.protectedRestoreBinding(
+            selectedBinding: selectedBinding
+        )
         // Structured fields remain untouched; only the explicit legacy fallback
         // receives restore-time provider refreshes that older records depended on.
         let compatibilityBinding = binding.map {
@@ -321,10 +541,10 @@ extension TerminalController {
                 ? binding?.source ?? "session-snapshot"
                 : "session-snapshot"
             let launchCommand = binding?.launchCommand ?? agent.launchCommand
-            let workingDirectory = target.restoredResumeWorkingDirectory
-                ?? binding?.cwd
-                ?? agent.workingDirectory
-                ?? launchCommand?.workingDirectory
+            let workingDirectory = target.restoreWorkingDirectory(
+                binding: binding,
+                agent: agent
+            )
             let permissionMode = binding?.permissionMode ?? agent.permissionMode
             let mode: AgentRestoreRequestMode = agent.kind.restoreMode == .relaunchCommand
                 ? .relaunchAgent
@@ -372,9 +592,10 @@ extension TerminalController {
             kind: normalizedKind,
             checkpointID: binding.checkpointId,
             source: binding.source,
-            workingDirectory: target.restoredResumeWorkingDirectory
-                ?? binding.cwd
-                ?? binding.launchCommand?.workingDirectory,
+            workingDirectory: target.restoreWorkingDirectory(
+                binding: binding,
+                agent: nil
+            ),
             environment: binding.environment ?? [:],
             launchCommand: binding.launchCommand.map {
                 controlAgentLaunchCommand(
@@ -578,7 +799,9 @@ extension TerminalController {
     func controlSurfaceResumeGet(
         routing: ControlRoutingSelectors,
         explicitTargetID: UUID?,
-        hasResolvedWindowID: Bool
+        hasResolvedWindowID: Bool,
+        expectedKind: String?,
+        expectedCheckpointID: String?
     ) -> ControlSurfaceResumeResolution {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .windowUnavailable
@@ -591,11 +814,28 @@ extension TerminalController {
         ) else {
             return .surfaceNotFound
         }
-        if let binding = target.binding,
+        let binding = target.bindingForGet(
+            expectedKind: expectedKind,
+            expectedCheckpointID: expectedCheckpointID
+        )
+        if let binding,
            case .pendingSigningSecret = SurfaceResumeApprovalStore.applyingStoredApprovalLookup(to: binding) {
             return .approvalPending(message: surfaceResumeApprovalPendingMessage)
         }
-        return .result(surfaceResumeSnapshot(target: target, binding: target.binding, cleared: false))
+        let selectorRequested = expectedKind != nil || expectedCheckpointID != nil
+        let matchingSnapshotAvailable = target.restorableAgentMatches(
+            expectedKind: expectedKind,
+            expectedCheckpointID: expectedCheckpointID
+        )
+        return .result(
+            surfaceResumeSnapshot(
+                target: target,
+                binding: binding,
+                cleared: false,
+                allowsAgentSnapshotFallback:
+                    !selectorRequested || binding != nil || matchingSnapshotAvailable
+            )
+        )
     }
 
     func controlSurfaceResumeClear(
@@ -618,17 +858,31 @@ extension TerminalController {
             return .surfaceNotFound
         }
         let bindingForClear = target.bindingForClear(
+            expectedCheckpointID: expectedCheckpointID,
             expectedSource: expectedSource,
             agentSessionEnded: agentSessionEnded
         )
-        if let expectedCheckpointID, bindingForClear?.checkpointId != expectedCheckpointID {
+        if !target.checkpointMatches(
+            expectedCheckpointID,
+            binding: bindingForClear
+        ) {
             return .result(surfaceResumeSnapshot(target: target, binding: target.binding, cleared: false))
         }
         if let expectedSource, bindingForClear?.source != expectedSource {
             return .result(surfaceResumeSnapshot(target: target, binding: target.binding, cleared: false))
         }
-        target.clearBinding(bindingForClear, agentSessionEnded: agentSessionEnded)
-        return .result(surfaceResumeSnapshot(target: target, binding: target.binding, cleared: true))
+        let cleared = target.clearBinding(
+            bindingForClear,
+            agentSessionEnded: agentSessionEnded
+        )
+        let remainingBinding = target.managedBinding ?? target.binding
+        return .result(
+            surfaceResumeSnapshot(
+                target: target,
+                binding: remainingBinding,
+                cleared: cleared
+            )
+        )
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Darwin
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -2458,6 +2459,50 @@ struct WorkbenchLocalActionTests {
             ) == nil
         )
 
+        let bindingOnlySessionId = "binding-only-managed-session"
+        target.restoredAgentSnapshotsByPanelId.removeValue(forKey: surfaceId)
+        target.restoredAgentResumeStatesByPanelId[surfaceId] =
+            .observedAgentCommandRunning
+        target.surfaceResumeBindingsByPanelId[surfaceId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "tmux",
+                command: "tmux attach-session -t workbench",
+                checkpointId: "workbench",
+                source: "process-detected",
+                autoResume: true
+            )
+        target.managedAgentResumeBindingsByPanelId[surfaceId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(bindingOnlySessionId)",
+                checkpointId: bindingOnlySessionId,
+                source: "agent-hook",
+                workbenchAuthority: .controlledHere
+            )
+        let bindingOnlyKey = "copilot.\(bindingOnlySessionId)"
+        let currentPID = getpid()
+        let currentIdentity = try #require(AgentPIDProcessIdentity(pid: currentPID))
+        target.agentPIDs[bindingOnlyKey] = currentPID
+        target.agentPIDProcessIdentitiesByKey[bindingOnlyKey] = currentIdentity
+        target.agentPIDPanelIdsByKey[bindingOnlyKey] = surfaceId
+        target.agentPIDKeysByPanelId[surfaceId] = [bindingOnlyKey]
+        #expect(
+            target.managedAgentResumeBinding(panelId: surfaceId)?.checkpointId ==
+                bindingOnlySessionId
+        )
+        #expect(
+            !target.confirmedRuntimeAgentProcessIdentities(
+                kind: .copilot,
+                sessionId: bindingOnlySessionId,
+                panelId: surfaceId,
+                currentProcessIdentity: {
+                    guard let pid = pid_t(exactly: $0) else { return nil }
+                    return Workspace.agentPIDProcessIdentity(pid: pid)
+                }
+            ).isEmpty
+        )
+        target.clearAgentRuntimeState(panelId: surfaceId)
+
         let externalResumeSnapshot = SessionRestorableAgentSnapshot(
             kind: .copilot,
             sessionId: completedSessionId,
@@ -2465,9 +2510,7 @@ struct WorkbenchLocalActionTests {
             launchCommand: nil,
             workbenchAuthority: nil
         )
-        target.restoredAgentSnapshotsByPanelId[surfaceId] = externalResumeSnapshot
-        target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
-        target.surfaceResumeBindingsByPanelId[surfaceId] = SurfaceResumeBindingSnapshot(
+        #expect(target.setSurfaceResumeBinding(SurfaceResumeBindingSnapshot(
             name: "Copilot",
             kind: "copilot",
             command: "external-wrapper agent --resume \(completedSessionId)",
@@ -2482,7 +2525,9 @@ struct WorkbenchLocalActionTests {
             ),
             autoResume: false,
             workbenchAuthority: .controlledExternally
-        )
+        ), panelId: surfaceId))
+        target.restoredAgentSnapshotsByPanelId[surfaceId] = externalResumeSnapshot
+        target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
         let targetPanel = try #require(target.panels[surfaceId] as? TerminalPanel)
         #expect(
             targetPanel.enterAgentHibernation(

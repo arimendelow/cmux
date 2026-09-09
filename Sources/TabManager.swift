@@ -5801,6 +5801,10 @@ extension TabManager {
                     ),
                     into: &hasher
                 )
+                Self.hashSurfaceResumeBindingSnapshot(
+                    workspace.managedAgentResumeBinding(panelId: panelId),
+                    into: &hasher
+                )
                 if let terminalPanel = workspace.terminalPanel(for: panelId) {
                     Self.hashTextBoxDraftSnapshot(
                         terminalPanel.sessionTextBoxDraftSnapshot(),
