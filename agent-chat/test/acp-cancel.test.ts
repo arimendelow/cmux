@@ -88,6 +88,6 @@ test("ACP stop terminates a provider that is still starting", async () => {
 });
 
 test("server classifies provider cancellation without turning it into an error", () => {
-  expect(isAgentCancellationErrorForTest(new Error("agency-worker ACP startup cancelled"))).toBe(true);
+  expect(isAgentCancellationErrorForTest(new Error("ouro-boss ACP startup cancelled"))).toBe(true);
   expect(isAgentCancellationErrorForTest(new Error("provider crashed"))).toBe(false);
 });

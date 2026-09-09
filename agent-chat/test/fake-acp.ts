@@ -7,6 +7,8 @@ const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
 const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
+const imageCapabilityFlag = Bun.argv.findIndex((arg) => arg === "--image-capability");
+const imageCapability = imageCapabilityFlag >= 0 ? Bun.argv[imageCapabilityFlag + 1] ?? "" : "";
 const failLoad = Bun.argv.includes("--fail-load");
 const requestPermission = Bun.argv.includes("--request-permission");
 const exitAfterPermission = Bun.argv.includes("--exit-after-permission");
@@ -32,7 +34,16 @@ for await (const line of rl) {
   if (methodLog && msg.method) await appendFile(methodLog, `${msg.method}\n`);
   if (msg.method === "initialize") {
     if (startupDelayMs > 0) await Bun.sleep(startupDelayMs);
-    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        protocolVersion: 1,
+        ...(imageCapability
+          ? { agentCapabilities: { promptCapabilities: { image: imageCapability === "supported" } } }
+          : {}),
+      },
+    });
   } else if (msg.method === "session/new") {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params?.sessionId ?? `fake-${model || "default"}` } });
   } else if (msg.method === "session/load") {

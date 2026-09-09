@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writePersistedSession } from "../session-persistence";
-import { pickInitialBossSession, type WorkbenchExperience } from "../src/session";
+import { applyCanonicalBoss, type BossState, type WorkbenchExperience } from "../src/session";
 
 async function waitForPort(stateFile: string): Promise<number> {
   const deadline = Date.now() + 5_000;
@@ -88,8 +88,9 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
     const hello = await waitForMessage(messages, (message) => message.kind === "hello");
     const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
     expect(hello.providers.map((provider: any) => provider.id)).toEqual(["ouro-boss"]);
-    const recovered = pickInitialBossSession(
+    const recovered = applyCanonicalBoss(
       listed.sessions,
+      hello.boss as BossState,
       hello.experience as WorkbenchExperience,
     );
     expect(recovered?.id).toBe("boss-restored");
@@ -172,9 +173,11 @@ test("Workbench refuses a stale Boss provider session without replacing it", asy
     });
     await waitForMessage(messages, (message) => message.kind === "hello");
     const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
-    const recovered = pickInitialBossSession(
+    const helloMessage = messages.find((message) => message.kind === "hello");
+    const recovered = applyCanonicalBoss(
       listed.sessions,
-      messages.find((message) => message.kind === "hello").experience as WorkbenchExperience,
+      helloMessage.boss as BossState,
+      helloMessage.experience as WorkbenchExperience,
     );
     socket.send(JSON.stringify({ op: "subscribe", sessionId: recovered!.id }));
     const failure = await waitForMessage(
