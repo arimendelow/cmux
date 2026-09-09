@@ -416,6 +416,29 @@ struct AppDelegateDisplayConfigRestoreTests {
         #expect(!appDelegate.isApplyingSessionRestore)
         #expect(appDelegate.isScreenChangeCaptureSuppressed)
     }
+
+    @Test
+    func manualRestoreIsRejectedWhileAnotherRestoreIsActive() {
+        let appDelegate = testAppDelegate()
+        appDelegate.isApplyingSessionRestore = true
+        defer {
+            appDelegate.isApplyingSessionRestore = false
+        }
+        let snapshot = AppSessionSnapshot(
+            version: SessionSnapshotSchema.currentVersion,
+            createdAt: 1_000,
+            windows: [emptyWindowSnapshot(windowId: UUID())]
+        )
+
+        #expect(
+            !appDelegate.restorePreviousSessionSnapshot(
+                snapshot,
+                shouldActivate: false
+            )
+        )
+        #expect(appDelegate.isApplyingSessionRestore)
+    }
+
     // MARK: LRU ring behavior
     @Test
     func ringUpsertReplacesSameSignatureAndKeepsLatest() {

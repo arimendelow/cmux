@@ -2263,6 +2263,37 @@ struct WorkbenchLocalActionTests {
         #expect(page["gap"] as? Bool == false)
     }
 
+    @Test func appLifecycleEventsAreIncludedInWorkbenchChanges() {
+        let page = WorkbenchLocalActionRouter.changesForTesting(
+            events: [
+                [
+                    "seq": Int64(1),
+                    "name": "app.restore.started",
+                    "category": "app",
+                ],
+                [
+                    "seq": Int64(2),
+                    "name": "feed.updated",
+                    "category": "feed",
+                ],
+                [
+                    "seq": Int64(3),
+                    "name": "app.restore.completed",
+                    "category": "app",
+                ],
+            ],
+            latestSequence: 3,
+            afterSequence: 0,
+            limit: 200
+        )
+        let events = page["events"] as? [[String: Any]]
+
+        #expect(events?.count == 2)
+        #expect(events?.first?["name"] as? String == "app.restore.started")
+        #expect(events?.last?["name"] as? String == "app.restore.completed")
+        #expect(page["returned_through_sequence"] as? Int64 == 3)
+    }
+
     @Test func appContinuityDistinguishesCleanAndUncleanRestarts() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }

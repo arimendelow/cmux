@@ -885,7 +885,14 @@ enum WorkbenchLocalActionRouter {
         let oldest = retained.first.flatMap { CmuxEventBus.int64($0["seq"]) } ?? latest + 1
         let requested = afterSequence ?? latest
         let gap = afterSequence.map { $0 < oldest - 1 || $0 > latest } ?? false
-        let allowedCategories: Set<String> = ["window", "workspace", "pane", "surface", "agent"]
+        let allowedCategories: Set<String> = [
+            "app",
+            "window",
+            "workspace",
+            "pane",
+            "surface",
+            "agent",
+        ]
         let matchingEvents = retained.filter { event in
             guard let sequence = CmuxEventBus.int64(event["seq"]),
                   sequence > requested,
