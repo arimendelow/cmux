@@ -48,12 +48,16 @@ enum WorkbenchSessionAuthority: String, Sendable {
         agent: SessionRestorableAgentSnapshot?,
         binding: SurfaceResumeBindingSnapshot?
     ) -> SessionRestorableAgentSnapshot? {
-        guard resolved(agent: agent, binding: binding) != .controlledHere else {
+        let compatibleAgent = Workspace.restorableAgentForSessionRestore(
+            agent,
+            resumeBinding: binding
+        )
+        guard resolved(agent: compatibleAgent, binding: binding) != .controlledHere else {
             return nil
         }
         var snapshot: SessionRestorableAgentSnapshot
-        if let agent {
-            snapshot = agent
+        if let compatibleAgent {
+            snapshot = compatibleAgent
         } else {
             guard let binding,
                   binding.isAgentHookBinding,

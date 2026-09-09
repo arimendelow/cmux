@@ -2189,13 +2189,18 @@ struct WorkbenchLocalActionTests {
         let context = WorkbenchLocalActionRouter.resumeContextForTesting(
             agent: oldAgent,
             binding: replacementBinding,
-            state: .completedAgentExit
+            state: .completedAgentExit,
+            canTakeOver: WorkbenchSessionAuthority.localTakeoverSnapshot(
+                agent: oldAgent,
+                binding: replacementBinding
+            ) != nil
         )
 
         #expect(context["state"] as? String == "waiting_for_supervisor")
         #expect(context["workbench_authority"] as? String == "controlledExternally")
         #expect(context["session_id"] as? String == "replacement-session")
         #expect(context["blocked_reason"] as? String == "externally_controlled")
+        #expect(context["can_take_over"] as? Bool == true)
     }
 
     @Test func resumeContextLeavesOrdinaryTerminalsUnmanaged() {

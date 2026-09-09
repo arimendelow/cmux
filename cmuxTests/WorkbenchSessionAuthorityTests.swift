@@ -67,6 +67,29 @@ struct WorkbenchSessionAuthorityTests {
         #expect(WorkbenchSessionAuthority.localTakeoverSnapshot(agent: nil, binding: binding)?.workbenchAuthority == .controlledHere)
     }
 
+    @Test func ReplacementBindingTakeoverTargetsTheReplacementSession() throws {
+        var oldAgent = localSnapshot()
+        oldAgent.workbenchAuthority = .controlledExternally
+        let replacementSessionID = "33333333-3333-4333-8333-333333333333"
+        let replacementBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "external-wrapper agent --resume \(replacementSessionID)",
+            checkpointId: replacementSessionID,
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        let takeover = try #require(
+            WorkbenchSessionAuthority.localTakeoverSnapshot(
+                agent: oldAgent,
+                binding: replacementBinding
+            )
+        )
+
+        #expect(takeover.sessionId == replacementSessionID)
+        #expect(takeover.workbenchAuthority == .controlledHere)
+    }
+
     @Test func NonAgentBindingsRemainLocalWhenWorkbenchAgentAuthorityIsUnknown() {
         let binding = SurfaceResumeBindingSnapshot(
             kind: "tmux",
