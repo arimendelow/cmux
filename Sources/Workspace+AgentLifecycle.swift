@@ -16,6 +16,7 @@ extension Workspace {
               send(terminal, takeover.input) else {
             return false
         }
+        clearAgentRuntimeState(panelId: panelId)
         restoredAgentSnapshotsByPanelId[panelId] = takeover.snapshot
         surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
         restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand

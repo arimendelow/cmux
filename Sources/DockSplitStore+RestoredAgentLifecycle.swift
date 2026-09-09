@@ -38,6 +38,7 @@ extension DockSplitStore {
         restoredAgentLifecycle.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
         restoredAgentLifecycle.registerStartupInput(takeover.input, panelId: panelId)
         restoredAgentLifecycle.invalidatedFingerprintsByPanelId.removeValue(forKey: panelId)
+        agentRuntimeByPanelId.removeValue(forKey: panelId)
         invalidatedCachedTransferAgentSessionPanelIds.remove(panelId)
         replacedCachedTransferAgentSessionPanelIds.remove(panelId)
         if var transfer = detachedSurfaceTransfersByPanelId[panelId] {
@@ -48,6 +49,7 @@ extension DockSplitStore {
             transfer.restoredStartupInput = takeover.input
             transfer.resumeBinding = nil
             transfer.managedAgentResumeBinding = nil
+            transfer.agentRuntime = nil
             setDetachedSurfaceTransfer(transfer, forPanelID: panelId)
         }
         return true

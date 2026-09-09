@@ -409,6 +409,11 @@ extension Workspace {
         }
     }
 
+    func clearAgentRuntimeState(panelId: UUID) {
+        _ = discardAgentRuntimeState(agentRuntimeState(forPanelId: panelId))
+        clearAgentLifecycleStates(panelId: panelId)
+    }
+
     /// Discard every Workspace-owned contribution for a surface whose tab,
     /// pane, or workspace has already been accepted for closure.
     @discardableResult

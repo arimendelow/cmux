@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Darwin
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -648,6 +649,13 @@ struct WorkbenchSessionAuthorityTests {
                 source: "agent-hook",
                 workbenchAuthority: .controlledExternally
             )
+        let staleRuntimeKey = "copilot.superseded-session"
+        let processID = getpid()
+        let processIdentity = try #require(AgentPIDProcessIdentity(pid: processID))
+        workspace.agentPIDs[staleRuntimeKey] = processID
+        workspace.agentPIDProcessIdentitiesByKey[staleRuntimeKey] = processIdentity
+        workspace.agentPIDPanelIdsByKey[staleRuntimeKey] = panelId
+        workspace.agentPIDKeysByPanelId[panelId] = [staleRuntimeKey]
         var sent = ""
 
         #expect(workspace.canTakeControlOfExternalSession(panelId: panelId))
@@ -661,6 +669,8 @@ struct WorkbenchSessionAuthorityTests {
             workspace.restoredAgentSnapshotsByPanelId[panelId]?.workbenchAuthority ==
                 .controlledHere
         )
+        #expect(workspace.agentPIDKeysByPanelId[panelId] == nil)
+        #expect(workspace.agentPIDs[staleRuntimeKey] == nil)
     }
 
     @MainActor
@@ -713,6 +723,19 @@ struct WorkbenchSessionAuthorityTests {
             )
         )
         #expect(store.replacedCachedTransferAgentSessionPanelIds.contains(terminal.id))
+        let staleRuntime = Workspace.DetachedAgentRuntimeState(
+            panelId: terminal.id,
+            statusEntries: [:],
+            agentPIDs: ["copilot.\(oldSessionID)": getpid()],
+            agentPIDProcessIdentities: [:],
+            agentPIDKeys: ["copilot.\(oldSessionID)"]
+        )
+        store.agentRuntimeByPanelId[terminal.id] = staleRuntime
+        var cachedTransfer = try #require(
+            store.detachedSurfaceTransfersByPanelId[terminal.id]
+        )
+        cachedTransfer.agentRuntime = staleRuntime
+        store.setDetachedSurfaceTransfer(cachedTransfer, forPanelID: terminal.id)
         terminal.updateShellActivityState(.promptIdle)
         var sent = ""
 
@@ -724,6 +747,7 @@ struct WorkbenchSessionAuthorityTests {
         #expect(sent.contains(replacementSessionID))
         #expect(!store.invalidatedCachedTransferAgentSessionPanelIds.contains(terminal.id))
         #expect(!store.replacedCachedTransferAgentSessionPanelIds.contains(terminal.id))
+        #expect(store.agentRuntimeByPanelId[terminal.id] == nil)
         let rebasedTransfer = try #require(
             store.detachedSurfaceTransfersByPanelId[terminal.id]
         )
@@ -738,6 +762,7 @@ struct WorkbenchSessionAuthorityTests {
         )
         #expect(rebasedTransfer.resumeBinding == nil)
         #expect(rebasedTransfer.managedAgentResumeBinding == nil)
+        #expect(rebasedTransfer.agentRuntime == nil)
         #expect(
             store.restoredAgentLifecycle.snapshotsByPanelId[terminal.id]?.sessionId ==
                 replacementSessionID
