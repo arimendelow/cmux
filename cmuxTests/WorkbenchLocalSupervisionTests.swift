@@ -2172,6 +2172,32 @@ struct WorkbenchLocalActionTests {
         #expect(local["workbench_authority"] as? String == "controlledHere")
     }
 
+    @Test func replacementBindingDoesNotInheritOldSessionLifecycle() {
+        let oldAgent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "old-session",
+            workbenchAuthority: .controlledHere
+        )
+        let replacementBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume replacement-session",
+            checkpointId: "replacement-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: oldAgent,
+            binding: replacementBinding,
+            state: .completedAgentExit
+        )
+
+        #expect(context["state"] as? String == "waiting_for_supervisor")
+        #expect(context["workbench_authority"] as? String == "controlledExternally")
+        #expect(context["session_id"] as? String == "replacement-session")
+        #expect(context["blocked_reason"] as? String == "externally_controlled")
+    }
+
     @Test func resumeContextLeavesOrdinaryTerminalsUnmanaged() {
         let context = WorkbenchLocalActionRouter.resumeContextForTesting(
             agent: nil,

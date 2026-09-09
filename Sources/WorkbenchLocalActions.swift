@@ -797,7 +797,16 @@ enum WorkbenchLocalActionRouter {
         canTakeOver: Bool
     ) -> [String: Any] {
         let managedBinding = binding?.isAgentHookBinding == true ? binding : nil
-        let hasManagedResume = agent != nil || managedBinding != nil
+        let compatibleAgent = managedBinding.map {
+            Workspace.restorableAgentForSessionRestore(
+                agent,
+                resumeBinding: $0
+            )
+        } ?? agent
+        let bindingSupersedesAgent =
+            agent != nil && managedBinding != nil && compatibleAgent == nil
+        let effectiveState = bindingSupersedesAgent ? nil : state
+        let hasManagedResume = compatibleAgent != nil || managedBinding != nil
         guard hasManagedResume else {
             return [
                 "state": "none",
@@ -811,11 +820,11 @@ enum WorkbenchLocalActionRouter {
         }
 
         let authority = WorkbenchSessionAuthority.resolved(
-            agent: agent,
+            agent: compatibleAgent,
             binding: managedBinding
         )
         let stateLabel: String
-        switch state {
+        switch effectiveState {
         case .awaitingAutoResumeCommand:
             stateLabel = "resuming"
         case .autoResumeCommandRunning, .observedAgentCommandRunning:
@@ -825,7 +834,7 @@ enum WorkbenchLocalActionRouter {
         case .manualResumeAvailable, nil:
             stateLabel = switch authority {
             case .controlledHere:
-                state == .manualResumeAvailable
+                effectiveState == .manualResumeAvailable
                     ? "manual_resume_available"
                     : "resume_available"
             case .controlledExternally:
@@ -845,8 +854,8 @@ enum WorkbenchLocalActionRouter {
         return [
             "state": stateLabel,
             "workbench_authority": authority.rawValue,
-            "kind": managedBinding?.kind ?? agent?.kind.rawValue ?? NSNull(),
-            "session_id": managedBinding?.checkpointId ?? agent?.sessionId ?? NSNull(),
+            "kind": managedBinding?.kind ?? compatibleAgent?.kind.rawValue ?? NSNull(),
+            "session_id": managedBinding?.checkpointId ?? compatibleAgent?.sessionId ?? NSNull(),
             "binding_present": managedBinding != nil,
             "blocked_reason": blockedReason,
             "can_take_over": canTakeOver,
