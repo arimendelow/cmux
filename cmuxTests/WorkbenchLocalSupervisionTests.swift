@@ -2116,6 +2116,75 @@ struct WorkbenchLocalActionTests {
         )) == "invalid_params")
     }
 
+    @Test func resumeContextMakesUnverifiedRestoresVisible() {
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "copilot-session",
+            workbenchAuthority: .unknown
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable,
+            canTakeOver: true
+        )
+
+        #expect(context["state"] as? String == "blocked_unverified")
+        #expect(context["workbench_authority"] as? String == "unknown")
+        #expect(context["kind"] as? String == "copilot")
+        #expect(context["session_id"] as? String == "copilot-session")
+        #expect(context["binding_present"] as? Bool == false)
+        #expect(context["blocked_reason"] as? String == "authority_unverified")
+        #expect(context["can_take_over"] as? Bool == true)
+    }
+
+    @Test func resumeContextDistinguishesSupervisorWaitFromLocalResume() {
+        let externalBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume external-session",
+            checkpointId: "external-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+        let localBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume local-session",
+            checkpointId: "local-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+
+        let external = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: externalBinding,
+            state: .manualResumeAvailable
+        )
+        let local = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: localBinding,
+            state: .awaitingAutoResumeCommand
+        )
+
+        #expect(external["state"] as? String == "waiting_for_supervisor")
+        #expect(external["blocked_reason"] as? String == "externally_controlled")
+        #expect(local["state"] as? String == "resuming")
+        #expect(local["workbench_authority"] as? String == "controlledHere")
+    }
+
+    @Test func resumeContextLeavesOrdinaryTerminalsUnmanaged() {
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: nil,
+            state: nil
+        )
+
+        #expect(context["state"] as? String == "none")
+        #expect(context["binding_present"] as? Bool == false)
+        #expect(context["can_take_over"] as? Bool == false)
+        #expect(context["workbench_authority"] is NSNull)
+    }
+
     @Test func boundedChangesStayContiguousAndExposeTheNextCursor() {
         let events = (1...250).map { sequence in
             [

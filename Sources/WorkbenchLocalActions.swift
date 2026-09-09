@@ -690,12 +690,21 @@ enum WorkbenchLocalActionRouter {
             workspaceFilter: nil
         )
         let continuity = WorkbenchAppContinuity.snapshot()
+        let appDelegate = AppDelegate.shared
+        let restoreState: String = if appDelegate?.isApplyingSessionRestore == true {
+            "restoring"
+        } else if appDelegate?.didAttemptStartupSessionRestore == true {
+            "ready"
+        } else {
+            "pending"
+        }
         return [
             "app_instance_id": continuity?.launchID.uuidString ?? NSNull(),
             "app_started_at": continuity.map {
                 ISO8601DateFormatter().string(from: $0.startedAt)
             } ?? NSNull(),
             "previous_exit_clean": continuity?.previousExitWasClean ?? NSNull(),
+            "restore_state": restoreState,
             "revision": CmuxEventBus.shared.latestSequence,
             "windows": tree.windows.map(topologyWindow),
         ]
@@ -736,7 +745,7 @@ enum WorkbenchLocalActionRouter {
     }
 
     private static func topologySurface(_ node: ControlSystemTreeSurfaceNode) -> [String: Any] {
-        [
+        var response: [String: Any] = [
             "surface_id": node.surfaceID.uuidString,
             "index": node.index,
             "index_in_pane": node.indexInPane ?? NSNull(),
@@ -747,6 +756,100 @@ enum WorkbenchLocalActionRouter {
             "tty": node.tty ?? NSNull(),
             "url": node.isBrowser ? node.url ?? "" : NSNull(),
             "dock_scope": node.dockScopeRawValue ?? NSNull(),
+        ]
+        response["resume"] = liveResumeContext(surfaceID: node.surfaceID)
+        return response
+    }
+
+    private static func liveResumeContext(surfaceID: UUID) -> [String: Any] {
+        if let dock = DockSplitStore.liveStores.first(where: {
+            $0.containsPanel(surfaceID)
+        }) {
+            let binding = dock.managedAgentResumeBinding(panelId: surfaceID)
+                ?? dock.surfaceResumeBinding(panelId: surfaceID)
+            return resumeContextResponse(
+                agent: dock.restoredAgentLifecycle.snapshotsByPanelId[surfaceID],
+                binding: binding,
+                state: dock.restoredAgentLifecycle.resumeStatesByPanelId[surfaceID],
+                canTakeOver: dock.canTakeControlOfExternalSession(panelId: surfaceID)
+            )
+        }
+        guard let owner = AppDelegate.shared?.workspaceContainingPanel(panelId: surfaceID) else {
+            return resumeContextResponse(
+                agent: nil,
+                binding: nil,
+                state: nil,
+                canTakeOver: false
+            )
+        }
+        return resumeContextResponse(
+            agent: owner.workspace.restoredAgentSnapshotsByPanelId[surfaceID],
+            binding: owner.workspace.surfaceResumeBinding(panelId: surfaceID),
+            state: owner.workspace.restoredAgentResumeStatesByPanelId[surfaceID],
+            canTakeOver: owner.workspace.canTakeControlOfExternalSession(panelId: surfaceID)
+        )
+    }
+
+    private nonisolated static func resumeContextResponse(
+        agent: SessionRestorableAgentSnapshot?,
+        binding: SurfaceResumeBindingSnapshot?,
+        state: Workspace.RestoredAgentResumeState?,
+        canTakeOver: Bool
+    ) -> [String: Any] {
+        let managedBinding = binding?.isAgentHookBinding == true ? binding : nil
+        let hasManagedResume = agent != nil || managedBinding != nil
+        guard hasManagedResume else {
+            return [
+                "state": "none",
+                "workbench_authority": NSNull(),
+                "kind": NSNull(),
+                "session_id": NSNull(),
+                "binding_present": false,
+                "blocked_reason": NSNull(),
+                "can_take_over": false,
+            ]
+        }
+
+        let authority = WorkbenchSessionAuthority.resolved(
+            agent: agent,
+            binding: managedBinding
+        )
+        let stateLabel: String
+        switch state {
+        case .awaitingAutoResumeCommand:
+            stateLabel = "resuming"
+        case .autoResumeCommandRunning, .observedAgentCommandRunning:
+            stateLabel = "running"
+        case .completedAgentExit:
+            stateLabel = "ended"
+        case .manualResumeAvailable, nil:
+            stateLabel = switch authority {
+            case .controlledHere:
+                state == .manualResumeAvailable
+                    ? "manual_resume_available"
+                    : "resume_available"
+            case .controlledExternally:
+                "waiting_for_supervisor"
+            case .unknown:
+                "blocked_unverified"
+            }
+        }
+        let blockedReason: Any = switch stateLabel {
+        case "waiting_for_supervisor":
+            "externally_controlled"
+        case "blocked_unverified":
+            "authority_unverified"
+        default:
+            NSNull()
+        }
+        return [
+            "state": stateLabel,
+            "workbench_authority": authority.rawValue,
+            "kind": managedBinding?.kind ?? agent?.kind.rawValue ?? NSNull(),
+            "session_id": managedBinding?.checkpointId ?? agent?.sessionId ?? NSNull(),
+            "binding_present": managedBinding != nil,
+            "blocked_reason": blockedReason,
+            "can_take_over": canTakeOver,
         ]
     }
 
@@ -793,6 +896,20 @@ enum WorkbenchLocalActionRouter {
     }
 
     #if DEBUG
+    static func resumeContextForTesting(
+        agent: SessionRestorableAgentSnapshot?,
+        binding: SurfaceResumeBindingSnapshot?,
+        state: Workspace.RestoredAgentResumeState?,
+        canTakeOver: Bool = false
+    ) -> [String: Any] {
+        resumeContextResponse(
+            agent: agent,
+            binding: binding,
+            state: state,
+            canTakeOver: canTakeOver
+        )
+    }
+
     static func changesForTesting(
         events: [[String: Any]],
         latestSequence: Int64,
