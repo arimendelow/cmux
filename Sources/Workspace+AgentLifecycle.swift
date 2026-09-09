@@ -29,10 +29,19 @@ extension Workspace {
     ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
         let agent = restoredAgentSnapshotsByPanelId[panelId]
         let binding = surfaceResumeBindingsByPanelId[panelId]
-        let canResume = restoredAgentResumeStatesByPanelId[panelId] == .manualResumeAvailable ||
+        let compatibleAgent = Workspace.restorableAgentForSessionRestore(
+            agent,
+            resumeBinding: binding
+        )
+        let bindingSupersedesAgent =
+            agent != nil && binding?.isAgentHookBinding == true && compatibleAgent == nil
+        let canResume =
             (
-                restoredAgentResumeStatesByPanelId[panelId] == nil &&
-                agent == nil &&
+                restoredAgentResumeStatesByPanelId[panelId] == .manualResumeAvailable &&
+                !bindingSupersedesAgent
+            ) ||
+            (
+                compatibleAgent == nil &&
                 binding != nil &&
                 panelShellActivityStates[panelId] == .promptIdle
             )

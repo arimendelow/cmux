@@ -44,12 +44,30 @@ extension DockSplitStore {
     private func externalSessionLocalTakeover(
         panelId: UUID
     ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
-        guard restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable,
+        let agent = restoredAgentLifecycle.snapshotsByPanelId[panelId]
+        let binding = managedAgentResumeBinding(panelId: panelId)
+            ?? surfaceResumeBindingsByPanelId[panelId]
+        let compatibleAgent = Workspace.restorableAgentForSessionRestore(
+            agent,
+            resumeBinding: binding
+        )
+        let bindingSupersedesAgent =
+            agent != nil && binding?.isAgentHookBinding == true && compatibleAgent == nil
+        let canResume =
+            (
+                restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable &&
+                !bindingSupersedesAgent
+            ) ||
+            (
+                compatibleAgent == nil &&
+                binding != nil &&
+                (panels[panelId] as? TerminalPanel)?.shellActivity.state == .promptIdle
+            )
+        guard canResume,
               detachedSurfaceTransfersByPanelId[panelId]?.isRemoteTerminal != true,
               let snapshot = WorkbenchSessionAuthority.localTakeoverSnapshot(
-                agent: restoredAgentLifecycle.snapshotsByPanelId[panelId],
-                binding: managedAgentResumeBinding(panelId: panelId)
-                    ?? surfaceResumeBindingsByPanelId[panelId]
+                agent: agent,
+                binding: binding
               ),
               let command = snapshot.resumeCommand else {
             return nil
