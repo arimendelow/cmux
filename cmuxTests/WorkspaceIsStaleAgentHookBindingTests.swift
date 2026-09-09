@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Darwin
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -44,14 +45,16 @@ struct WorkspaceIsStaleAgentHookBindingTests {
 
     private static func codexAgentHookBinding(
         sessionID: String,
-        autoResume: Bool? = nil
+        autoResume: Bool? = nil,
+        updatedAt: TimeInterval = Date().timeIntervalSince1970
     ) -> SurfaceResumeBindingSnapshot {
         SurfaceResumeBindingSnapshot(
             kind: "codex",
             command: "codex resume \(sessionID)",
             checkpointId: sessionID,
             source: "agent-hook",
-            autoResume: autoResume
+            autoResume: autoResume,
+            updatedAt: updatedAt
         )
     }
 
@@ -109,7 +112,10 @@ struct WorkspaceIsStaleAgentHookBindingTests {
             sessionID: sessionID
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let binding = Self.codexAgentHookBinding(sessionID: sessionID)
+        let binding = Self.codexAgentHookBinding(
+            sessionID: sessionID,
+            updatedAt: fixture.updatedAt
+        )
 
         #expect(
             workspace.isStaleAgentHookBinding(
@@ -117,6 +123,62 @@ struct WorkspaceIsStaleAgentHookBindingTests {
                 panelId: panelId,
                 restorableAgentIndex: fixture.index
             )
+        )
+    }
+
+    @Test
+    func olderExitedObservationDoesNotRetireFreshSameSessionBinding() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "same-session-new-generation"
+        let fixture = try Self.exitedCodexIndex(
+            workspaceID: workspace.id,
+            panelID: panelId,
+            sessionID: sessionID
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let binding = Self.codexAgentHookBinding(
+            sessionID: sessionID,
+            updatedAt: fixture.updatedAt + 1
+        )
+
+        #expect(
+            workspace.isStaleAgentHookBinding(
+                binding,
+                panelId: panelId,
+                restorableAgentIndex: fixture.index
+            ) == false
+        )
+    }
+
+    @Test
+    func currentRuntimeGenerationOverridesCachedExit() throws {
+        let workspace = Workspace()
+        let panelId = try #require(workspace.focusedPanelId)
+        let sessionID = "same-session-live-runtime"
+        let fixture = try Self.exitedCodexIndex(
+            workspaceID: workspace.id,
+            panelID: panelId,
+            sessionID: sessionID
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let binding = Self.codexAgentHookBinding(
+            sessionID: sessionID,
+            updatedAt: fixture.updatedAt
+        )
+        let processID = getpid()
+        let processIdentity = try #require(AgentPIDProcessIdentity(pid: processID))
+        let key = "codex.\(sessionID)"
+        workspace.agentPIDs[key] = processID
+        workspace.agentPIDProcessIdentitiesByKey[key] = processIdentity
+        workspace.agentPIDKeysByPanelId[panelId] = [key]
+
+        #expect(
+            workspace.isStaleAgentHookBinding(
+                binding,
+                panelId: panelId,
+                restorableAgentIndex: fixture.index
+            ) == false
         )
     }
 
@@ -193,7 +255,8 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let binding = Self.codexAgentHookBinding(
             sessionID: sessionID,
-            autoResume: true
+            autoResume: true,
+            updatedAt: fixture.updatedAt
         )
         #expect(workspace.setSurfaceResumeBinding(binding, panelId: panelId))
 
@@ -245,7 +308,11 @@ struct WorkspaceIsStaleAgentHookBindingTests {
         workspaceID: UUID,
         panelID: UUID,
         sessionID: String
-    ) throws -> (root: URL, index: RestorableAgentSessionIndex) {
+    ) throws -> (
+        root: URL,
+        index: RestorableAgentSessionIndex,
+        updatedAt: TimeInterval
+    ) {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent(
@@ -298,6 +365,6 @@ struct WorkspaceIsStaleAgentHookBindingTests {
                 panelId: panelID
             )?.processLiveness == .exited
         )
-        return (root, index)
+        return (root, index, updatedAt)
     }
 }

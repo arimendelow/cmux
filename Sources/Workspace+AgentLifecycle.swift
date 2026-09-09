@@ -322,6 +322,21 @@ extension Workspace {
               ) else {
             return false
         }
+        guard liveEntry.updatedAt >= binding.updatedAt else {
+            return false
+        }
+        if let bindingKind = RestorableAgentKind(rawValue: kind),
+           !confirmedRuntimeAgentProcessIdentities(
+               kind: bindingKind,
+               sessionId: checkpointId,
+               panelId: panelId,
+               currentProcessIdentity: { processID in
+                   guard let pid = pid_t(exactly: processID) else { return nil }
+                   return Self.agentPIDProcessIdentity(pid: pid)
+               }
+           ).isEmpty {
+            return false
+        }
         return liveEntry.processLiveness == .exited
     }
 
