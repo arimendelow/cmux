@@ -380,19 +380,29 @@ export function resolveCanonicalBoss(input: {
 export async function repointCanonicalBoss(
   root: string,
   target: { agent: string; sessionId: string },
-): Promise<{ ok: true; pointer: CanonicalBossPointer } | { ok: false; error: string }> {
+  options: { configuredAgent?: string } = {},
+): Promise<
+  | { ok: true; pointer: CanonicalBossPointer; session: BossCandidate }
+  | { ok: false; error: string }
+> {
   let pointer: CanonicalBossPointer;
   try {
     pointer = parseCanonicalBossPointer({ version: 1, agent: target.agent, sessionId: target.sessionId });
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+  const configuredAgent = options.configuredAgent ?? pointer.agent;
+  // Repair must not be able to write a pointer the next start would reject.
+  if (pointer.agent !== configuredAgent) {
+    return { ok: false, error: `${pointer.agent} is not the configured agent ${configuredAgent}` };
+  }
   const candidates = await listBossCandidates(root);
   const match = candidates.find(
     (candidate) => candidate.agent === pointer.agent && candidate.id === pointer.sessionId,
   );
   if (!match) return { ok: false, error: `no persisted Boss session ${pointer.agent}/${pointer.sessionId}` };
-  if (match.loadError) return { ok: false, error: match.loadError };
+  const reason = bossCandidateReason(match, configuredAgent);
+  if (reason) return { ok: false, error: unusableDetail(match, configuredAgent) };
   await writeCanonicalBossPointer(root, pointer);
-  return { ok: true, pointer };
+  return { ok: true, pointer, session: match };
 }

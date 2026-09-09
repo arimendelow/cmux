@@ -307,17 +307,24 @@ enum OuroWorkbenchProduct {
     ) -> [String: String] {
         guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
         let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
-        let deskRoot = homeURL.appendingPathComponent("ms-desk", isDirectory: true)
+        // The primary workspace root is host configuration, not a public
+        // default: an integration supplies it through the environment and the
+        // fallback stays neutral.
+        let configuredWorkspaceRoot = baseEnvironment["CMUX_WORKBENCH_WORKSPACE_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspaceRoot = (configuredWorkspaceRoot?.isEmpty == false)
+            ? URL(fileURLWithPath: configuredWorkspaceRoot!)
+            : homeURL
         let appSupport = applicationSupportURL
             ?? homeURL.appendingPathComponent("Library/Application Support")
         var environment = [
             "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
             "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
             "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
-            "CMUX_AGENT_UI_CWD": deskRoot.path,
+            "CMUX_AGENT_UI_CWD": workspaceRoot.path,
             "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
                 homeURL.appendingPathComponent("code").path,
-                deskRoot.path,
+                workspaceRoot.path,
                 sourceRoot.path,
             ].joined(separator: ":"),
             "CMUX_AGENT_CHAT_SESSION_DIR": appSupport

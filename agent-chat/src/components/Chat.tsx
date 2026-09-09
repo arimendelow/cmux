@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useCtx } from "../context";
 import { readStoredProviderOptions, persistOptionsSnapshot, updateStoredProviderOption } from "../options-store";
-import { canSendWhileNegotiating, type OptionValue, type SessionOption } from "../session";
+import { imageAttachmentAllowed, type OptionValue, type SessionOption } from "../session";
 import { ArrowUp } from "./icons";
 import { isCtrlJ, insertNewlineAtCaret, useCommandMenu } from "./CommandMenu";
 import { optionAcceptsValue } from "./options";
@@ -70,9 +70,9 @@ export function Chat() {
   const commandMenu = useCommandMenu(text, setText, commandGroups, taRef, ctrlJ);
   const allProviderOptions = providerOptionMap(providers, providerOptions, capabilities);
   const running = session?.status === "running";
-  // Workbench holds the draft (never discards it) until the peer answers the
-  // capability negotiation, so an image-capable turn is never sent blind.
-  const negotiating = Boolean(experience) && !canSendWhileNegotiating(imageCapability);
+  // Capability only gates the (not yet shipped) image affordance; text always
+  // sends, and the draft survives every capability transition.
+  const imagesAllowed = imageAttachmentAllowed(imageCapability);
 
   useRestoreModelScopedOptions({ provider: session?.provider, options, setOption, pendingModelRestoreRef });
   usePersistSessionOptions(session?.provider, options, pendingModelRestoreRef.current !== null);
@@ -102,7 +102,7 @@ export function Chat() {
   };
   const submit = () => {
     const t = text.trim();
-    if (!t || negotiating) return;
+    if (!t) return;
     stickRef.current = true;
     reply(t);
     setText("");
@@ -127,7 +127,7 @@ export function Chat() {
   };
 
   return (
-    <section id="chat-view">
+    <section id="chat-view" data-image-capability={imageCapability} data-images-allowed={imagesAllowed ? "1" : "0"}>
       {experience ? <WorkbenchHeader experience={experience} compact /> : null}
       <BossStatusBanner boss={boss} />
       {connection ? (
@@ -186,7 +186,7 @@ export function Chat() {
             trailing={(
               <div className="chat-actions">
                 {running ? <button id="stop-btn" type="button" onClick={stop}>Stop</button> : null}
-                <button className="send" type="button" aria-label={negotiating ? "Connecting" : "Send"} disabled={!text.trim() || negotiating} onClick={submit}>
+                <button className="send" type="button" aria-label="Send" disabled={!text.trim()} onClick={submit}>
                   <ArrowUp />
                 </button>
               </div>

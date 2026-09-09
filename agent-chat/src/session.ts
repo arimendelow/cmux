@@ -366,9 +366,28 @@ export function workbenchActionsAllowed(
   return { fork: allowed, compose: allowed, delete: allowed };
 }
 
-/** While capability is still unknown the composer holds the draft and waits. */
-export function canSendWhileNegotiating(capability: ImagePromptCapability): boolean {
-  return capability !== "unknown";
+/**
+ * Image attachment is offered only once the peer has positively advertised it.
+ * Text submission is never blocked on negotiation: a peer that dies resets the
+ * capability to `unknown`, and blocking send there would leave a Workbench with
+ * no new/reset action unable to revive its own Boss.
+ */
+export function imageAttachmentAllowed(capability: ImagePromptCapability): boolean {
+  return capability === "supported";
+}
+
+/** The composer keeps its draft in every capability state. */
+export function draftSurvivesCapabilityChange(): boolean {
+  return true;
+}
+
+/** Rebuild the negotiated capability from replayed history after a reconnect. */
+export function latestImageCapability(events: AgentEvent[]): ImagePromptCapability {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind === "capabilities") return event.image;
+  }
+  return "unknown";
 }
 
 export function useSession(): SessionState {
@@ -528,6 +547,7 @@ export function useSession(): SessionState {
             setBlocks((msg.events as AgentEvent[]).reduce(foldEvent, [] as Block[]));
             setConnection(latestConnection(msg.events as AgentEvent[]));
             setRecovery(latestRecovery(msg.events as AgentEvent[]));
+            setImageCapability(latestImageCapability(msg.events as AgentEvent[]));
             optimisticUsersRef.current = [];
             setOptions(latestOptions(msg.events as AgentEvent[]));
             setActions(latestActions(msg.events as AgentEvent[]));

@@ -424,3 +424,128 @@ test("the repair CLI resolves its base URL from an explicit URL or the sidecar s
     await rm(root, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("a Boss session is protected from fork and delete before its pointer lands", async () => {
+  const root = await tempRoot("boss-preadopt-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  const server = await startServer(root);
+  try {
+    const client = await connect(server.port);
+    expect((client.hello.boss as HelloBoss).status).toBe("none");
+    client.send({ op: "start", requestId: "first", provider: "ouro-boss", cwd: work, prompt: "hello" });
+    const created = await client.waitFor("created", () =>
+      client.messages.find((message) => message.kind === "session-created"));
+
+    client.send({ op: "delete", sessionId: created.session.id });
+    const deleteError = await client.waitFor("delete refused", () =>
+      client.messages.find((message) => message.kind === "error" && message.op === "delete"));
+    expect(String(deleteError.message)).toContain("cannot be deleted");
+
+    client.send({ op: "fork", sessionId: created.session.id });
+    const forkError = await client.waitFor("fork refused", () =>
+      client.messages.find((message) => message.kind === "error" && message.op === "fork"));
+    expect(String(forkError.message)).toContain("cannot be forked");
+
+    const sessions = await (await fetch(`http://127.0.0.1:${server.port}/boss-token/api/sessions`)).json();
+    expect(sessions.map((session: any) => session.id)).toEqual([created.session.id]);
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("a replayed start request re-attaches instead of being refused as a second Boss", async () => {
+  const root = await tempRoot("boss-replay-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  const server = await startServer(root);
+  try {
+    const client = await connect(server.port);
+    const payload = { op: "start", requestId: "replayed", provider: "ouro-boss", cwd: work, prompt: "hello" };
+    client.send(payload);
+    const created = await client.waitFor("created", () =>
+      client.messages.find((message) => message.kind === "session-created"));
+
+    client.send(payload);
+    const history = await client.waitFor("history replay", () =>
+      client.messages.find((message) => message.kind === "history" && message.sessionId === created.session.id));
+    expect(history.session.id).toBe(created.session.id);
+    expect(client.messages.some((message) => message.kind === "error" && message.op === "start")).toBe(false);
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("repair refuses a foreign-agent target and loads the session it repoints to", async () => {
+  const root = await tempRoot("boss-repair-guard-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  await writeRecord(join(root, "sessions", "slugger"), "boss-1", work, 10);
+  await writeRecord(join(root, "sessions", "slugger"), "boss-2", work, 20);
+  await writeRecord(join(root, "sessions", "other"), "boss-9", work, 30);
+  await writeFile(join(root, "sessions", "canonical-boss.json"), JSON.stringify({
+    version: 1,
+    agent: "slugger",
+    sessionId: "boss-1",
+  }), { mode: 0o600 });
+  const server = await startServer(root);
+  try {
+    const foreign = await fetch(`http://127.0.0.1:${server.port}/boss-token/api/boss/repoint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "other", sessionId: "boss-9" }),
+    });
+    expect(foreign.status).toBe(400);
+    expect((await foreign.json()).error).toBe("other is not the configured agent slugger");
+
+    const repaired = await fetch(`http://127.0.0.1:${server.port}/boss-token/api/boss/repoint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "slugger", sessionId: "boss-2" }),
+    });
+    expect(repaired.status).toBe(200);
+
+    const sessions = await (await fetch(`http://127.0.0.1:${server.port}/boss-token/api/sessions`)).json();
+    expect(sessions.map((session: any) => session.id).sort()).toEqual(["boss-1", "boss-2"]);
+    const client = await connect(server.port);
+    expect((client.hello.boss as HelloBoss).sessionId).toBe("boss-2");
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("a cwd-unavailable repair target reports blocked instead of a canonical Boss", async () => {
+  const root = await tempRoot("boss-repair-cwd-");
+  const work = join(root, "work");
+  const gone = join(root, "gone");
+  await mkdir(work, { recursive: true });
+  await mkdir(gone, { recursive: true });
+  await writeRecord(join(root, "sessions", "slugger"), "boss-1", work, 10);
+  await writeRecord(join(root, "sessions", "slugger"), "boss-2", gone, 20);
+  await writeFile(join(root, "sessions", "canonical-boss.json"), JSON.stringify({
+    version: 1,
+    agent: "slugger",
+    sessionId: "boss-1",
+  }), { mode: 0o600 });
+  const server = await startServer(root);
+  try {
+    await rm(gone, { recursive: true, force: true });
+    const response = await fetch(`http://127.0.0.1:${server.port}/boss-token/api/boss/repoint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent: "slugger", sessionId: "boss-2" }),
+    });
+    expect(response.status).toBe(400);
+    expect(String((await response.json()).error)).toContain("boss-2");
+    expect((await readdir(join(root, "sessions", "slugger"))).sort()).toEqual(["boss-1.json", "boss-2.json"]);
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
