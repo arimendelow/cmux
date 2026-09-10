@@ -68,8 +68,8 @@ test("blocked recovery reaches the operator with the exact reason and skipped re
   )).toBe("");
 });
 
-test("Workbench hides new, reset, delete, and fork while stock Agent Chat keeps them", () => {
-  expect(workbenchActionsAllowed(experience)).toEqual({ fork: false, compose: false, delete: false });
+test("Workbench keeps replies while hiding new, reset, delete, and fork", () => {
+  expect(workbenchActionsAllowed(experience)).toEqual({ fork: false, compose: true, delete: false });
   expect(workbenchActionsAllowed(null)).toEqual({ fork: true, compose: true, delete: true });
 });
 

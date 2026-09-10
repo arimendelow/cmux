@@ -421,12 +421,12 @@ export function bossBlockedMessage(boss: BossState | null): string {
   return `Boss recovery is blocked (${boss.reason}): ${boss.detail}`;
 }
 
-/** Workbench has one continuous Boss relationship: no new, reset, delete, fork. */
+/** Workbench has one continuous Boss relationship: replies stay available, but new, reset, delete, and fork do not. */
 export function workbenchActionsAllowed(
   experience: WorkbenchExperience | null,
 ): WorkbenchActionAvailability {
-  const allowed = !experience;
-  return { fork: allowed, compose: allowed, delete: allowed };
+  if (experience) return { fork: false, compose: true, delete: false };
+  return { fork: true, compose: true, delete: true };
 }
 
 /**
