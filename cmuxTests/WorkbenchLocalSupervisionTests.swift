@@ -2173,6 +2173,68 @@ struct WorkbenchLocalActionTests {
         #expect(local["workbench_authority"] as? String == "controlledHere")
     }
 
+    @Test func resumeContextReportsAutoResumeDisabledOnlyForManualLocalSessions() {
+        let defaults = UserDefaults.standard
+        let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "manual-local-session",
+            workbenchAuthority: .controlledHere
+        )
+        defaults.set(false, forKey: key)
+
+        let manual = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable
+        )
+        #expect(manual["state"] as? String == "manual_resume_available")
+        #expect(manual["session_id"] as? String == "manual-local-session")
+        #expect(manual["blocked_reason"] as? String == "auto_resume_disabled")
+
+        for state: Workspace.RestoredAgentResumeState? in [
+            nil, .awaitingAutoResumeCommand, .autoResumeCommandRunning,
+            .observedAgentCommandRunning, .completedAgentExit,
+        ] {
+            let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+                agent: agent,
+                binding: nil,
+                state: state
+            )
+            #expect(context["blocked_reason"] is NSNull)
+        }
+        for (authority, reason) in [
+            (WorkbenchSessionAuthority.controlledExternally, "externally_controlled"),
+            (.unknown, "authority_unverified"),
+        ] {
+            var blockedAgent = agent
+            blockedAgent.workbenchAuthority = authority
+            let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+                agent: blockedAgent,
+                binding: nil,
+                state: .manualResumeAvailable
+            )
+            #expect(context["blocked_reason"] as? String == reason)
+        }
+
+        defaults.set(true, forKey: key)
+        let enabled = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable
+        )
+        #expect(enabled["state"] as? String == "manual_resume_available")
+        #expect(enabled["blocked_reason"] is NSNull)
+    }
+
     @Test func replacementBindingDoesNotInheritOldSessionLifecycle() {
         let oldAgent = SessionRestorableAgentSnapshot(
             kind: .copilot,
