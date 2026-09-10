@@ -1127,6 +1127,94 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         XCTAssertNil(snapshotEnvironment["OPENAI_API_KEY"])
     }
 
+    func testSurfaceRestoreRecordPreservesLauncherOwnedArguments() throws {
+        _ = NSApplication.shared
+        let previousAppDelegate = AppDelegate.shared
+        let app = AppDelegate()
+        defer {
+            AppDelegate.shared = previousAppDelegate
+        }
+
+        let windowId = UUID()
+        let window = makeMainWindow(id: windowId)
+        defer {
+            TerminalController.shared.setActiveTabManager(nil)
+            app.unregisterMainWindowContextForTesting(windowId: windowId)
+            window.orderOut(nil)
+        }
+
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        app.registerMainWindow(
+            window,
+            windowId: windowId,
+            tabManager: manager,
+            sidebarState: SidebarState(),
+            sidebarSelectionState: SidebarSelectionState(),
+            fileExplorerState: FileExplorerState()
+        )
+        TerminalController.shared.setActiveTabManager(manager)
+
+        let workspace = try XCTUnwrap(manager.selectedWorkspace)
+        let panelId = try XCTUnwrap(workspace.focusedPanelId)
+        let sessionID = UUID().uuidString.lowercased()
+        let arguments = [
+            "/Users/op/.config/agency/CurrentVersion/agency",
+            "cp",
+            "-a",
+            "ms-desk:worker",
+            "--",
+            "--allow-all",
+            "--resume=\(sessionID)",
+        ]
+        let launch = AgentLaunchCommandSnapshot(
+            executablePath: arguments[0],
+            arguments: arguments,
+            workingDirectory: "/Users/op/ms-desk",
+            source: "cli"
+        )
+        XCTAssertTrue(workspace.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                name: "ms-desk:worker",
+                kind: "copilot",
+                command: arguments.map(SurfaceResumeCommandCanonicalizer.shellQuoted)
+                    .joined(separator: " "),
+                cwd: "/Users/op/ms-desk",
+                checkpointId: sessionID,
+                source: "ms-desk-agency-hook",
+                launchCommand: launch,
+                autoResume: true,
+                workbenchAuthority: .controlledHere,
+                workbenchAuthorityEvidence: .launcherOwned,
+                launchFlavor: .local
+            ),
+            panelId: panelId
+        ))
+        workspace.restoredAgentSnapshotsByPanelId[panelId] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: sessionID,
+                workingDirectory: "/Users/op/ms-desk",
+                launchCommand: launch,
+                workbenchAuthority: .controlledHere
+            )
+
+        let getResult = try v2Result(
+            method: "surface.resume.get",
+            params: [
+                "window_id": windowId.uuidString,
+                "workspace_id": workspace.id.uuidString,
+                "surface_id": panelId.uuidString,
+            ]
+        )
+        let restoreRecord = try XCTUnwrap(getResult["restore_record"] as? [String: Any])
+
+        XCTAssertEqual(restoreRecord["prepared_arguments"] as? [String], arguments)
+        XCTAssertEqual(
+            restoreRecord["prepared_arguments_working_directory"] as? String,
+            "/Users/op/ms-desk"
+        )
+    }
+
     func testSurfaceRestoreRecordAppliesBindingEnvironmentAndRestoreTimeCwd() throws {
         _ = NSApplication.shared
         let previousAppDelegate = AppDelegate.shared

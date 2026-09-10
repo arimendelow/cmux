@@ -654,13 +654,24 @@ extension TerminalController {
             let mode: AgentRestoreRequestMode = agent.kind.restoreMode == .relaunchCommand
                 ? .relaunchAgent
                 : .resumeAgent
-            let preparedArguments = agent.kind.restoreMode == .resumeSession
-                ? agent.preparedResumeArguments(
-                    launchCommand: launchCommand,
-                    workingDirectory: workingDirectory,
-                    observedPermissionMode: permissionMode
+            let launcherOwnedArguments: [String]? =
+                if binding?.workbenchAuthorityEvidence == .launcherOwned,
+                   let arguments = binding?.launchCommand?.arguments,
+                   !arguments.isEmpty {
+                    arguments
+                } else {
+                    nil
+                }
+            let preparedArguments = launcherOwnedArguments
+                ?? (
+                    agent.kind.restoreMode == .resumeSession
+                        ? agent.preparedResumeArguments(
+                            launchCommand: launchCommand,
+                            workingDirectory: workingDirectory,
+                            observedPermissionMode: permissionMode
+                        )
+                        : nil
                 )
-                : nil
             return ControlSurfaceRestoreRecord(
                 modeRawValue: mode.rawValue,
                 kind: agent.kind.rawValue,
@@ -674,9 +685,9 @@ extension TerminalController {
                         replaySafeEnvironmentFor: agent.kind.rawValue
                     )
                 },
-                preparedArguments: target.restorableAgent == nil
-                    ? nil
-                    : preparedArguments,
+                preparedArguments: launcherOwnedArguments != nil
+                    ? preparedArguments
+                    : (target.restorableAgent == nil ? nil : preparedArguments),
                 preparedArgumentsWorkingDirectory: preparedArguments == nil
                     ? nil
                     : workingDirectory,

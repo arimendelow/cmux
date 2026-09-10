@@ -96,6 +96,45 @@ import Testing
         )
     }
 
+    @Test func launcherOwnedRestoreUsesTheExactTrustedLauncherCommand() throws {
+        let sessionId = "a22293b7-bcef-4707-8439-2f538c8517a4"
+        let command = [
+            "/Users/op/.config/agency/CurrentVersion/agency",
+            "cp",
+            "-a",
+            "ms-desk:worker",
+            "--",
+            "--allow-all",
+            "--resume=\(sessionId)",
+        ]
+        let binding = SurfaceResumeBindingSnapshot(
+            name: "ms-desk:worker",
+            kind: "copilot",
+            command: command.map(SurfaceResumeCommandCanonicalizer.shellQuoted).joined(separator: " "),
+            cwd: "/Users/op/ms-desk",
+            checkpointId: sessionId,
+            source: "ms-desk-agency-hook",
+            launchCommand: AgentLaunchCommandSnapshot(
+                executablePath: command[0],
+                arguments: command,
+                workingDirectory: "/Users/op/ms-desk",
+                source: "cli"
+            ),
+            autoResume: true,
+            workbenchAuthority: .controlledHere,
+            workbenchAuthorityEvidence: .launcherOwned,
+            launchFlavor: .local
+        )
+
+        let startupInput = try #require(binding.restoreStartupInput())
+
+        #expect(startupInput.contains("agency"))
+        #expect(startupInput.contains("cp"))
+        #expect(startupInput.contains("ms-desk:worker"))
+        #expect(startupInput.contains("--resume=\(sessionId)"))
+        #expect(!startupInput.contains("cmux restore copilot"))
+    }
+
     @Test(arguments: ["codex", "claude"])
     func agentHookRestoreBindingCarriesProviderAndSessionBoundAuthorization(kind: String) throws {
         let sessionId = "a22293b7-bcef-4707-8439-2f538c8517a4"
