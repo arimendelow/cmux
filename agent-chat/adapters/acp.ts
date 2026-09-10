@@ -292,6 +292,43 @@ function isUnavailableSessionLoad(error: unknown): boolean {
   return /method not found|session.*(?:not found|does not exist|unknown|invalid|expired)/i.test(message);
 }
 
+const GENERATED_IMAGE_DISPLAY_NAME = /^image-[0-9a-f]{8,}\.[a-z0-9]+$/i;
+
+export function userFacingAcpReplayText(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.trim() !== "[attachments]") {
+      output.push(lines[index] ?? "");
+      continue;
+    }
+
+    const labels: string[] = [];
+    let next = index + 1;
+    while (next < lines.length) {
+      const line = lines[next]?.trim() ?? "";
+      if (!line.startsWith("- attachment:")) break;
+      const parts = line.slice(2).split(" | ").map((part) => part.trim());
+      if (parts.length < 3 || !parts[0]?.startsWith("attachment:")) break;
+      const kind = parts[1];
+      const name = parts[2] || "attachment";
+      labels.push(
+        kind === "image"
+          ? (GENERATED_IMAGE_DISPLAY_NAME.test(name) ? "[Image attachment]" : `[Image: ${name}]`)
+          : `[Attachment: ${name}]`,
+      );
+      next += 1;
+    }
+    if (labels.length === 0) {
+      output.push(lines[index] ?? "");
+      continue;
+    }
+    output.push(...labels);
+    index = next - 1;
+  }
+  return output.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 async function startAcp(
   sess: SessionCtx,
   def: ProviderDef,
@@ -808,7 +845,14 @@ function handleAgentMessage(sess: SessionCtx, st: AcpState, def: ProviderDef, ms
     ].includes(u.sessionUpdate)) return;
     switch (u.sessionUpdate) {
       case "user_message_chunk":
-        if (u.content?.text) sess.emit({ kind: "user", text: u.content.text });
+        if (u.content?.text) {
+          sess.emit({
+            kind: "user",
+            text: def.role === "boss"
+              ? userFacingAcpReplayText(u.content.text)
+              : u.content.text,
+          });
+        }
         break;
       case "agent_message_chunk":
         if (u.content?.text) sess.emit({ kind: "delta", text: u.content.text });
