@@ -101,6 +101,8 @@ test("Workbench image tray shows a removable preview and the composer owns file 
   expect(serverSource).toContain('kind: "send-accepted"');
   expect(serverSource).toContain('kind: "history"');
   expect(css).toContain(".image-drop-active");
+  expect(css).toMatch(/\.attach-image \{\s+flex: none;/);
+  expect(css).toMatch(/\.image-attachment-error \{\s+min-width: 0;/);
 });
 
 test("Workbench reports rejected image drops without exposing an unusable picker", () => {
