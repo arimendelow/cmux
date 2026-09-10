@@ -2662,16 +2662,14 @@ struct WorkbenchLocalActionTests {
         )
         #expect(try successPayload(existingResult)["notification_id"] as? String == existing.id.uuidString)
 
-        #expect(errorCode(TerminalController.shared.v2WorkbenchFocus(params: [
-            "request_id": "v2-disabled-focus",
-            "workspace_id": target.id.uuidString,
-            "surface_id": surfaceId.uuidString,
-        ])) == "unsupported")
-        #expect(errorCode(TerminalController.shared.v2WorkbenchFlagForReview(params: [
-            "request_id": "v2-disabled-review",
-            "workspace_id": target.id.uuidString,
-            "summary": "Review.",
-        ])) == "unsupported")
+        let expectedAdmissionError = OuroWorkbenchProduct.isCurrentBundle
+            ? "invalid_params" : "unsupported"
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFocus(
+            params: [:]
+        )) == expectedAdmissionError)
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFlagForReview(
+            params: [:]
+        )) == expectedAdmissionError)
     }
 
     @Test func actionReceiptHistoryTrimsOnlyTerminalRecords() throws {
