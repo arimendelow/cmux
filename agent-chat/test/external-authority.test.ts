@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readLines } from "../adapters/lines";
 import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 import { forbiddenPublicPattern } from "./forbidden-terms";
 import {
@@ -174,11 +175,7 @@ async function withAuthorityServer(
         ...options.environment?.(argv),
       },
     });
-    stderr = (async () => {
-      for await (const chunk of child!.stderr as ReadableStream<Uint8Array>) {
-        diagnostics += new TextDecoder().decode(chunk);
-      }
-    })();
+    stderr = readLines(child.stderr as ReadableStream<Uint8Array>, (line) => { diagnostics += `${line}\n`; });
     let port: number | undefined;
     const deadline = Date.now() + 10_000;
     while (!port && Date.now() < deadline) {
@@ -352,6 +349,7 @@ test.each([
 
 test.each([
   ["nonzero exit", 'process.stdout.write(\'{"state":"active"}\'); process.exit(1);'],
+  ["invalid UTF-8", 'process.stdout.write(Buffer.concat([Buffer.from(\'{"state":"active","detail":"\'), Buffer.from([0xff]), Buffer.from(\'"}\')]));'],
   ["timeout", 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);'],
   ["overflow then hang", 'process.stdout.write(\'{"state":"active"}\' + " ".repeat(8_193)); setInterval(() => {}, 1_000);'],
 ])("installed helper failure (%s) is bounded and leaves no live helper", async (_name, script) => {
