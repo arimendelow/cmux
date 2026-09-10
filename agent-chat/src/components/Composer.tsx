@@ -19,9 +19,21 @@ import {
   useProviderFallback,
   withFileTrigger,
 } from "../hooks/useCatalogs";
+import {
+  ImageAttachmentTray,
+  imagePromptCanSubmit,
+  useImageAttachments,
+} from "./ImageAttachments";
 
 export function shouldShowProviderPicker(experience: unknown): boolean {
   return !experience;
+}
+
+export function shouldInvalidateImagesForProviderSwitch(
+  currentProvider: string,
+  nextProvider: string,
+): boolean {
+  return Boolean(currentProvider) && currentProvider !== nextProvider;
 }
 
 const readProviderOptions = readStoredProviderOptions;
@@ -40,6 +52,7 @@ export function Composer() {
     filesByCwd,
     cwdChecks,
     lastError,
+    composerAttachments,
     ctrlJ,
     requestProviderOptions,
     requestProviderCommands,
@@ -68,9 +81,21 @@ export function Composer() {
   const options = withLocalValues(baseOptions, startOptions);
   const commandGroups = useMemo(() => withFileTrigger(providerCommands[provider] ?? [], filesByCwd[committedCwd] ?? []), [committedCwd, filesByCwd, provider, providerCommands]);
   const commandMenu = useCommandMenu(prompt, setPrompt, commandGroups, taRef, ctrlJ);
+  const imageAttachments = useImageAttachments(
+    capabilities[provider]?.imageAttachments === true,
+    composerAttachments,
+  );
+  const selectProvider = useCallback((nextProvider: string) => {
+    if (shouldInvalidateImagesForProviderSwitch(provider, nextProvider)) {
+      imageAttachments.invalidateForUnsupportedProvider(
+        "Staged images were removed because the provider changed.",
+      );
+    }
+    setProvider(nextProvider);
+  }, [imageAttachments.invalidateForUnsupportedProvider, provider]);
 
   useDefaultCwd(defaultCwd, cwd, setCwd, committedCwd, setCommittedCwd);
-  useProviderFallback(providers, provider, defaultProvider, setProvider);
+  useProviderFallback(providers, provider, defaultProvider, selectProvider);
   useProviderCatalogs(ready, connectionEpoch, providers, provider, committedCwd, requestProviderOptions, requestProviderCommands);
   useFileCatalog(ready, connectionEpoch, committedCwd, requestFiles);
   useCwdValidation(ready, connectionEpoch, committedCwd, defaultCwd, cwdChecks, checkCwd, setCwd, setCommittedCwd);
@@ -101,10 +126,21 @@ export function Composer() {
 
   const submit = () => {
     const text = prompt.trim();
-    if (!text || !ready) return;
+    if (!imagePromptCanSubmit(
+      text,
+      imageAttachments.attachments.length,
+      imageAttachments.loading,
+    ) || !ready) return;
     const runCwd = cwd.trim();
-    const sent = start({ provider, cwd: runCwd, prompt: text, options: sanitizeStartOptions(startOptions, options) });
+    const sent = start({
+      provider,
+      cwd: runCwd,
+      prompt: text,
+      attachments: imageAttachments.attachments,
+      options: sanitizeStartOptions(startOptions, options),
+    });
     if (!sent) return;
+    imageAttachments.clear();
     localStorage.setItem("agentui.provider", provider);
     localStorage.setItem("agentui.cwd", runCwd);
   };
@@ -116,7 +152,7 @@ export function Composer() {
     localStorage.setItem("agentui.cwd", next);
   };
   const changeProvider = (v: string) => {
-    setProvider(v);
+    selectProvider(v);
     setStartOptionsByProvider((all) => all[v] ? all : { ...all, [v]: readProviderOptions(v) });
     localStorage.setItem("agentui.provider", v);
   };
@@ -132,7 +168,19 @@ export function Composer() {
   return (
     <section id="composer-view">
       {experience ? <WorkbenchHeader experience={experience} /> : null}
-      <div id="composer-card">
+      <div
+        id="composer-card"
+        className={imageAttachments.dragActive ? "image-drop-active" : undefined}
+        {...imageAttachments.dropHandlers}
+      >
+        <ImageAttachmentTray
+          attachments={imageAttachments.attachments}
+          enabled={capabilities[provider]?.imageAttachments === true}
+          error={imageAttachments.error}
+          loading={imageAttachments.loading}
+          onAdd={(files) => { void imageAttachments.addFiles(files); }}
+          onRemove={imageAttachments.remove}
+        />
         <div className="input-wrap">
           <textarea
             ref={taRef}
@@ -145,6 +193,7 @@ export function Composer() {
               setPrompt(e.target.value);
               if (lastError) clearError();
             }}
+            onPaste={imageAttachments.onPaste}
             onSelect={commandMenu.onSelect}
             onKeyUp={commandMenu.onSelect}
             onClick={commandMenu.onSelect}
@@ -169,7 +218,17 @@ export function Composer() {
           openOptionId={openOptionId}
           setOpenOptionId={setOpenOptionId}
           trailing={(
-            <button className="send" type="button" aria-label="Start" disabled={!prompt.trim() || !ready} onClick={submit}>
+            <button
+              className="send"
+              type="button"
+              aria-label="Start"
+              disabled={!imagePromptCanSubmit(
+                prompt,
+                imageAttachments.attachments.length,
+                imageAttachments.loading,
+              ) || !ready}
+              onClick={submit}
+            >
               <ArrowUp />
             </button>
           )}

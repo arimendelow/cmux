@@ -6,6 +6,7 @@ import type {
   OptionChoice,
   OptionValue,
   PermissionOption,
+  PromptAttachment,
   ProviderDef,
   SessionCtx,
   SessionOption,
@@ -18,25 +19,48 @@ import { prettifyModelLabel } from "./model-label";
 // `opencode acp`, `gemini --experimental-acp`, `claude-code-acp`, goose, ...
 export function makeAcpAdapter(def: ProviderDef): Adapter {
   const fallbackOptions = acpFallbackOptions(def);
-  const adapter: Adapter = {
-    capabilities: {
-      triggers: ["/"],
-      options: fallbackOptions,
-    },
-    async send(sess, prompt, generation?: number) {
-      // ACP has no mid-turn steer and most agents reject overlapping
-      // session/prompt calls, so serialize sends: a prompt sent while a turn
-      // is in flight runs after that turn resolves.
-      sess.setStatus("running");
-      const prev = (sess.internal.acpTurn as Promise<void> | undefined) ?? Promise.resolve();
-      const turn = prev.then(async () => {
+  const requireImagePromptSupport = (st: AcpState, attachments: PromptAttachment[]) => {
+    if (attachments.length === 0 || st.imagePromptCapability === "supported") return;
+    throw new Error(
+      st.imagePromptCapability === "unknown"
+        ? `${def.label} image prompt capability is not known`
+        : `${def.label} does not support image prompts`,
+    );
+  };
+  const enqueuePrompt = (
+    sess: SessionCtx,
+    prompt: string,
+    generation: number | undefined,
+    attachments: PromptAttachment[],
+    onAdmitted?: () => void,
+    canAdmit?: () => boolean,
+  ): { admission: Promise<void>; completion: Promise<void> } => {
+    sess.setStatus("running");
+    const admission = Promise.withResolvers<void>();
+    const prev = (sess.internal.acpTurn as Promise<void> | undefined) ?? Promise.resolve();
+    const turn = prev.catch(() => {}).then(async () => {
+        let admitted = false;
         try {
-          const st = await ensureAcp(sess, def);
+          const st = await ensureAcp(sess, def, attachments.length > 0);
           await applyInitialOptions(sess, st, def);
-          const res = await st.request("session/prompt", {
+          requireImagePromptSupport(st, attachments);
+          if (canAdmit && !canAdmit()) throw new Error("agent startup cancelled");
+          const response = st.request("session/prompt", {
             sessionId: st.acpSessionId,
-            prompt: [{ type: "text", text: prompt }],
+            prompt: [
+              ...attachments.map((attachment) => ({
+                type: "image",
+                mimeType: attachment.mimeType,
+                data: attachment.data,
+              })),
+              ...(prompt ? [{ type: "text", text: prompt }] : []),
+            ],
+          }, () => {
+            onAdmitted?.();
+            admitted = true;
+            admission.resolve();
           });
+          const res = await response;
           if (res?.stopReason === "cancelled") sess.emit({ kind: "status", text: "Stopped" });
           sess.emit({
             kind: "done",
@@ -44,23 +68,47 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
             generation,
           } as any);
         } catch (err) {
-          if (/\bcancelled\b/i.test(String(err instanceof Error ? err.message : err))) {
-            sess.emit({ kind: "status", text: "Stopped" });
-          } else {
-            sess.emit({ kind: "error", message: truncate(String(err), 400) });
+          const error = err instanceof Error ? err : new Error(String(err));
+          if (!admitted) admission.reject(error);
+          if (admitted || !onAdmitted) {
+            if (/\bcancelled\b/i.test(error.message)) {
+              sess.emit({ kind: "status", text: "Stopped" });
+            } else {
+              sess.emit({ kind: "error", message: truncate(String(error), 400) });
+            }
+            sess.emit({ kind: "done", generation } as any);
           }
-          sess.emit({ kind: "done", generation } as any);
         }
         if (sess.internal.acpTurn === turn) sess.setStatus("idle");
-      });
-      sess.internal.acpTurn = turn;
-      await turn;
+    });
+    sess.internal.acpTurn = turn;
+    return { admission: admission.promise, completion: turn };
+  };
+  const adapter: Adapter = {
+    capabilities: {
+      triggers: ["/"],
+      options: fallbackOptions,
+      imageAttachments: true,
     },
-    stop(sess) {
+    async preparePromptAttachments(sess, attachments) {
+      if (attachments.length === 0) return;
+      const st = await ensureAcp(sess, def, true);
+      await applyInitialOptions(sess, st, def);
+      requireImagePromptSupport(st, attachments);
+    },
+    async sendWithAdmission(sess, prompt, generation, attachments, onAdmitted, canAdmit) {
+      await enqueuePrompt(sess, prompt, generation, attachments, onAdmitted, canAdmit).admission;
+    },
+    async send(sess, prompt, generation?: number, attachments: PromptAttachment[] = []) {
+      const queued = enqueuePrompt(sess, prompt, generation, attachments);
+      void queued.admission.catch(() => {});
+      await queued.completion;
+    },
+    async stop(sess) {
       const st = sess.internal.acp as AcpState | undefined;
       if (st?.acpSessionId) {
-        cancelPendingPermissions(sess, st);
-        st.notify("session/cancel", { sessionId: st.acpSessionId });
+        await cancelPendingPermissions(sess, st);
+        await st.notify("session/cancel", { sessionId: st.acpSessionId });
         return;
       }
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
@@ -84,34 +132,50 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       if (!st) throw new Error(`${def.id} ACP provider is not ready`);
       const pending = st.pendingPermissions.get(requestId);
       if (!pending) throw new Error(`permission request not found: ${requestId}`);
+      if (st.respondingPermissions.has(requestId)) {
+        throw new Error(`permission response already in progress: ${requestId}`);
+      }
       const option = pending.options.find((candidate) => candidate.optionId === optionId);
       if (!option) throw new Error(`permission option not found: ${optionId}`);
-      st.pendingPermissions.delete(requestId);
-      st.writeMsg({
-        jsonrpc: "2.0",
-        id: pending.rpcId,
-        result: { outcome: { outcome: "selected", optionId } },
-      });
-      sess.emit({ kind: "permission-resolved", requestId, optionId });
+      st.respondingPermissions.add(requestId);
+      try {
+        await st.writeMsg({
+          jsonrpc: "2.0",
+          id: pending.rpcId,
+          result: { outcome: { outcome: "selected", optionId } },
+        });
+        st.pendingPermissions.delete(requestId);
+        sess.emit({ kind: "permission-resolved", requestId, optionId });
+      } finally {
+        st.respondingPermissions.delete(requestId);
+      }
     },
     async respondElicitation(sess, requestId, action, content) {
       const st = sess.internal.acp as AcpState | undefined;
       if (!st) throw new Error(`${def.id} ACP provider is not ready`);
       const pending = st.pendingElicitations.get(requestId);
       if (!pending) throw new Error(`elicitation request not found: ${requestId}`);
+      if (st.respondingElicitations.has(requestId)) {
+        throw new Error(`elicitation response already in progress: ${requestId}`);
+      }
       const validatedContent = action === "accept"
         ? validateElicitationContent(pending.fields, content ?? {})
         : undefined;
-      st.pendingElicitations.delete(requestId);
-      st.writeMsg({
-        jsonrpc: "2.0",
-        id: pending.rpcId,
-        result: {
-          action,
-          ...(validatedContent ? { content: validatedContent } : {}),
-        },
-      });
-      sess.emit({ kind: "elicitation-resolved", requestId, action });
+      st.respondingElicitations.add(requestId);
+      try {
+        await st.writeMsg({
+          jsonrpc: "2.0",
+          id: pending.rpcId,
+          result: {
+            action,
+            ...(validatedContent ? { content: validatedContent } : {}),
+          },
+        });
+        st.pendingElicitations.delete(requestId);
+        sess.emit({ kind: "elicitation-resolved", requestId, action });
+      } finally {
+        st.respondingElicitations.delete(requestId);
+      }
     },
     async setOption(sess, id, value) {
       const st = await ensureAcp(sess, def);
@@ -137,8 +201,8 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
 interface AcpState {
   proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   acpSessionId: string;
-  request(method: string, params: unknown): Promise<any>;
-  notify(method: string, params: unknown): void;
+  request(method: string, params: unknown, onWritten?: () => void): Promise<any>;
+  notify(method: string, params: unknown): Promise<void>;
   options: SessionOption[];
   sources: Map<string, "config" | "mode" | "model" | "spawnModel">;
   autoApprove: boolean;
@@ -146,11 +210,14 @@ interface AcpState {
   initialApplied: boolean;
   pendingPermissions: Map<string, { rpcId: unknown; options: PermissionOption[] }>;
   pendingElicitations: Map<string, { rpcId: unknown; fields: ElicitationField[] }>;
+  respondingPermissions: Set<string>;
+  respondingElicitations: Set<string>;
   toolTitles: Map<string, string>;
   requestNamespace: string;
   suppressSessionReplay: boolean;
   unsupportedUpdates: Set<string>;
-  writeMsg(msg: unknown): void;
+  imagePromptCapability: "unknown" | "supported" | "unsupported";
+  writeMsg(msg: unknown): Promise<void>;
 }
 
 const MAX_UNSUPPORTED_UPDATE_NAMES = 16;
@@ -189,7 +256,11 @@ function commandForSession(def: ProviderDef, options: Record<string, OptionValue
   return cmd;
 }
 
-async function ensureAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
+async function ensureAcp(
+  sess: SessionCtx,
+  def: ProviderDef,
+  requiresImageSupport = false,
+): Promise<AcpState> {
   const existing = sess.internal.acp as AcpState | undefined;
   if (existing && existing.proc.exitCode === null && !existing.proc.killed) return existing;
   const starting = sess.internal.acpStarting as Promise<AcpState> | undefined;
@@ -202,7 +273,7 @@ async function ensureAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> 
     title: `Starting ${displayName}`,
     message: "Connecting to the local ACP session.",
   });
-  const promise = startAcp(sess, def).then((state) => {
+  const promise = startAcp(sess, def, requiresImageSupport).then((state) => {
     sess.emit({ kind: "connection", state: "ready", title: `${displayName} connected` });
     return state;
   }).catch((error) => {
@@ -221,7 +292,11 @@ function isUnavailableSessionLoad(error: unknown): boolean {
   return /method not found|session.*(?:not found|does not exist|unknown|invalid|expired)/i.test(message);
 }
 
-async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
+async function startAcp(
+  sess: SessionCtx,
+  def: ProviderDef,
+  requiresImageSupport = false,
+): Promise<AcpState> {
   const spawnModel = effectiveSpawnModel(def, sess.startOptions);
   const cmd = commandForSession(def, sess.startOptions);
   if (sess.internal.observeOnly === true) cmd.push("--observe-only");
@@ -238,16 +313,23 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
 
   let nextId = 1;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  const writeMsg = (msg: unknown) => {
-    proc.stdin.write(JSON.stringify(msg) + "\n");
-    proc.stdin.flush();
+  const writeMsg = async (msg: unknown): Promise<void> => {
+    await proc.stdin.write(JSON.stringify(msg) + "\n");
+    await proc.stdin.flush();
   };
-  const request = (method: string, params: unknown) =>
-    new Promise<any>((resolve, reject) => {
-      const id = nextId++;
-      pending.set(id, { resolve, reject });
-      writeMsg({ jsonrpc: "2.0", id, method, params });
-    });
+  const request = async (method: string, params: unknown, onWritten?: () => void): Promise<any> => {
+    const id = nextId++;
+    const response = Promise.withResolvers<any>();
+    pending.set(id, response);
+    try {
+      await writeMsg({ jsonrpc: "2.0", id, method, params });
+      onWritten?.();
+      return await response.promise;
+    } catch (error) {
+      pending.delete(id);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  };
   const notify = (method: string, params: unknown) =>
     writeMsg({ jsonrpc: "2.0", method, params });
 
@@ -263,10 +345,13 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     initialApplied: false,
     pendingPermissions: new Map(),
     pendingElicitations: new Map(),
+    respondingPermissions: new Set(),
+    respondingElicitations: new Set(),
     toolTitles: new Map(),
     requestNamespace: crypto.randomUUID().slice(0, 8),
     suppressSessionReplay: false,
     unsupportedUpdates: new Set(),
+    imagePromptCapability: "unknown",
     writeMsg,
   };
 
@@ -282,7 +367,11 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
       }
       return;
     }
-    if (msg.method) handleAgentMessage(sess, st, def, msg, writeMsg);
+    if (msg.method) {
+      handleAgentMessage(sess, st, def, msg, (reply) => {
+        void writeMsg(reply).catch(() => {});
+      });
+    }
   }, () => {
     for (const p of pending.values()) p.reject(new Error(`${def.id} acp process exited`));
     pending.clear();
@@ -294,6 +383,8 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     }
     st.pendingPermissions.clear();
     st.pendingElicitations.clear();
+    st.respondingPermissions.clear();
+    st.respondingElicitations.clear();
     if (sess.internal.acp && (sess.internal.acp as AcpState).proc === proc) {
       sess.internal.acp = undefined;
     }
@@ -310,13 +401,20 @@ async function startAcp(sess: SessionCtx, def: ProviderDef): Promise<AcpState> {
     proc.kill();
   }, startupTimeoutMs);
   try {
-    await request("initialize", {
+    const initializeResult = await request("initialize", {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         elicitation: { form: {} },
       },
     });
+    st.imagePromptCapability =
+      initializeResult?.agentCapabilities?.promptCapabilities?.image === true
+        ? "supported"
+        : "unsupported";
+    if (requiresImageSupport && st.imagePromptCapability !== "supported") {
+      throw new Error(`${def.label} does not support image prompts`);
+    }
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
       ? sess.internal.acpResumeSessionId
       : "";
@@ -572,21 +670,33 @@ function withAcpLocalOptions(options: SessionOption[], autoApprove: boolean): Se
   ];
 }
 
-function cancelPendingPermissions(sess: SessionCtx, st: AcpState) {
+async function cancelPendingPermissions(sess: SessionCtx, st: AcpState): Promise<void> {
+  let firstError: unknown;
   for (const [requestId, pending] of st.pendingPermissions) {
-    st.writeMsg({
-      jsonrpc: "2.0",
-      id: pending.rpcId,
-      result: { outcome: { outcome: "cancelled" } },
-    });
-    sess.emit({ kind: "permission-resolved", requestId, optionId: "cancelled" });
+    if (st.respondingPermissions.has(requestId)) continue;
+    try {
+      await st.writeMsg({
+        jsonrpc: "2.0",
+        id: pending.rpcId,
+        result: { outcome: { outcome: "cancelled" } },
+      });
+      st.pendingPermissions.delete(requestId);
+      sess.emit({ kind: "permission-resolved", requestId, optionId: "cancelled" });
+    } catch (error) {
+      firstError ??= error;
+    }
   }
-  st.pendingPermissions.clear();
   for (const [requestId, pending] of st.pendingElicitations) {
-    st.writeMsg({ jsonrpc: "2.0", id: pending.rpcId, result: { action: "cancel" } });
-    sess.emit({ kind: "elicitation-resolved", requestId, action: "cancel" });
+    if (st.respondingElicitations.has(requestId)) continue;
+    try {
+      await st.writeMsg({ jsonrpc: "2.0", id: pending.rpcId, result: { action: "cancel" } });
+      st.pendingElicitations.delete(requestId);
+      sess.emit({ kind: "elicitation-resolved", requestId, action: "cancel" });
+    } catch (error) {
+      firstError ??= error;
+    }
   }
-  st.pendingElicitations.clear();
+  if (firstError) throw firstError;
 }
 
 function permissionOptions(value: unknown): PermissionOption[] {
@@ -920,7 +1030,7 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             proc,
             acpSessionId: "",
             request: () => Promise.reject(new Error("catalog probe closed")),
-            notify: () => {},
+            notify: async () => {},
             options: [],
             sources: new Map(),
             autoApprove: false,
@@ -928,11 +1038,14 @@ async function fetchAcpOptions(def: ProviderDef, cwd: string, fallback: SessionO
             initialApplied: false,
             pendingPermissions: new Map(),
             pendingElicitations: new Map(),
+            respondingPermissions: new Set(),
+            respondingElicitations: new Set(),
             toolTitles: new Map(),
             requestNamespace: "catalog",
             suppressSessionReplay: false,
             unsupportedUpdates: new Set(),
-            writeMsg: () => {},
+            imagePromptCapability: "unknown",
+            writeMsg: async () => {},
           };
           ingestAcpOptions(st, msg.result ?? {}, def, effectiveSpawnModel(def, {}));
           resolve(st.options.length ? st.options : fallback);

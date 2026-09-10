@@ -28,6 +28,13 @@ export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
 export interface PermissionOption { optionId: string; name: string; kind: string; }
+export interface PromptAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  byteCount: number;
+}
 export interface PlanEntry { content: string; status?: string; }
 export type ElicitationAction = "accept" | "decline" | "cancel";
 export interface ElicitationField {
@@ -52,7 +59,11 @@ export interface SessionOption {
 }
 export interface CommandEntry { name: string; description?: string; source?: string; }
 export interface CommandGroup { trigger: CommandTrigger; commands: CommandEntry[]; }
-export interface ProviderCapabilities { options: SessionOption[]; triggers: CommandTrigger[]; }
+export interface ProviderCapabilities {
+  options: SessionOption[];
+  triggers: CommandTrigger[];
+  imageAttachments?: boolean;
+}
 export interface SessionActions { fork?: boolean; }
 export interface ChangedFile { path: string; adds: number; dels: number; status: string; }
 
@@ -230,10 +241,11 @@ export interface SessionState {
   cwdChecks: Record<string, { ok: boolean; message?: string }>;
   fileDiffs: Record<string, string>;
   lastError: string;
+  composerAttachments: PromptAttachment[];
   forkPending: boolean;
-  start(opts: { provider: string; cwd: string; prompt: string; options?: Record<string, OptionValue> }): boolean;
-  compose(): void;
-  reply(text: string): void;
+  start(opts: { provider: string; cwd: string; prompt: string; attachments?: PromptAttachment[]; options?: Record<string, OptionValue> }): boolean;
+  compose(options?: { attachments?: PromptAttachment[]; error?: string }): void;
+  reply(text: string, attachments?: PromptAttachment[]): Promise<boolean>;
   stop(): void;
   setOption(id: string, value: OptionValue): void;
   respondPermission(requestId: string, optionId: string): void;
@@ -285,6 +297,38 @@ export function consumeOptimisticUserEcho(queue: string[], text: string): boolea
   if (queue[0] !== text) return false;
   queue.shift();
   return true;
+}
+
+export function settlePendingReply(
+  pending: Map<string, (accepted: boolean) => void>,
+  requestId: string,
+  accepted: boolean,
+): boolean {
+  const resolve = pending.get(requestId);
+  if (!resolve) return false;
+  pending.delete(requestId);
+  resolve(accepted);
+  return true;
+}
+
+export function rememberRetiredId(ids: Set<string>, id: string, limit = 32): void {
+  ids.delete(id);
+  ids.add(id);
+  while (ids.size > limit) {
+    const oldest = ids.values().next().value;
+    if (typeof oldest !== "string") break;
+    ids.delete(oldest);
+  }
+}
+
+export function promptDisplayText(
+  prompt: string,
+  attachments: ReadonlyArray<Pick<PromptAttachment, "name">>,
+): string {
+  return [
+    prompt,
+    ...attachments.map((attachment) => `[Image: ${attachment.name}]`),
+  ].filter(Boolean).join("\n");
 }
 
 export function providerSessionTitle(
@@ -341,6 +385,7 @@ export function useSession(): SessionState {
   const [cwdChecks, setCwdChecks] = useState<Record<string, { ok: boolean; message?: string }>>({});
   const [fileDiffs, setFileDiffs] = useState<Record<string, string>>({});
   const [lastError, setLastError] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<PromptAttachment[]>([]);
   const [forkPending, setForkPending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const providersRef = useRef<Provider[]>([]);
@@ -352,11 +397,15 @@ export function useSession(): SessionState {
     provider: string;
     cwd: string;
     prompt: string;
+    attachments?: PromptAttachment[];
     options?: Record<string, OptionValue>;
-    queuedReplies: string[];
+    queuedReplies: Array<{ requestId: string; prompt: string; attachments?: PromptAttachment[] }>;
     failed?: boolean;
   } | null>(null);
   const pendingStartTimeoutRef = useRef<number | null>(null);
+  const pendingRepliesRef = useRef(new Map<string, (accepted: boolean) => void>());
+  const retiredStartRequestIdsRef = useRef(new Set<string>());
+  const retiredSessionIdsRef = useRef(new Set<string>());
   const optimisticUsersRef = useRef<string[]>([]);
   const experienceRef = useRef<WorkbenchExperience | null>(null);
   const initialSessionListHandledRef = useRef(false);
@@ -369,9 +418,15 @@ export function useSession(): SessionState {
   const failPendingStart = useCallback((message: string) => {
     const pending = pendingStartRef.current;
     if (!pending) return;
+    rememberRetiredId(retiredStartRequestIdsRef.current, pending.requestId);
+    for (const queued of pending.queuedReplies) {
+      pendingRepliesRef.current.get(queued.requestId)?.(false);
+      pendingRepliesRef.current.delete(queued.requestId);
+    }
     clearPendingStartTimeout();
     pendingStartRef.current = null;
     restoreComposerDraft(sessionStorage, pending.prompt);
+    setComposerAttachments(pending.attachments ?? []);
     history.replaceState(null, "", appPath("/"));
     document.title = "cmux agent";
     sessionIdRef.current = null;
@@ -390,6 +445,13 @@ export function useSession(): SessionState {
   const armPendingStartTimeout = useCallback((provider: string) => {
     clearPendingStartTimeout();
     pendingStartTimeoutRef.current = window.setTimeout(() => {
+      const pending = pendingStartRef.current;
+      if (pending) {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ op: "cancel-start", requestId: pending.requestId, retire: true }));
+        }
+      }
       failPendingStart("Failed to start agent: request timed out");
     }, providerStartTimeoutMs(providersRef.current, provider));
   }, [clearPendingStartTimeout, failPendingStart]);
@@ -409,10 +471,13 @@ export function useSession(): SessionState {
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + appPath("/ws"));
       wsRef.current = ws;
       ws.onopen = () => {
+        for (const requestId of retiredStartRequestIdsRef.current) {
+          sendRaw({ op: "cancel-start", requestId, retire: true });
+        }
         const pending = pendingStartRef.current;
         if (sessionIdRef.current) sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
         else if (pending && !pending.failed) {
-          sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, options: pending.options });
+          sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, attachments: pending.attachments, options: pending.options });
           armPendingStartTimeout(pending.provider);
         }
       };
@@ -434,6 +499,17 @@ export function useSession(): SessionState {
             break;
           }
           case "session-created":
+            if (
+              typeof msg.requestId === "string"
+              && retiredStartRequestIdsRef.current.has(msg.requestId)
+            ) {
+              rememberRetiredId(retiredSessionIdsRef.current, String(msg.session.id));
+              sendRaw({ op: "cancel-start", requestId: msg.requestId, retire: true });
+              if (sessionIdRef.current) {
+                sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
+              }
+              break;
+            }
             sessionIdRef.current = msg.session.id;
             history.replaceState(null, "", appPath("/s/" + msg.session.id));
             document.title = msg.session.title || "cmux agent";
@@ -442,8 +518,11 @@ export function useSession(): SessionState {
               clearPendingStartTimeout();
               pendingStartRef.current = null;
               setSession({ ...msg.session, status: "running" });
-              for (const prompt of queuedReplies) {
-                sendRaw({ op: "send", sessionId: msg.session.id, prompt });
+              for (const queued of queuedReplies) {
+                if (!sendRaw({ op: "send", sessionId: msg.session.id, ...queued })) {
+                  pendingRepliesRef.current.get(queued.requestId)?.(false);
+                  pendingRepliesRef.current.delete(queued.requestId);
+                }
               }
             } else {
               setSession(msg.session);
@@ -459,7 +538,18 @@ export function useSession(): SessionState {
             setFileDiffs({});
             setPhase("chat");
             break;
+          case "start-retired":
+            if (typeof msg.requestId === "string") {
+              retiredStartRequestIdsRef.current.delete(msg.requestId);
+            }
+            break;
+          case "send-accepted": {
+            const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+            settlePendingReply(pendingRepliesRef.current, requestId, true);
+            break;
+          }
           case "history":
+            if (retiredSessionIdsRef.current.has(String(msg.session.id))) break;
             sessionIdRef.current = msg.session.id;
             document.title = msg.session.title || "cmux agent";
             setSession(msg.session);
@@ -567,6 +657,12 @@ export function useSession(): SessionState {
             break;
           case "error":
             if (msg.op === "start") {
+              if (
+                typeof msg.requestId === "string"
+                && retiredStartRequestIdsRef.current.has(msg.requestId)
+              ) {
+                break;
+              }
               const message = String(msg.message ?? "");
               const pending = pendingStartRef.current;
               if (pending && (!msg.requestId || msg.requestId === pending.requestId)) {
@@ -574,6 +670,11 @@ export function useSession(): SessionState {
               } else {
                 setLastError(message);
               }
+            }
+            if (msg.op === "send") {
+              const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+              settlePendingReply(pendingRepliesRef.current, requestId, false);
+              setLastError(String(msg.message ?? "Failed to send message"));
             }
             if (msg.op === "fork") setForkPending(false);
             if (msg.op === "get-file-diff" && typeof msg.path === "string" && msg.path) {
@@ -586,21 +687,39 @@ export function useSession(): SessionState {
             break;
         }
       };
-      ws.onclose = () => { if (!closed) setTimeout(connect, 800); };
+      ws.onclose = () => {
+        for (const resolve of pendingRepliesRef.current.values()) resolve(false);
+        pendingRepliesRef.current.clear();
+        if (!closed) setTimeout(connect, 800);
+      };
     };
     connect();
-    return () => { closed = true; clearPendingStartTimeout(); wsRef.current?.close(); };
+    return () => {
+      closed = true;
+      clearPendingStartTimeout();
+      for (const resolve of pendingRepliesRef.current.values()) resolve(false);
+      pendingRepliesRef.current.clear();
+      wsRef.current?.close();
+    };
   }, [armPendingStartTimeout, clearPendingStartTimeout, failPendingStart, sendRaw]);
 
-  const start = useCallback((opts: { provider: string; cwd: string; prompt: string; options?: Record<string, OptionValue> }) => {
-    const key = JSON.stringify([opts.provider, opts.cwd, opts.prompt, opts.options ?? {}]);
+  const start = useCallback((opts: { provider: string; cwd: string; prompt: string; attachments?: PromptAttachment[]; options?: Record<string, OptionValue> }) => {
+    const key = JSON.stringify([
+      opts.provider,
+      opts.cwd,
+      opts.prompt,
+      opts.attachments?.map((attachment) => attachment.id) ?? [],
+      opts.options ?? {},
+    ]);
     const current = pendingStartRef.current;
     if (current && !current.failed && current.key === key) return false;
     const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     if (!sendRaw({ op: "start", requestId, ...opts })) return false;
     pendingStartRef.current = { requestId, key, queuedReplies: [], ...opts };
+    setComposerAttachments([]);
     armPendingStartTimeout(opts.provider);
-    optimisticUsersRef.current = [opts.prompt];
+    const displayPrompt = promptDisplayText(opts.prompt, opts.attachments ?? []);
+    optimisticUsersRef.current = [displayPrompt];
     sessionIdRef.current = null;
     history.replaceState(null, "", appPath("/"));
     const title = providerSessionTitle(providers, opts.provider, experience);
@@ -613,7 +732,7 @@ export function useSession(): SessionState {
       title,
       status: "running",
     });
-    setBlocks([{ kind: "user", text: opts.prompt }]);
+    setBlocks([{ kind: "user", text: displayPrompt }]);
     setOptions([]);
     setActions({});
     setCommands([]);
@@ -628,9 +747,10 @@ export function useSession(): SessionState {
     setPhase("chat");
     return true;
   }, [armPendingStartTimeout, experience, providers, sendRaw]);
-  const compose = useCallback(() => {
+  const compose = useCallback((options: { attachments?: PromptAttachment[]; error?: string } = {}) => {
     clearPendingStartTimeout();
     pendingStartRef.current = null;
+    setComposerAttachments(options.attachments ?? []);
     history.replaceState(null, "", appPath("/"));
     document.title = "cmux agent";
     sessionIdRef.current = null;
@@ -643,25 +763,40 @@ export function useSession(): SessionState {
     setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
+    setLastError(options.error ?? "");
     setPhase("composer");
   }, [clearPendingStartTimeout]);
-  const reply = useCallback((text: string) => {
+  const reply = useCallback((text: string, attachments: PromptAttachment[] = []): Promise<boolean> => {
+    const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const pending = pendingStartRef.current;
     if (!sessionIdRef.current && pending?.failed) {
-      start({ provider: pending.provider, cwd: pending.cwd, prompt: text, options: pending.options });
-      return;
+      return Promise.resolve(start({
+        provider: pending.provider,
+        cwd: pending.cwd,
+        prompt: text,
+        attachments,
+        options: pending.options,
+      }));
     }
-    if (!sessionIdRef.current && pending && !pending.failed) {
-      pending.queuedReplies.push(text);
-      optimisticUsersRef.current.push(text);
-      setBlocks((bs) => [...closeStreaming(bs), { kind: "user", text }]);
-      return;
-    }
-    if (sessionIdRef.current) {
-      if (sendRaw({ op: "send", sessionId: sessionIdRef.current, prompt: text })) {
-        setSession((s) => (s ? { ...s, status: "running" } : s));
+    return new Promise<boolean>((resolve) => {
+      pendingRepliesRef.current.set(requestId, resolve);
+      if (!sessionIdRef.current && pending && !pending.failed) {
+        pending.queuedReplies.push({ requestId, prompt: text, attachments });
+        return;
       }
-    }
+      if (sessionIdRef.current && sendRaw({
+        op: "send",
+        requestId,
+        sessionId: sessionIdRef.current,
+        prompt: text,
+        attachments,
+      })) {
+        setSession((s) => (s ? { ...s, status: "running" } : s));
+        return;
+      }
+      pendingRepliesRef.current.delete(requestId);
+      resolve(false);
+    });
   }, [sendRaw, start]);
   const stop = useCallback(() => {
     if (sessionIdRef.current) {
@@ -736,6 +871,7 @@ export function useSession(): SessionState {
     cwdChecks,
     fileDiffs,
     lastError,
+    composerAttachments,
     forkPending,
     start,
     compose,

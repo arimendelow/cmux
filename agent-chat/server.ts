@@ -7,6 +7,7 @@ import type {
   OptionValue,
   ProviderCapabilities,
   ProviderDef,
+  PromptAttachment,
   SessionCtx,
   SessionOption,
   SessionStatus,
@@ -404,7 +405,16 @@ const allSockets = new Set<Bun.ServerWebSocket<WsData>>();
 let fileTheme = resolveGhosttyTheme();
 let cmuxThemeOverride: GhosttyTheme | null = null;
 let currentTheme = fileTheme;
-const startRequests = new Map<string, { createdAt: number; promise: Promise<Session> }>();
+interface StartRequest {
+  createdAt: number;
+  promise: Promise<Session>;
+  cancelled: boolean;
+  session?: Session;
+  settledAt?: number;
+  retired?: boolean;
+  retirement?: Promise<void>;
+}
+const startRequests = new Map<string, StartRequest>();
 type AttributionMode = "new-turn" | "current-turn";
 type InternalDoneEvent = Extract<AgentEvent, { kind: "done" }> & { generation?: number };
 const optionCatalog = new Map<string, {
@@ -443,8 +453,82 @@ function pruneCwdCatalog(map: Map<string, { fetchedAt: number; refreshing?: Prom
 function pruneStartRequests() {
   const now = Date.now();
   for (const [key, entry] of startRequests) {
-    if (now - entry.createdAt > START_REQUEST_TTL_MS) startRequests.delete(key);
+    if (startRequestShouldPruneForTest(entry, now)) startRequests.delete(key);
   }
+}
+
+function retireStartSession(entry: StartRequest): Promise<void> {
+  if (entry.retirement) return entry.retirement;
+  const retirement = entry.promise.then((sess) => retireSession(sess));
+  entry.retirement = retirement;
+  void retirement.catch(() => {
+    if (entry.retirement === retirement) entry.retirement = undefined;
+  });
+  return entry.retirement;
+}
+
+function retireSession(sess: Session): Promise<void> {
+  const existing = sess.internal.retirementPromise as Promise<void> | undefined;
+  if (existing) return existing;
+  sess.internal.retired = true;
+  const retirement = (async () => {
+    await Promise.resolve(sess.adapter.stop(sess)).catch(() => {});
+    const pendingPersistence = sess.internal.persistencePromise as Promise<void> | undefined;
+    await pendingPersistence?.catch((error) => {
+      console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
+    });
+    await sess.invalidatePersistedSession?.();
+    sess.adapter.dispose(sess);
+    if (sessions.get(sess.id) === sess) sessions.delete(sess.id);
+    for (const socket of sess.sockets) {
+      if (socket.data.subscribed === sess.id) socket.data.subscribed = null;
+    }
+    sess.sockets.clear();
+    broadcastSessions();
+  })();
+  sess.internal.retirementPromise = retirement;
+  void retirement.catch(() => {
+    if (sess.internal.retirementPromise === retirement) delete sess.internal.retirementPromise;
+  });
+  return retirement;
+}
+
+async function retireStartRequestById(requestId: string): Promise<void> {
+  const pending = startRequests.get(requestId);
+  if (pending) {
+    pending.cancelled = true;
+    pending.retired = true;
+    await retireStartSession(pending);
+    return;
+  }
+  const live = [...sessions.values()].find((session) =>
+    session.internal.startRequestId === requestId
+  );
+  if (live) {
+    await retireSession(live);
+    return;
+  }
+  if (!SESSION_DIR) return;
+  const persisted = await readPersistedSessions(SESSION_DIR);
+  if (persisted.errors.length > 0) {
+    throw new Error(`cannot verify retired start: ${persisted.errors.join("; ")}`);
+  }
+  for (const record of persisted.records) {
+    if (record.startRequestId === requestId) {
+      await deletePersistedSession(SESSION_DIR, record.id);
+    }
+  }
+}
+
+export function startRequestShouldPruneForTest(
+  entry: Pick<StartRequest, "settledAt">,
+  now: number,
+): boolean {
+  return entry.settledAt !== undefined && now - entry.settledAt > START_REQUEST_TTL_MS;
+}
+
+export async function retireStartSessionForTest(entry: StartRequest): Promise<void> {
+  await retireStartSession(entry);
 }
 const keyConfig = await readKeyConfig();
 
@@ -593,8 +677,10 @@ function createSession(
   autoApprove: boolean,
   title: string,
   startOptions: Record<string, OptionValue> = {},
-  restored?: { id: string; createdAt: number; providerSessionId: string },
+  restored?: { id: string; createdAt: number; providerSessionId: string; startRequestId?: string },
   headless = false,
+  register = true,
+  startRequestId?: string,
 ): Session {
   const adapter = adapters.get(provider);
   if (!adapter) throw new Error(`unknown provider: ${provider}`);
@@ -612,6 +698,10 @@ function createSession(
     internal: {
       ...(PRODUCT_ID ? { productId: PRODUCT_ID } : {}),
       ...(headless ? { observeOnly: true } : {}),
+      ...(!register ? { admissionPending: true } : {}),
+      ...((startRequestId ?? restored?.startRequestId)
+        ? { startRequestId: startRequestId ?? restored?.startRequestId }
+        : {}),
       ...(restored ? {
         acpResumeSessionId: restored.providerSessionId,
         restoredFromDisk: true,
@@ -650,12 +740,49 @@ function createSession(
         await deletePersistedSession(SESSION_DIR, sess.id);
       } catch (error) {
         console.error(`[agent-chat] invalidate persisted session ${sess.id} failed`, error);
+        throw error;
       }
     },
   };
-  sessions.set(id, sess);
-  if (!headless) broadcastSessions();
+  if (register) registerSession(sess);
   return sess;
+}
+
+function registerSession(sess: Session) {
+  sessions.set(sess.id, sess);
+  delete sess.internal.admissionPending;
+  if (typeof sess.internal.persistedProviderSessionId === "string") {
+    queueSessionPersistence(sess);
+  }
+  if (!sess.headless) broadcastSessions();
+}
+
+function sessionPersistenceEnabled(sess: Pick<Session, "headless" | "internal">): boolean {
+  return !sess.headless
+    && sess.internal.admissionPending !== true
+    && sess.internal.retired !== true;
+}
+
+function queueSessionPersistence(sess: Session): void {
+  if (!sessionPersistenceEnabled(sess)) return;
+  const previous = sess.internal.persistencePromise as Promise<void> | undefined;
+  const next = (previous ?? Promise.resolve()).catch(() => {}).then(async () => {
+    if (sessionPersistenceEnabled(sess)) await persistSession(sess);
+  });
+  sess.internal.persistencePromise = next;
+  void next.catch((error) => {
+    console.error(`[agent-chat] persist session ${sess.id} failed`, error);
+  }).finally(() => {
+    if (sess.internal.persistencePromise === next) delete sess.internal.persistencePromise;
+  });
+}
+
+async function admitAndSendPrompt(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[],
+): Promise<void> {
+  await sendPrompt(sess, prompt, attachments);
 }
 
 function emitSessionEvent(sess: Session, evt: AgentEvent) {
@@ -672,14 +799,13 @@ function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
   if (evt.kind === "files-changed") recordFileDiffAllowlist(sess, evt.files);
   if (!sess.headless && evt.kind === "meta" && evt.providerSessionId) {
     sess.internal.persistedProviderSessionId = evt.providerSessionId;
-    persistSession(sess).catch((error) => {
-      console.error(`[agent-chat] persist session ${sess.id} failed`, error);
-    });
+    if (!sessionPersistenceEnabled(sess)) return;
+    queueSessionPersistence(sess);
   }
 }
 
 function persistedSession(sess: Session): PersistedAgentChatSession | null {
-  if (sess.headless) return null;
+  if (!sessionPersistenceEnabled(sess)) return null;
   const providerSessionId = typeof sess.internal.persistedProviderSessionId === "string"
     ? sess.internal.persistedProviderSessionId
     : typeof sess.internal.acpResumeSessionId === "string"
@@ -695,6 +821,9 @@ function persistedSession(sess: Session): PersistedAgentChatSession | null {
     autoApprove: sess.autoApprove,
     startOptions: sess.startOptions,
     createdAt: sess.createdAt,
+    ...(typeof sess.internal.startRequestId === "string"
+      ? { startRequestId: sess.internal.startRequestId }
+      : {}),
   };
 }
 
@@ -721,6 +850,7 @@ async function restorePersistedSessions() {
           id: record.id,
           createdAt: record.createdAt,
           providerSessionId: record.providerSessionId,
+          startRequestId: record.startRequestId,
         },
       );
     } catch (error) {
@@ -897,37 +1027,147 @@ function disposeHeadlessSession(sess: Session, stop: boolean) {
   Promise.resolve(sess.adapter.stop(sess)).catch(() => {}).finally(dispose);
 }
 
-function sendPrompt(sess: Session, prompt: string) {
+const MAX_PROMPT_ATTACHMENTS = 4;
+const MAX_PROMPT_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_PROMPT_ATTACHMENT_TOTAL_BYTES = MAX_PROMPT_ATTACHMENTS * MAX_PROMPT_ATTACHMENT_BYTES;
+export const MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES =
+  MAX_PROMPT_ATTACHMENTS * Math.ceil(MAX_PROMPT_ATTACHMENT_BYTES / 3) * 4
+  + 1024 * 1024;
+
+function decodePromptAttachmentData(data: string, index: number): { data: string; byteCount: number } {
+  if (
+    !data
+    || data.length % 4 !== 0
+    || /\s/.test(data)
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+  ) {
+    throw new Error(`attachment ${index + 1} data must be valid base64`);
+  }
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  const estimatedBytes = (data.length / 4) * 3 - padding;
+  if (estimatedBytes > MAX_PROMPT_ATTACHMENT_BYTES) {
+    throw new Error(`attachment ${index + 1} data is too large`);
+  }
+  const bytes = Buffer.from(data, "base64");
+  const canonicalData = bytes.toString("base64");
+  if (bytes.length === 0 || canonicalData !== data) {
+    throw new Error(`attachment ${index + 1} data must be canonical base64`);
+  }
+  return { data: canonicalData, byteCount: bytes.length };
+}
+
+function parsePromptAttachments(value: unknown): PromptAttachment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PROMPT_ATTACHMENTS) {
+    throw new Error(`attachments must contain at most ${MAX_PROMPT_ATTACHMENTS} images`);
+  }
+  let totalBytes = 0;
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`attachment ${index + 1} must be an object`);
+    }
+    const attachment = raw as Record<string, unknown>;
+    if (typeof attachment.id !== "string") throw new Error(`attachment ${index + 1} id is invalid`);
+    if (typeof attachment.name !== "string") throw new Error(`attachment ${index + 1} name is invalid`);
+    if (typeof attachment.mimeType !== "string") throw new Error(`attachment ${index + 1} MIME type is unsupported`);
+    if (typeof attachment.data !== "string") throw new Error(`attachment ${index + 1} data must be valid base64`);
+    const id = attachment.id.trim();
+    const name = pathBasename(attachment.name.trim());
+    const mimeType = attachment.mimeType.trim().toLowerCase();
+    const data = attachment.data;
+    if (!id || id.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(id)) {
+      throw new Error(`attachment ${index + 1} id is invalid`);
+    }
+    if (!name || name.length > 255) {
+      throw new Error(`attachment ${index + 1} name is invalid`);
+    }
+    if (!["image/gif", "image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+      throw new Error(`attachment ${index + 1} MIME type is unsupported`);
+    }
+    const decoded = decodePromptAttachmentData(data, index);
+    totalBytes += decoded.byteCount;
+    if (totalBytes > MAX_PROMPT_ATTACHMENT_TOTAL_BYTES) {
+      throw new Error(`attachments exceed ${MAX_PROMPT_ATTACHMENT_TOTAL_BYTES} aggregate bytes`);
+    }
+    return { id, name, mimeType, data: decoded.data, byteCount: decoded.byteCount };
+  });
+}
+
+function promptDisplayText(prompt: string, attachments: PromptAttachment[]): string {
+  const labels = attachments.map((attachment) => `[Image: ${attachment.name}]`);
+  return [prompt, ...labels].filter(Boolean).join("\n");
+}
+
+function promptAttachmentsSupported(adapter: Adapter, attachments: PromptAttachment[]): boolean {
+  return attachments.length === 0 || adapter.capabilities?.imageAttachments === true;
+}
+
+function sendPrompt(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[] = [],
+  canAdmit?: () => boolean,
+): Promise<void> {
+  if (!promptAttachmentsSupported(sess.adapter, attachments)) {
+    return Promise.reject(new Error(`${providerDisplayLabel(sess.provider)} does not support image prompts`));
+  }
   delete sess.internal.userStopped;
+  const displayText = promptDisplayText(prompt, attachments);
   const activeGeneration = activeAttributionGeneration(sess);
   if (adapterAttributionMode(sess) === "current-turn" && activeGeneration) {
-    sess.emit({ kind: "user", text: prompt });
-    Promise.resolve((sess.adapter.send as any)(sess, prompt, activeGeneration)).catch((err) => {
+    const onAdmitted = () => sess.emit({ kind: "user", text: displayText });
+    if (sess.adapter.sendWithAdmission) {
+      return sess.adapter.sendWithAdmission(
+        sess,
+        prompt,
+        activeGeneration,
+        attachments,
+        onAdmitted,
+        canAdmit,
+      );
+    }
+    if (canAdmit && !canAdmit()) return Promise.reject(new Error("agent startup cancelled"));
+    onAdmitted();
+    Promise.resolve(sess.adapter.send(sess, prompt, activeGeneration, attachments)).catch((err) => {
       console.error("[agent-chat] send failed", err);
       sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
       sess.emit({ kind: "done", generation: activeGeneration } as any);
       sess.setStatus("idle");
     });
-    return;
+    return Promise.resolve();
   }
   const generation = Number(sess.internal.turnGeneration ?? 0) + 1;
-  sess.internal.turnGeneration = generation;
-  beginAttributionTurn(sess, generation);
-  const baselines = turnBaselines(sess);
-  const baseline = captureDirtyBaseline(sess.cwd, TURN_BASELINE_TIMEOUT_MS).catch((err) => ({
-    files: new Map<string, DirtyPathState>(),
-    failed: String(err instanceof Error ? err.message : err),
-  }));
-  baselines.set(generation, baseline);
-  pruneTurnBaselines(baselines);
-  sess.emit({ kind: "user", text: prompt });
+  const onAdmitted = () => {
+    sess.internal.turnGeneration = generation;
+    beginAttributionTurn(sess, generation);
+    const baselines = turnBaselines(sess);
+    const baseline = captureDirtyBaseline(sess.cwd, TURN_BASELINE_TIMEOUT_MS).catch((err) => ({
+      files: new Map<string, DirtyPathState>(),
+      failed: String(err instanceof Error ? err.message : err),
+    }));
+    baselines.set(generation, baseline);
+    pruneTurnBaselines(baselines);
+    sess.emit({ kind: "user", text: displayText });
+  };
+  if (sess.adapter.sendWithAdmission) {
+    return sess.adapter.sendWithAdmission(
+      sess,
+      prompt,
+      generation,
+      attachments,
+      onAdmitted,
+      canAdmit,
+    );
+  }
+  if (canAdmit && !canAdmit()) return Promise.reject(new Error("agent startup cancelled"));
+  onAdmitted();
   // Conscious tradeoff: the prompt dispatches IMMEDIATELY and the baseline
   // captures concurrently. Gating send on capture cost up to ~3.5s per
   // message in large dirty repos (the primary chat path); the price of not
   // gating is that files the agent edits within the capture window may be
   // absorbed into the baseline and omitted from the cosmetic files-changed
   // block. Turn completion still awaits the stored baseline promise.
-  Promise.resolve((sess.adapter.send as any)(sess, prompt, generation)).catch((err) => {
+  Promise.resolve(sess.adapter.send(sess, prompt, generation, attachments)).catch((err) => {
     console.error("[agent-chat] send failed", err);
     if (isAgentCancellationError(err)) sess.emit({ kind: "status", text: "Stopped" });
     else sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
@@ -936,6 +1176,7 @@ function sendPrompt(sess: Session, prompt: string) {
     sess.emit({ kind: "done", generation } as any);
     sess.setStatus("idle");
   });
+  return Promise.resolve();
 }
 
 function refreshSession(sess: Session) {
@@ -1628,8 +1869,38 @@ export function emitDoneAfterFilesForTest(sess: Session, evt: Extract<AgentEvent
   emitDoneAfterFiles(sess, evt);
 }
 
-export function sendPromptForTest(sess: Session, prompt: string) {
-  sendPrompt(sess, prompt);
+export function sendPromptForTest(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[] = [],
+): Promise<void> {
+  return sendPrompt(sess, prompt, attachments);
+}
+
+export function parsePromptAttachmentsForTest(value: unknown): PromptAttachment[] {
+  return parsePromptAttachments(value);
+}
+
+export function promptDisplayTextForTest(prompt: string, attachments: PromptAttachment[]): string {
+  return promptDisplayText(prompt, attachments);
+}
+
+export function promptAttachmentsSupportedForTest(adapter: Adapter, attachments: PromptAttachment[]): boolean {
+  return promptAttachmentsSupported(adapter, attachments);
+}
+
+export function sessionPersistenceEnabledForTest(
+  sess: Pick<Session, "headless" | "internal">,
+): boolean {
+  return sessionPersistenceEnabled(sess);
+}
+
+export async function admitAndSendPromptForTest(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[],
+): Promise<void> {
+  await admitAndSendPrompt(sess, prompt, attachments);
 }
 
 async function emitFilesChanged(sess: Session, timeoutMs = GIT_TIMEOUT_MS) {
@@ -2274,17 +2545,18 @@ async function startServer() {
       const provider = String(body.provider ?? DEFAULT_PROVIDER);
       const prompt = String(body.prompt ?? "").trim();
       const requestedCwd = String(body.cwd || defaultCwd);
-      let sess: Session;
+      let sess: Session | undefined;
       try {
         const start = resolveSessionStart(provider, body.autoApprove);
         const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
         sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
+        refreshSession(sess);
+        if (prompt) await sendPrompt(sess, prompt);
       } catch (err) {
+        if (sess) await retireSession(sess).catch(() => {});
         return Response.json({ error: String(err) }, { status: 400 });
       }
-      refreshSession(sess);
-      if (prompt) sendPrompt(sess, prompt);
       return Response.json({ id: sess.id, url: `http://127.0.0.1:${server.port}${prefixedPath(`/s/${sess.id}`)}` });
     }
     if (url.pathname === "/api/sessions" && req.method === "GET") {
@@ -2293,6 +2565,7 @@ async function startServer() {
     return new Response(renderPage(url), { headers: { "content-type": "text/html; charset=utf-8" } });
     },
     websocket: {
+      maxPayloadLength: MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES,
       open(ws) {
       ws.data.closed = false;
       allSockets.add(ws);
@@ -2332,7 +2605,10 @@ async function startServer() {
       try {
         handleMessage(ws, msg);
       } catch (err) {
-        sendWsError(ws, String(msg.op ?? ""), err);
+        sendWsErrorDetails(ws, String(msg.op ?? ""), err, {
+          ...(typeof msg.requestId === "string" ? { requestId: msg.requestId } : {}),
+          ...(typeof msg.sessionId === "string" ? { sessionId: msg.sessionId } : {}),
+        });
       }
       },
     },
@@ -2435,57 +2711,113 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "headless-start": {
       const headless = msg.op === "headless-start";
       const prompt = String(msg.prompt ?? "").trim();
-      if (!prompt) return;
+      const attachments = parsePromptAttachments(msg.attachments);
+      if (!prompt && attachments.length === 0) return;
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const requestedCwd = String(msg.cwd || DEFAULT_CWD);
       const provider = headless ? "ouro-boss" : String(msg.provider);
       const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
+      const adapter = adapters.get(provider);
+      if (!adapter) throw new Error(`provider not found: ${provider}`);
+      if (!promptAttachmentsSupported(adapter, attachments)) {
+        throw new Error(`${providerDisplayLabel(provider)} does not support image prompts`);
+      }
       const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
       pruneStartRequests();
       const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
-      const createStart = () => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
+      const createStart = (entry?: StartRequest) => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
         const cwd = await assertCwd(requestedCwd);
         const options = await sanitizeStartOptions(provider, cwd, rawOptions);
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
         return { cwd, options };
-      }).then(({ cwd, options }) => {
+      }).then(async ({ cwd, options }) => {
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
-        const sess = createSession(provider, cwd, start.autoApprove, start.title, options, undefined, headless);
+        const sess = createSession(
+          provider,
+          cwd,
+          start.autoApprove,
+          start.title,
+          options,
+          undefined,
+          headless,
+          headless,
+          requestId,
+        );
+        if (entry) entry.session = sess;
         if (!headless) {
-          refreshSession(sess);
-          sendPrompt(sess, prompt);
+          try {
+            if (!sess.adapter.sendWithAdmission) refreshSession(sess);
+            await sendPrompt(sess, prompt, attachments, () => entry?.cancelled !== true);
+            if (entry?.cancelled) {
+              await sess.adapter.stop(sess);
+              sess.internal.startupCancelled = true;
+            }
+          } catch (error) {
+            if (entry?.cancelled) {
+              if (!entry.retired) registerSession(sess);
+              sess.internal.startupCancelled = true;
+              return sess;
+            }
+            sess.adapter.dispose(sess);
+            throw error;
+          }
+          if (!entry?.retired) registerSession(sess);
         }
         return sess;
       });
-      const startPromise = existing?.promise ?? createStart();
-      if (!headless && requestId && !existing) {
-        startRequests.set(requestId, { createdAt: Date.now(), promise: startPromise });
+      let startPromise: Promise<Session>;
+      if (existing) {
+        startPromise = existing.promise;
+      } else if (!headless && requestId) {
+        const entry: StartRequest = {
+          createdAt: Date.now(),
+          cancelled: false,
+          promise: Promise.resolve(null as unknown as Session),
+        };
+        startPromise = createStart(entry);
+        entry.promise = startPromise;
+        startRequests.set(requestId, entry);
         startPromise.finally(() => {
-          setTimeout(() => {
-            if (startRequests.get(requestId)?.promise === startPromise) startRequests.delete(requestId);
-          }, START_REQUEST_TTL_MS);
+          if (startRequests.get(requestId)?.promise === startPromise) {
+            entry.settledAt = Date.now();
+          }
         }).catch(() => {});
+      } else {
+        startPromise = createStart();
       }
-      startPromise.then((sess) => {
+      startPromise.then(async (sess) => {
         if (headless && ws.data.closed) {
           disposeHeadlessSession(sess, true);
           throw new Error("headless owner disconnected");
         }
+        if (!headless && requestId && startRequests.get(requestId)?.retired) {
+          const entry = startRequests.get(requestId);
+          if (entry) void retireStartSession(entry);
+          return;
+        }
         subscribe(ws, sess);
         ws.send(JSON.stringify({ kind: "session-created", session: sessionSummary(sess), requestId }));
+        if (sess.internal.startupCancelled === true) {
+          delete sess.internal.startupCancelled;
+          sess.emit({ kind: "status", text: "Stopped" });
+        }
         if (headless) {
           refreshSession(sess);
-          sendPrompt(sess, prompt);
+          try {
+            await sendPrompt(sess, prompt, attachments);
+          } catch (error) {
+            sendWsErrorDetails(ws, "start", error, { provider, requestId });
+            disposeHeadlessSession(sess, false);
+            return;
+          }
         }
-        if (existing) {
-          ws.send(JSON.stringify({
-            kind: "history",
-            sessionId: sess.id,
-            session: sessionSummary(sess),
-            events: sess.events,
-          }));
-        }
+        ws.send(JSON.stringify({
+          kind: "history",
+          sessionId: sess.id,
+          session: sessionSummary(sess),
+          events: sess.events,
+        }));
       }).catch((err) => {
         if (headless && ws.data.closed) return;
         sendWsErrorDetails(ws, "start", err, { provider, requestId });
@@ -2502,14 +2834,45 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "cancel-start": {
       const requestId = String(msg.requestId ?? "");
       const pending = requestId ? startRequests.get(requestId) : undefined;
-      pending?.promise.then((sess) => sess.adapter.stop(sess)).catch(() => {});
+      if (msg.retire === true) {
+        void retireStartRequestById(requestId).then(() => {
+          ws.send(JSON.stringify({ kind: "start-retired", requestId }));
+        }).catch((error) => {
+          sendWsErrorDetails(ws, "cancel-start", error, { requestId });
+        });
+      } else if (pending) {
+        pending.cancelled = true;
+        if (pending.session) {
+          void Promise.resolve(pending.session.adapter.stop(pending.session)).catch(() => {});
+        }
+      }
       break;
     }
     case "send": {
       const sess = sessions.get(String(msg.sessionId));
       const prompt = String(msg.prompt ?? "").trim();
-      if (!sess || !prompt) return;
-      sendPrompt(sess, prompt);
+      const attachments = parsePromptAttachments(msg.attachments);
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+      if (!sess) {
+        sendWsErrorDetails(ws, "send", new Error("session not found"), {
+          requestId,
+          sessionId: String(msg.sessionId ?? ""),
+        });
+        return;
+      }
+      if (!prompt && attachments.length === 0) return;
+      void admitAndSendPrompt(sess, prompt, attachments).then(() => {
+        ws.send(JSON.stringify({
+          kind: "send-accepted",
+          requestId,
+          sessionId: sess.id,
+        }));
+      }).catch((err) => {
+        sendWsErrorDetails(ws, "send", err, {
+          requestId,
+          sessionId: sess.id,
+        });
+      });
       break;
     }
     case "subscribe": {
@@ -2530,7 +2893,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     }
     case "stop": {
       const sess = sessions.get(String(msg.sessionId));
-      sess?.adapter.stop(sess);
+      if (sess) void Promise.resolve(sess.adapter.stop(sess)).catch(() => {});
       break;
     }
     case "set-option": {

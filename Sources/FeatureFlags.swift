@@ -74,7 +74,7 @@ enum OuroWorkbenchProduct {
         guard let script = scripts.first(where: {
             fileManager.isExecutableFile(atPath: $0.path)
         }) else { return nil }
-        return "BUN_BIN=\"$(command -v bun)\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
+        return "BUN_BIN=\"${BUN_BIN:-$(command -v bun)}\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
     }
 
     static var currentAgentChatStartCommand: String? {

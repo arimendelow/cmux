@@ -27,6 +27,7 @@ struct CmuxAgentChatConfigTests {
             sourceFilePath: #filePath
         )
         #expect(command?.contains("/agent-chat/cmux-chat") == true)
+        #expect(command?.contains("BUN_BIN=\"${BUN_BIN:-$(command -v bun)}\"") == true)
     }
 
     @Test func ouroWorkbenchPrefersThePackagedAgentChatRuntime() throws {

@@ -3,7 +3,7 @@ Object.defineProperty(globalThis, "location", {
   value: { pathname: "/" },
 });
 
-const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, pickInitialBossSession, providerSessionTitle, providerStartTimeoutMs, resolveProviderSelection, restoreComposerDraft } = await import("../src/session");
+const { composerDraftKey, consumeOptimisticUserEcho, foldEvent, pickInitialBossSession, promptDisplayText, providerSessionTitle, providerStartTimeoutMs, rememberRetiredId, resolveProviderSelection, restoreComposerDraft, settlePendingReply } = await import("../src/session");
 
 const writes: Record<string, string> = {};
 restoreComposerDraft({ setItem: (key: string, value: string) => { writes[key] = value; } }, "retry this exact prompt");
@@ -30,6 +30,23 @@ if (!consumeOptimisticUserEcho(optimistic, "same") || queueLength() !== 0) {
 }
 if (consumeOptimisticUserEcho(optimistic, "same")) {
   throw new Error("non-optimistic repeated user message should not be suppressed");
+}
+let replyAccepted: boolean | null = null;
+const pendingReplies = new Map([["request-1", (accepted: boolean) => { replyAccepted = accepted; }]]);
+if (!settlePendingReply(pendingReplies, "request-1", false) || replyAccepted !== false || pendingReplies.size !== 0) {
+  throw new Error("correlated send errors must release the pending reply");
+}
+if (settlePendingReply(pendingReplies, "missing", true)) {
+  throw new Error("unknown send acknowledgments must not settle another reply");
+}
+const retiredIds = new Set<string>();
+for (let index = 0; index < 40; index += 1) rememberRetiredId(retiredIds, `request-${index}`);
+if (retiredIds.size !== 32 || retiredIds.has("request-0") || !retiredIds.has("request-39")) {
+  throw new Error(`retired start ids must stay bounded and preserve newest values: ${JSON.stringify([...retiredIds])}`);
+}
+const imageEcho = promptDisplayText("inspect this", [{ name: "screenshot.png" }]);
+if (imageEcho !== "inspect this\n[Image: screenshot.png]") {
+  throw new Error(`image optimistic echo must exactly match the server event: ${imageEcho}`);
 }
 
 const providers = [

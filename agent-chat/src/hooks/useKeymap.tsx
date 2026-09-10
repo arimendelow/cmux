@@ -48,6 +48,7 @@ export function useKeymap({
   ctrlJ,
   inputRef,
   openModel,
+  disabled = false,
 }: {
   options: SessionOption[];
   setOption: (id: string, value: OptionValue) => void;
@@ -60,6 +61,7 @@ export function useKeymap({
   ctrlJ: CtrlJMode;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   openModel: () => void;
+  disabled?: boolean;
 }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -67,6 +69,7 @@ export function useKeymap({
       if (!dispatch) return;
       if (dispatch.kind === "menu") return;
       const action = dispatch.action;
+      if (disabled && action !== "interrupt") return;
       if (action === "help" && e.key === "?" && inputRef.current && inputRef.current.value.trim()) return;
       if (action === "interrupt") {
         if (helpOpen) {
@@ -99,7 +102,7 @@ export function useKeymap({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closePopup, ctrlJ, helpOpen, inputRef, openModel, options, popupOpen, running, setHelpOpen, setOption, stop]);
+  }, [closePopup, ctrlJ, disabled, helpOpen, inputRef, openModel, options, popupOpen, running, setHelpOpen, setOption, stop]);
 }
 
 export function ShortcutOverlay({ provider, options, running, ctrlJ, onClose }: { provider: string; options: SessionOption[]; running: boolean; ctrlJ: CtrlJMode; onClose: () => void }) {

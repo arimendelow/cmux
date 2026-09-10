@@ -77,6 +77,15 @@ export interface CommandEntry {
 export interface ProviderCapabilities {
   options: SessionOption[];
   triggers: CommandTrigger[];
+  imageAttachments?: boolean;
+}
+
+export interface PromptAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  byteCount: number;
 }
 
 export interface SessionActions {
@@ -108,8 +117,25 @@ export interface SessionCtx {
 }
 
 export interface Adapter {
-  send(sess: SessionCtx, prompt: string): void | Promise<void>;
-  stop(sess: SessionCtx): void;
+  preparePromptAttachments?(
+    sess: SessionCtx,
+    attachments: PromptAttachment[],
+  ): void | Promise<void>;
+  sendWithAdmission?(
+    sess: SessionCtx,
+    prompt: string,
+    generation: number | undefined,
+    attachments: PromptAttachment[],
+    onAdmitted: () => void,
+    canAdmit?: () => boolean,
+  ): Promise<void>;
+  send(
+    sess: SessionCtx,
+    prompt: string,
+    generation?: number,
+    attachments?: PromptAttachment[],
+  ): void | Promise<void>;
+  stop(sess: SessionCtx): void | Promise<void>;
   dispose(sess: SessionCtx): void;
   setOption(sess: SessionCtx, id: string, value: OptionValue): Promise<void>;
   refreshOptions?(sess: SessionCtx): Promise<void>;

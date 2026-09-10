@@ -1,4 +1,5 @@
 import {
+  admitAndSendPromptForTest,
   assetCacheStatsForTest,
   buildBundles,
   canonicalizeAllowedRootsForTest,
@@ -14,15 +15,22 @@ import {
   gitOutputWithCodes,
   gitOutputWithCodesResult,
   insertDeferredTurnEvents,
+  MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES,
+  parsePromptAttachmentsForTest,
+  promptAttachmentsSupportedForTest,
+  promptDisplayTextForTest,
   recordFilesChangedForTest,
   recordTurnBaselineForTest,
   rebuildFileDiffAllowlistForTest,
   renderPageForTest,
+  retireStartSessionForTest,
   resolveAllowedRootsForTest,
   resetAssetCachesForTest,
   resolveFileDiffPath,
   sendPromptForTest,
+  sessionPersistenceEnabledForTest,
   stripAuthPrefixForTest,
+  startRequestShouldPruneForTest,
   themeCssVars,
   themeMtimesChangedForTest,
   themeMessageForTest,
@@ -62,6 +70,172 @@ try {
 }
 
 const cwd = "/tmp/agent-chat-path-test";
+const parsedAttachment = parsePromptAttachmentsForTest([{
+  id: "image-1",
+  name: "../screenshot.png",
+  mimeType: "image/png",
+  data: "cG5n",
+}])[0]!;
+assert(parsedAttachment.name === "screenshot.png", "attachment names should be reduced to basenames");
+assert(parsedAttachment.byteCount === 3, "attachment bytes should be decoded and counted");
+assert(parsedAttachment.data === "cG5n", "attachment data should remain canonical base64");
+assert(MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES > 4 * Math.ceil((8 * 1024 * 1024) / 3) * 4, "WebSocket payload must fit four maximum-size base64 images plus request overhead");
+const persistedImagePrompt = promptDisplayTextForTest("inspect this", [parsedAttachment]);
+assert(persistedImagePrompt === "inspect this\n[Image: screenshot.png]", "persisted image prompts should contain only text labels");
+assert(!persistedImagePrompt.includes(parsedAttachment.data), "persisted image prompts must not contain base64");
+assert(promptAttachmentsSupportedForTest({ capabilities: { imageAttachments: true } } as Adapter, [parsedAttachment]), "image-capable adapters should accept images");
+assert(!promptAttachmentsSupportedForTest({} as Adapter, [parsedAttachment]), "non-image adapters must reject images before emitting a user event");
+assert(promptAttachmentsSupportedForTest({} as Adapter, []), "all adapters should accept text-only prompts");
+assert(!sessionPersistenceEnabledForTest({ headless: false, internal: { admissionPending: true } } as any), "unadmitted sessions must not persist provider metadata");
+assert(!sessionPersistenceEnabledForTest({ headless: false, internal: { retired: true } } as any), "retired sessions must not persist provider metadata");
+assert(sessionPersistenceEnabledForTest({ headless: false, internal: {} } as any), "admitted visible sessions should persist provider metadata");
+assert(!startRequestShouldPruneForTest({}, 120_000), "unresolved starts must never be pruned");
+assert(!startRequestShouldPruneForTest({ settledAt: 70_000 }, 120_000), "settled starts stay replayable through the TTL");
+assert(startRequestShouldPruneForTest({ settledAt: 50_000 }, 120_001), "settled starts should prune after the TTL");
+const retirementCounts: Record<"stop" | "dispose" | "invalidate", number> = {
+  stop: 0,
+  dispose: 0,
+  invalidate: 0,
+};
+const retirementCount = (key: keyof typeof retirementCounts): number => retirementCounts[key];
+let releaseRetiredPersistence!: () => void;
+const retiredPersistence = new Promise<void>((resolve) => { releaseRetiredPersistence = resolve; });
+const retiredSocket = { data: { subscribed: "retired-session" } };
+const retiredSession = {
+  id: "retired-session",
+  provider: "test",
+  cwd,
+  title: "retired",
+  autoApprove: false,
+  startOptions: {},
+  status: "running" as SessionStatus,
+  events: [] as AgentEvent[],
+  internal: { persistencePromise: retiredPersistence },
+  adapter: {
+    send() {},
+    stop: async () => { retirementCounts.stop += 1; },
+    dispose: () => { retirementCounts.dispose += 1; },
+    setOption: async () => {},
+  } as Adapter,
+  sockets: new Set([retiredSocket]),
+  createdAt: Date.now(),
+  headless: false,
+  emit() {},
+  setStatus(status: SessionStatus) { this.status = status; },
+  async invalidatePersistedSession() { retirementCounts.invalidate += 1; },
+};
+const retiredEntry = {
+  createdAt: 0,
+  cancelled: true,
+  retired: true,
+  promise: Promise.resolve(retiredSession as any),
+  session: retiredSession as any,
+};
+const retirements = Promise.all([
+  retireStartSessionForTest(retiredEntry as any),
+  retireStartSessionForTest(retiredEntry as any),
+]);
+await Promise.resolve();
+assert(retirementCount("dispose") === 0 && retirementCount("invalidate") === 0, "retirement must wait for in-flight persistence");
+releaseRetiredPersistence();
+await retirements;
+assert(retirementCount("stop") === 1 && retirementCount("dispose") === 1, "retired start cleanup must be idempotent");
+assert(retirementCount("invalidate") === 1, "retired start cleanup must delete persisted session metadata");
+assert(retiredSocket.data.subscribed === null && retiredSession.sockets.size === 0, "retired start cleanup must detach exact socket subscriptions");
+let failedPersistenceInvalidations = 0;
+let failedPersistenceDisposals = 0;
+const failedPersistenceSession = {
+  ...retiredSession,
+  id: "retired-after-persist-failure",
+  internal: { persistencePromise: Promise.reject(new Error("disk full")) },
+  sockets: new Set(),
+  adapter: {
+    ...retiredSession.adapter,
+    stop: async () => {},
+    dispose: () => { failedPersistenceDisposals += 1; },
+  },
+  async invalidatePersistedSession() { failedPersistenceInvalidations += 1; },
+};
+await retireStartSessionForTest({
+  createdAt: 0,
+  cancelled: true,
+  retired: true,
+  promise: Promise.resolve(failedPersistenceSession as any),
+  session: failedPersistenceSession as any,
+} as any);
+assert(failedPersistenceInvalidations === 1 && failedPersistenceDisposals === 1, "persistence write failure must not block durable deletion and teardown");
+const rejectedAdmissionEvents: AgentEvent[] = [];
+const rejectedAdmissionAdapter = {
+  capabilities: { options: [], triggers: [], imageAttachments: true },
+  sendWithAdmission: async () => { throw new Error("negotiated image support unavailable"); },
+  send: async () => { throw new Error("send should not run"); },
+  stop() {},
+  dispose() {},
+  setOption: async () => {},
+} as Adapter;
+const rejectedAdmissionSession = {
+  id: "rejected-admission",
+  provider: "test",
+  cwd,
+  title: "rejected admission",
+  autoApprove: false,
+  startOptions: {},
+  status: "idle" as SessionStatus,
+  events: rejectedAdmissionEvents,
+  internal: {},
+  adapter: rejectedAdmissionAdapter,
+  sockets: new Set(),
+  createdAt: Date.now(),
+  headless: false,
+  emit(evt: AgentEvent) { rejectedAdmissionEvents.push(evt); },
+  setStatus(status: SessionStatus) { this.status = status; },
+};
+let negotiatedAdmissionRejected = false;
+try {
+  await admitAndSendPromptForTest(rejectedAdmissionSession as any, "inspect", [parsedAttachment]);
+} catch {
+  negotiatedAdmissionRejected = true;
+}
+assert(negotiatedAdmissionRejected, "negotiated image admission should reject unsupported replies");
+assert(!rejectedAdmissionEvents.some((event) => event.kind === "user"), "rejected image admission must not record a false user turn");
+let invalidAttachmentRejected = false;
+try {
+  parsePromptAttachmentsForTest([{
+    id: "image-1",
+    name: "document.pdf",
+    mimeType: "application/pdf",
+    data: "cGRm",
+  }]);
+} catch {
+  invalidAttachmentRejected = true;
+}
+assert(invalidAttachmentRejected, "unsupported prompt attachment MIME types should be rejected");
+for (const data of ["A", "Zh==", " cG5n", "cG5n\n"]) {
+  let malformedRejected = false;
+  try {
+    parsePromptAttachmentsForTest([{
+      id: "image-1",
+      name: "screenshot.png",
+      mimeType: "image/png",
+      data,
+    }]);
+  } catch {
+    malformedRejected = true;
+  }
+  assert(malformedRejected, `non-canonical base64 should be rejected: ${JSON.stringify(data)}`);
+}
+let oversizedAttachmentRejected = false;
+try {
+  parsePromptAttachmentsForTest([{
+    id: "image-1",
+    name: "huge.png",
+    mimeType: "image/png",
+    data: "AAAA".repeat(Math.ceil((8 * 1024 * 1024 + 1) / 3)),
+  }]);
+} catch {
+  oversizedAttachmentRejected = true;
+}
+assert(oversizedAttachmentRejected, "oversized base64 should be rejected before decoding");
 assert(stripAuthPrefixForTest("/secret/app.js", "secret") === "/app.js", "token-prefixed route should be accepted and stripped");
 assert(stripAuthPrefixForTest("/secret", "secret") === "/", "bare token route should map to app root");
 assert(stripAuthPrefixForTest("/wrong/app.js", "secret") === null, "wrong token route should be hidden");

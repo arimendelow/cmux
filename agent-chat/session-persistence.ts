@@ -11,6 +11,7 @@ export interface PersistedAgentChatSession {
   autoApprove: boolean;
   startOptions: Record<string, OptionValue>;
   createdAt: number;
+  startRequestId?: string;
 }
 
 const sessionIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -34,6 +35,12 @@ function parseRecord(value: unknown): PersistedAgentChatSession {
   const cwd = requiredString(raw.cwd, "cwd");
   if (!isAbsolute(cwd)) throw new Error("cwd must be absolute");
   const title = requiredString(raw.title, "title");
+  const startRequestId = raw.startRequestId === undefined
+    ? undefined
+    : requiredString(raw.startRequestId, "startRequestId");
+  if (startRequestId && !sessionIdPattern.test(startRequestId)) {
+    throw new Error(`invalid startRequestId: ${startRequestId}`);
+  }
   if (typeof raw.autoApprove !== "boolean") throw new Error("autoApprove must be boolean");
   if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) throw new Error("createdAt must be finite");
   if (!raw.startOptions || typeof raw.startOptions !== "object" || Array.isArray(raw.startOptions)) {
@@ -56,6 +63,7 @@ function parseRecord(value: unknown): PersistedAgentChatSession {
     autoApprove: raw.autoApprove,
     startOptions,
     createdAt: raw.createdAt,
+    ...(startRequestId ? { startRequestId } : {}),
   };
 }
 
