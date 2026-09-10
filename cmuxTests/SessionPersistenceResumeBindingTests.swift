@@ -99,25 +99,25 @@ import Testing
     @Test func launcherOwnedRestoreUsesTheExactTrustedLauncherCommand() throws {
         let sessionId = "a22293b7-bcef-4707-8439-2f538c8517a4"
         let command = [
-            "/Users/op/.config/agency/CurrentVersion/agency",
+            "/Users/op/.config/launcher/CurrentVersion/launcher",
             "cp",
             "-a",
-            "ms-desk:worker",
+            "example:worker",
             "--",
             "--allow-all",
             "--resume=\(sessionId)",
         ]
         let binding = SurfaceResumeBindingSnapshot(
-            name: "ms-desk:worker",
+            name: "example:worker",
             kind: "copilot",
             command: command.map(SurfaceResumeCommandCanonicalizer.shellQuoted).joined(separator: " "),
-            cwd: "/Users/op/ms-desk",
+            cwd: "/Users/op/workspace",
             checkpointId: sessionId,
-            source: "ms-desk-agency-hook",
+            source: "private-launcher-hook",
             launchCommand: AgentLaunchCommandSnapshot(
                 executablePath: command[0],
                 arguments: command,
-                workingDirectory: "/Users/op/ms-desk",
+                workingDirectory: "/Users/op/workspace",
                 source: "cli"
             ),
             autoResume: true,
@@ -128,9 +128,9 @@ import Testing
 
         let startupInput = try #require(binding.restoreStartupInput())
 
-        #expect(startupInput.contains("agency"))
+        #expect(startupInput.contains("launcher"))
         #expect(startupInput.contains("cp"))
-        #expect(startupInput.contains("ms-desk:worker"))
+        #expect(startupInput.contains("example:worker"))
         #expect(startupInput.contains("--resume=\(sessionId)"))
         #expect(!startupInput.contains("cmux restore copilot"))
     }

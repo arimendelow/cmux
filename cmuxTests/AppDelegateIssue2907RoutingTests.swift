@@ -1158,10 +1158,10 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         let panelId = try XCTUnwrap(workspace.focusedPanelId)
         let sessionID = UUID().uuidString.lowercased()
         let arguments = [
-            "/Users/op/.config/agency/CurrentVersion/agency",
+            "/Users/op/.config/launcher/CurrentVersion/launcher",
             "cp",
             "-a",
-            "ms-desk:worker",
+            "example:worker",
             "--",
             "--allow-all",
             "--resume=\(sessionID)",
@@ -1169,18 +1169,18 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         let launch = AgentLaunchCommandSnapshot(
             executablePath: arguments[0],
             arguments: arguments,
-            workingDirectory: "/Users/op/ms-desk",
+            workingDirectory: "/Users/op/workspace",
             source: "cli"
         )
         XCTAssertTrue(workspace.setSurfaceResumeBinding(
             SurfaceResumeBindingSnapshot(
-                name: "ms-desk:worker",
+                name: "example:worker",
                 kind: "copilot",
                 command: arguments.map(SurfaceResumeCommandCanonicalizer.shellQuoted)
                     .joined(separator: " "),
-                cwd: "/Users/op/ms-desk",
+                cwd: "/Users/op/workspace",
                 checkpointId: sessionID,
-                source: "ms-desk-agency-hook",
+                source: "private-launcher-hook",
                 launchCommand: launch,
                 autoResume: true,
                 workbenchAuthority: .controlledHere,
@@ -1193,7 +1193,7 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
             SessionRestorableAgentSnapshot(
                 kind: .copilot,
                 sessionId: sessionID,
-                workingDirectory: "/Users/op/ms-desk",
+                workingDirectory: "/Users/op/workspace",
                 launchCommand: launch,
                 workbenchAuthority: .controlledHere
             )
@@ -1212,7 +1212,7 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         XCTAssertEqual(restoreRecord["prepared_arguments"] as? [String], arguments)
         XCTAssertEqual(
             restoreRecord["prepared_arguments_working_directory"] as? String,
-            "/Users/op/ms-desk"
+            "/Users/op/workspace"
         )
     }
 

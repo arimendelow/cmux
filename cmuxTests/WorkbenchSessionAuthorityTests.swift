@@ -2370,14 +2370,14 @@ struct WorkbenchSessionAuthorityTests {
         let sessionID = "trusted-refresh-session"
         let current = SurfaceResumeBindingSnapshot(
             kind: "copilot",
-            command: "cd -- '/tmp/old' 2>/dev/null || [ ! -d '/tmp/old' ] && /opt/agency copilot",
+            command: "cd -- '/tmp/old' 2>/dev/null || [ ! -d '/tmp/old' ] && /opt/session-launcher copilot",
             cwd: "/tmp/old",
             checkpointId: sessionID,
             source: "agent-hook",
             launchCommand: AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/opt/agency",
-                arguments: ["/opt/agency", "copilot"],
+                launcher: "session-launcher",
+                executablePath: "/opt/session-launcher",
+                arguments: ["/opt/session-launcher", "copilot"],
                 workingDirectory: "/tmp/old"
             ),
             workbenchAuthority: .controlledHere
@@ -2402,7 +2402,7 @@ struct WorkbenchSessionAuthorityTests {
         #expect(refreshed.cwd == "/tmp/new")
         #expect(refreshed.command.contains("/tmp/new"))
         #expect(!refreshed.command.contains("/tmp/old"))
-        #expect(refreshed.command.contains("/opt/agency"))
+        #expect(refreshed.command.contains("/opt/session-launcher"))
         #expect(!refreshed.command.contains("external-wrapper"))
         #expect(refreshed.launchCommand?.workingDirectory == "/tmp/new")
         #expect(refreshed.permissionMode == "acceptEdits")

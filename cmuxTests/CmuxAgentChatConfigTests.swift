@@ -55,7 +55,7 @@ struct CmuxAgentChatConfigTests {
         #expect(command?.contains("/missing/agent-chat") == false)
     }
 
-    @Test func ouroWorkbenchInstallsCopilotHooksBesideAgencyHooks() throws {
+    @Test func ouroWorkbenchInstallsCopilotHooksBesideExistingHooks() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("workbench-copilot-hooks-\(UUID().uuidString)")
@@ -65,7 +65,7 @@ struct CmuxAgentChatConfigTests {
         let cli = bundle.appendingPathComponent("Contents/Resources/bin/cmux")
         let copilot = home.appendingPathComponent(".copilot-cli/1.0.82/copilot")
         let hooks = home.appendingPathComponent(".copilot/hooks")
-        let agencyHook = hooks.appendingPathComponent("agency.json")
+        let existingHook = hooks.appendingPathComponent("existing.json")
         let cmuxHook = hooks.appendingPathComponent("cmux.json")
         try fileManager.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: copilot.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -74,7 +74,7 @@ struct CmuxAgentChatConfigTests {
         #expect(fileManager.createFile(atPath: copilot.path, contents: Data()))
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copilot.path)
-        try "agency-hook".write(to: agencyHook, atomically: true, encoding: .utf8)
+        try "existing-hook".write(to: existingHook, atomically: true, encoding: .utf8)
         var calls = 0
 
         let installed = OuroWorkbenchProduct.installCopilotHooksIfNeeded(
@@ -99,7 +99,7 @@ struct CmuxAgentChatConfigTests {
 
         #expect(installed)
         #expect(calls == 1)
-        #expect(try String(contentsOf: agencyHook, encoding: .utf8) == "agency-hook")
+        #expect(try String(contentsOf: existingHook, encoding: .utf8) == "existing-hook")
         #expect(OuroWorkbenchProduct.installCopilotHooksIfNeeded(
             bundleIdentifier: "com.ourostack.workbench.v1",
             homeURL: home,
