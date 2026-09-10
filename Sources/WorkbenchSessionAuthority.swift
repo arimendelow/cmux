@@ -1,4 +1,50 @@
+import CmuxControlSocket
+import Darwin
 import Foundation
+
+enum WorkbenchAuthorityEvidence: String, Codable, Sendable {
+    case inferred
+    case launcherAttested
+    case launcherOwned
+
+    var isVerifiedLauncherEvidence: Bool {
+        self != .inferred
+    }
+}
+
+struct WorkbenchLauncherBindingTarget {
+    let snapshot: SessionRestorableAgentSnapshot
+    let agentProcessIDs: Set<pid_t>
+}
+
+struct WorkbenchLauncherBindingVerifier {
+    let processIsDescendant: (pid_t, pid_t) -> Bool
+
+    func verifiedSnapshot(
+        agentSessionID: String,
+        callerEvidence: ControlCommandCallerEvidence?,
+        target: WorkbenchLauncherBindingTarget?
+    ) -> SessionRestorableAgentSnapshot? {
+        guard let callerEvidence,
+              callerEvidence.hasSameUserID,
+              callerEvidence.hasVerifiedSocketCapability,
+              let callerProcessID = callerEvidence.processID,
+              callerProcessID > 0,
+              let target,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: target.snapshot.kind.rawValue,
+                  lhs: target.snapshot.sessionId,
+                  rhs: agentSessionID
+              ),
+              target.agentProcessIDs.contains(where: {
+                  $0 == callerProcessID ||
+                      processIsDescendant(callerProcessID, $0)
+              }) else {
+            return nil
+        }
+        return target.snapshot
+    }
+}
 
 enum WorkbenchSessionAuthority: String, Sendable {
     case controlledHere
@@ -12,6 +58,10 @@ enum WorkbenchSessionAuthority: String, Sendable {
             ? .unknown
             : .controlledHere
     ) -> WorkbenchSessionAuthority {
+        if binding?.workbenchAuthorityEvidence.isVerifiedLauncherEvidence == true,
+           let authority = binding?.workbenchAuthority {
+            return authority
+        }
         if let authority = agent?.workbenchAuthority ?? binding?.workbenchAuthority {
             return authority
         }
@@ -106,6 +156,27 @@ enum WorkbenchSessionAuthority: String, Sendable {
         observed: SurfaceResumeBindingSnapshot,
         current: SurfaceResumeBindingSnapshot?
     ) -> SurfaceResumeBindingSnapshot {
+        if let current,
+           current.workbenchAuthorityEvidence.isVerifiedLauncherEvidence,
+           current.isSameManagedSession(as: observed) {
+            let refreshedWorkingDirectory = observed.cwd ?? current.cwd
+            let trustedExecution = current.retargetingWorkingDirectory(
+                refreshedWorkingDirectory
+            )
+            var preserved = observed
+            preserved.cwd = refreshedWorkingDirectory
+            preserved.workbenchAuthority = current.workbenchAuthority
+            preserved.workbenchAuthorityEvidence =
+                current.workbenchAuthorityEvidence
+            preserved.launchFlavor = current.launchFlavor
+            preserved.launchCommand = trustedExecution.launchCommand
+            preserved.command = trustedExecution.command
+            preserved.environment = current.environment
+            preserved.approvalPolicy = current.approvalPolicy
+            preserved.approvalRecordId = current.approvalRecordId
+            preserved.autoResume = current.autoResume
+            return preserved
+        }
         guard let current,
               current.workbenchAuthority == .controlledHere,
               current.isSameManagedSession(as: observed) else {
@@ -127,8 +198,30 @@ enum WorkbenchSessionAuthority: String, Sendable {
         return preserved
     }
 
+    static func lowerTrustBindingCannotReplace(
+        current: SurfaceResumeBindingSnapshot?,
+        incoming: SurfaceResumeBindingSnapshot
+    ) -> Bool {
+        current?.workbenchAuthorityEvidence.isVerifiedLauncherEvidence == true &&
+            !incoming.workbenchAuthorityEvidence.isVerifiedLauncherEvidence
+    }
+
     func allowsLocalAutoResume(globalEnabled: Bool, wasRunning: Bool) -> Bool {
         globalEnabled && wasRunning && self == .controlledHere
+    }
+
+}
+
+extension ControlSurfaceResumeAuthority {
+    var workbenchAuthority: WorkbenchSessionAuthority {
+        switch self {
+        case .local:
+            .controlledHere
+        case .external:
+            .controlledExternally
+        case .unknown:
+            .unknown
+        }
     }
 }
 

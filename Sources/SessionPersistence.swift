@@ -264,6 +264,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name, kind, command, cwd, checkpointId, source
         case environment, autoResume, approvalPolicy, approvalRecordId, workbenchAuthority
+        case workbenchAuthorityEvidence
         case launchCommand, permissionMode, launchFlavor, updatedAt
     }
 
@@ -280,6 +281,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     var approvalPolicy: SurfaceResumeApprovalPolicy?
     var approvalRecordId: String?
     var workbenchAuthority: WorkbenchSessionAuthority?
+    var workbenchAuthorityEvidence: WorkbenchAuthorityEvidence
     var launchFlavor: SurfaceResumeLaunchFlavor
     /// Whether decoding observed a legacy binding without an execution location.
     private(set) var wasDecodedWithoutLaunchFlavor = false
@@ -299,6 +301,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         approvalPolicy: SurfaceResumeApprovalPolicy? = nil,
         approvalRecordId: String? = nil,
         workbenchAuthority: WorkbenchSessionAuthority? = nil,
+        workbenchAuthorityEvidence: WorkbenchAuthorityEvidence = .inferred,
         launchFlavor: SurfaceResumeLaunchFlavor = .local,
         updatedAt: TimeInterval = Date().timeIntervalSince1970
     ) {
@@ -322,6 +325,7 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
         self.approvalPolicy = approvalPolicy
         self.approvalRecordId = Self.normalized(approvalRecordId)
         self.workbenchAuthority = workbenchAuthority
+        self.workbenchAuthorityEvidence = workbenchAuthorityEvidence
         self.launchFlavor = launchFlavor
         self.updatedAt = updatedAt
     }
@@ -349,6 +353,10 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
                 WorkbenchSessionAuthority.self,
                 forKey: .workbenchAuthority
             ),
+            workbenchAuthorityEvidence: try container.decodeIfPresent(
+                WorkbenchAuthorityEvidence.self,
+                forKey: .workbenchAuthorityEvidence
+            ) ?? .inferred,
             launchFlavor: decodedLaunchFlavor ?? .local,
             updatedAt: try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt)
                 ?? Date().timeIntervalSince1970
@@ -361,7 +369,8 @@ struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
     }
 
     var isAgentHookBinding: Bool {
-        source == "agent-hook"
+        source == "agent-hook" ||
+            workbenchAuthorityEvidence.isVerifiedLauncherEvidence
     }
 
     var isCLIBinding: Bool {

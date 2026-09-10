@@ -15,7 +15,10 @@ extension ControlCommandCoordinator {
     ///
     /// - Parameter request: The decoded request envelope.
     /// - Returns: The command result, or `nil` if not a surface method.
-    func handleSurface(_ request: ControlRequest) -> ControlCallResult? {
+    func handleSurface(
+        _ request: ControlRequest,
+        callerEvidence: ControlCommandCallerEvidence?
+    ) -> ControlCallResult? {
         switch request.method {
         case "surface.list":
             // Worker-lane resolution read (tranche D): the nonisolated body is
@@ -43,7 +46,7 @@ extension ControlCommandCoordinator {
         case "surface.health":
             return surfaceHealth(request.params)
         case "surface.resume.set":
-            return surfaceResumeSet(request.params)
+            return surfaceResumeSet(request.params, callerEvidence: callerEvidence)
         case "surface.resume.get":
             return surfaceResumeGet(request.params)
         case "surface.resume.clear":

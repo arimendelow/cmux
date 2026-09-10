@@ -5425,6 +5425,12 @@ final class Workspace: Identifiable, ObservableObject {
         }
         let previousEffectiveBinding = surfaceResumeBindingsByPanelId[panelId]
         let previousManagedBinding = managedAgentResumeBinding(panelId: panelId)
+        guard !WorkbenchSessionAuthority.lowerTrustBindingCannotReplace(
+            current: previousManagedBinding ?? previousEffectiveBinding,
+            incoming: binding
+        ) else {
+            return false
+        }
         invalidateRestoredAgentLifecycleIfBindingIsReplaced(
             by: binding,
             panelId: panelId

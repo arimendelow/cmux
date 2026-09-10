@@ -33,16 +33,75 @@ extension ControlCommandCoordinator {
     // MARK: - resume.set
 
     /// `surface.resume.set` — set (and run the approval flow for) a resume binding.
-    func surfaceResumeSet(_ params: [String: JSONValue]) -> ControlCallResult {
+    func surfaceResumeSet(
+        _ params: [String: JSONValue],
+        callerEvidence: ControlCommandCallerEvidence?
+    ) -> ControlCallResult {
         if let error = surfaceResumeTargetValidationError(params) { return error }
+        let callerTrustFields = [
+            "rank",
+            "priority",
+            "trusted",
+            "launcher_owned",
+            "launcherOwned",
+            "approve",
+            "approved",
+            "auto_approve",
+            "autoApprove",
+        ]
+        if let forbidden = callerTrustFields.first(where: { params[$0] != nil }) {
+            return .err(
+                code: "invalid_params",
+                message: "\(forbidden) is derived by Workbench and must not be sent",
+                data: nil
+            )
+        }
         let routing = routingSelectors(params)
         guard context?.controlSurfaceRoutingResolvesTabManager(routing: routing) ?? false else {
             return .err(code: "unavailable", message: Self.surfaceWindowUnavailableMessage, data: nil)
         }
-        guard let command = rawString(params, "command")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !command.isEmpty else {
-            return .err(code: "invalid_params", message: "Missing command", data: nil)
+        let agentSessionID = optionalTrimmedRawString(params, "agent_session_id")
+            ?? optionalTrimmedRawString(params, "agentSessionId")
+        let authorityRaw = optionalTrimmedRawString(params, "authority")
+        let authority = authorityRaw.flatMap(ControlSurfaceResumeAuthority.init(rawValue:))
+        if (agentSessionID == nil) != (authorityRaw == nil) {
+            return .err(
+                code: "invalid_params",
+                message: "agent_session_id and authority must be provided together",
+                data: nil
+            )
+        }
+        if authorityRaw != nil, authority == nil {
+            return .err(
+                code: "invalid_params",
+                message: "authority must be local, external, or unknown",
+                data: nil
+            )
+        }
+
+        let rawCommand = rawString(params, "command")
+        let command = rawCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nonEmptyCommand = command.flatMap { $0.isEmpty ? nil : $0 }
+        switch authority {
+        case .local, nil:
+            guard nonEmptyCommand != nil else {
+                return .err(code: "invalid_params", message: "Missing command", data: nil)
+            }
+        case .external, .unknown:
+            guard rawCommand == nil else {
+                return .err(
+                    code: "invalid_params",
+                    message: "Non-local authority must not include a command",
+                    data: nil
+                )
+            }
+            if hasNonNull(params, "launch_command") {
+                return .err(
+                    code: "invalid_params",
+                    message: "Non-local authority must not include launch_command",
+                    data: nil
+                )
+            }
         }
 
         let source = publicResumeSource(params)
@@ -74,17 +133,20 @@ extension ControlCommandCoordinator {
         let inputs = ControlSurfaceResumeSetInputs(
             name: optionalTrimmedRawString(params, "name"),
             kind: optionalTrimmedRawString(params, "kind"),
-            command: command,
+            command: nonEmptyCommand,
             cwd: optionalTrimmedRawString(params, "cwd"),
             checkpointID: optionalTrimmedRawString(params, "checkpoint_id")
                 ?? optionalTrimmedRawString(params, "checkpointId"),
+            agentSessionID: agentSessionID,
+            authority: authority,
             source: source,
             environment: stringMap(params, "environment"),
             launchCommand: launchCommand,
             permissionMode: optionalTrimmedRawString(params, "permission_mode"),
             autoResume: source == "agent-hook" ? (bool(params, "auto_resume") ?? false) : false,
             remoteWorkspaceID: remoteWorkspaceID,
-            remoteRelayParameters: remoteWorkspaceID == nil ? nil : params
+            remoteRelayParameters: remoteWorkspaceID == nil ? nil : params,
+            callerEvidence: callerEvidence
         )
         return surfaceResumeResult(
             context?.controlSurfaceResumeSet(
@@ -178,6 +240,12 @@ extension ControlCommandCoordinator {
             return .err(code: "not_found", message: "Surface not found", data: nil)
         case .emptyResumeCommand:
             return .err(code: "invalid_params", message: "Resume command is empty", data: nil)
+        case .authorityRejected:
+            return .err(
+                code: "authority_unverified",
+                message: "Launcher authority could not be verified for the target surface",
+                data: nil
+            )
         case .approvalPending(let message):
             return .err(
                 code: "busy",

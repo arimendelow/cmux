@@ -16,6 +16,8 @@ public enum ControlSurfaceResumeResolution: Sendable, Equatable {
     /// `resume.set` rejected an empty resume command (legacy `invalid_params` /
     /// "Resume command is empty").
     case emptyResumeCommand
+    /// The caller could not prove control of the named live agent session.
+    case authorityRejected
     /// Approval data is still loading, so the caller should retry without
     /// treating the request as invalid.
     case approvalPending(message: String)

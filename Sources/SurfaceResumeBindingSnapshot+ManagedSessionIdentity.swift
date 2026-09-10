@@ -70,7 +70,7 @@ extension SurfaceResumeBindingSnapshot {
     }
 
     private var managedSessionIdentity: (kind: String, checkpointId: String)? {
-        guard source == "agent-hook",
+        guard isAgentHookBinding,
               let kind = kind?.trimmingCharacters(in: .whitespacesAndNewlines),
               !kind.isEmpty,
               let checkpointId = checkpointId?.trimmingCharacters(in: .whitespacesAndNewlines),

@@ -72,6 +72,93 @@ enum ControlSurfaceResumeTarget {
         }
     }
 
+    func launcherBindingTarget(
+        agentSessionID: String
+    ) -> WorkbenchLauncherBindingTarget? {
+        func matches(_ snapshot: SessionRestorableAgentSnapshot?) -> Bool {
+            guard let snapshot else { return false }
+            return ManagedAgentSessionIdentity.sessionIDsMatch(
+                kind: snapshot.kind.rawValue,
+                lhs: snapshot.sessionId,
+                rhs: agentSessionID
+            )
+        }
+
+        let cachedEntry = SharedLiveAgentIndex.shared.index?.entry(
+            workspaceId: workspaceID,
+            panelId: surfaceID
+        )
+        let managedSnapshot: SessionRestorableAgentSnapshot? =
+            managedBinding.flatMap { binding -> SessionRestorableAgentSnapshot? in
+            guard let rawKind = binding.kind,
+                  let kind = RestorableAgentKind(rawValue: rawKind),
+                  let sessionID = binding.checkpointId else {
+                return nil
+            }
+            return SessionRestorableAgentSnapshot(
+                kind: kind,
+                sessionId: sessionID,
+                workingDirectory: binding.cwd,
+                launchCommand: binding.launchCommand,
+                permissionMode: binding.permissionMode,
+                workbenchAuthority: binding.workbenchAuthority
+            )
+        }
+        let inMemorySnapshot = [
+            cachedEntry?.snapshot,
+            restorableAgent,
+            managedSnapshot,
+        ].compactMap { $0 }.first(where: matches)
+        let freshEntry = inMemorySnapshot == nil
+            ? ProcessDetectedResumeIndexes.loadSynchronously(
+                maximumSnapshotAge: 0
+            ).restorableAgentIndex.entry(
+                workspaceId: workspaceID,
+                panelId: surfaceID
+            )
+            : nil
+        let indexedEntry = matches(cachedEntry?.snapshot)
+            ? cachedEntry
+            : freshEntry
+        let snapshot = inMemorySnapshot ?? freshEntry?.snapshot
+        guard let snapshot else { return nil }
+
+        var processIDs = Set((indexedEntry?.agentProcessIDs ?? []).compactMap {
+            pid_t(exactly: $0)
+        })
+        switch self {
+        case .workspace(_, let workspace, let surfaceID):
+            for key in workspace.agentPIDKeysByPanelId[surfaceID] ?? [] {
+                guard let processID = workspace.agentPIDs[key],
+                      processID > 0,
+                      let recordedIdentity =
+                        workspace.agentPIDProcessIdentitiesByKey[key],
+                      Workspace.agentPIDProcessIdentity(pid: processID) ==
+                        recordedIdentity else {
+                    continue
+                }
+                processIDs.insert(processID)
+            }
+        case .dock(_, let dock, let surfaceID):
+            let runtime = dock.agentRuntimeByPanelId[surfaceID]
+            for (key, processID) in runtime?.agentPIDs ?? [:] {
+                guard processID > 0,
+                      let recordedIdentity =
+                        runtime?.agentPIDProcessIdentities[key],
+                      Workspace.agentPIDProcessIdentity(pid: processID) ==
+                        recordedIdentity else {
+                    continue
+                }
+                processIDs.insert(processID)
+            }
+        }
+        guard !processIDs.isEmpty else { return nil }
+        return WorkbenchLauncherBindingTarget(
+            snapshot: snapshot,
+            agentProcessIDs: processIDs
+        )
+    }
+
     func restoreWorkingDirectory(
         binding: SurfaceResumeBindingSnapshot?,
         agent: SessionRestorableAgentSnapshot?
@@ -152,10 +239,19 @@ enum ControlSurfaceResumeTarget {
         agentSessionEnded: Bool
     ) -> SurfaceResumeBindingSnapshot? {
         if agentSessionEnded {
-            return managedBinding ?? binding
+            let candidate = managedBinding ?? binding
+            return candidate?.workbenchAuthorityEvidence
+                .isVerifiedLauncherEvidence == true
+                ? nil
+                : candidate
         }
         if expectedCheckpointID != nil || expectedSource != nil {
             func matches(_ candidate: SurfaceResumeBindingSnapshot) -> Bool {
+                if expectedSource != nil,
+                   candidate.workbenchAuthorityEvidence
+                    .isVerifiedLauncherEvidence {
+                    return false
+                }
                 let matchesCheckpoint =
                     expectedCheckpointID == nil ||
                     checkpointMatches(
@@ -182,6 +278,56 @@ enum ControlSurfaceResumeTarget {
             return nil
         }
         return binding
+    }
+
+    @discardableResult
+    func applyAuthorityAttestation(
+        _ authority: WorkbenchSessionAuthority,
+        evidence: WorkbenchAuthorityEvidence,
+        snapshot: SessionRestorableAgentSnapshot
+    ) -> Bool {
+        func attested(
+            _ binding: SurfaceResumeBindingSnapshot?
+        ) -> SurfaceResumeBindingSnapshot? {
+            guard var binding,
+                  let kind = binding.kind,
+                  let checkpointID = binding.checkpointId,
+                  kind == snapshot.kind.rawValue,
+                  ManagedAgentSessionIdentity.sessionIDsMatch(
+                      kind: kind,
+                      lhs: checkpointID,
+                      rhs: snapshot.sessionId
+                  ) else {
+                return binding
+            }
+            binding.workbenchAuthority = authority
+            binding.workbenchAuthorityEvidence = evidence
+            return binding
+        }
+
+        var updatedSnapshot = snapshot
+        updatedSnapshot.workbenchAuthority = authority
+        switch self {
+        case .workspace(_, let workspace, let surfaceID):
+            workspace.restoredAgentSnapshotsByPanelId[surfaceID] =
+                updatedSnapshot
+            workspace.surfaceResumeBindingsByPanelId[surfaceID] =
+                attested(workspace.surfaceResumeBindingsByPanelId[surfaceID])
+            workspace.managedAgentResumeBindingsByPanelId[surfaceID] =
+                attested(
+                    workspace.managedAgentResumeBindingsByPanelId[surfaceID]
+                )
+        case .dock(_, let dock, let surfaceID):
+            dock.restoredAgentLifecycle.snapshotsByPanelId[surfaceID] =
+                updatedSnapshot
+            dock.surfaceResumeBindingsByPanelId[surfaceID] =
+                attested(dock.surfaceResumeBindingsByPanelId[surfaceID])
+            dock.managedAgentResumeBindingsByPanelId[surfaceID] =
+                attested(
+                    dock.managedAgentResumeBindingsByPanelId[surfaceID]
+                )
+        }
+        return true
     }
 
     func checkpointMatches(
@@ -749,12 +895,57 @@ extension TerminalController {
         guard let tabManager = resolveTabManager(routing: routing) else {
             return .windowUnavailable
         }
+        guard let target = resolveSurfaceResumeTarget(
+            routing: routing,
+            explicitTargetID: explicitTargetID,
+            hasResolvedWindowID: hasResolvedWindowID,
+            fallbackTabManager: tabManager
+        ) else {
+            return .surfaceNotFound
+        }
+
+        let verifiedSnapshot: SessionRestorableAgentSnapshot?
+        if let authority = inputs.authority,
+           let agentSessionID = inputs.agentSessionID {
+            verifiedSnapshot = WorkbenchLauncherBindingVerifier(
+                processIsDescendant: {
+                    self.transport.isProcessDescendant($0, of: $1)
+                }
+            ).verifiedSnapshot(
+                agentSessionID: agentSessionID,
+                callerEvidence: inputs.callerEvidence,
+                target: target.launcherBindingTarget(
+                    agentSessionID: agentSessionID
+                )
+            )
+            guard let verifiedSnapshot else {
+                return .authorityRejected
+            }
+            if authority != .local {
+                _ = target.applyAuthorityAttestation(
+                    authority.workbenchAuthority,
+                    evidence: .launcherAttested,
+                    snapshot: verifiedSnapshot
+                )
+                return .result(surfaceResumeSnapshot(
+                    target: target,
+                    binding: target.binding,
+                    cleared: false
+                ))
+            }
+        } else {
+            verifiedSnapshot = nil
+        }
+
+        guard let command = inputs.command else {
+            return .emptyResumeCommand
+        }
         let binding = SurfaceResumeBindingSnapshot(
             name: inputs.name,
-            kind: inputs.kind,
-            command: inputs.command,
+            kind: verifiedSnapshot?.kind.rawValue ?? inputs.kind,
+            command: command,
             cwd: inputs.cwd,
-            checkpointId: inputs.checkpointID,
+            checkpointId: inputs.agentSessionID ?? inputs.checkpointID,
             source: inputs.source,
             environment: inputs.environment,
             launchCommand: inputs.launchCommand.map {
@@ -769,17 +960,13 @@ extension TerminalController {
                 )
             },
             permissionMode: inputs.permissionMode,
-            autoResume: inputs.autoResume,
+            autoResume: verifiedSnapshot == nil ? inputs.autoResume : true,
+            workbenchAuthority: inputs.authority?.workbenchAuthority,
+            workbenchAuthorityEvidence: verifiedSnapshot == nil
+                ? .inferred
+                : .launcherOwned,
             updatedAt: Date.now.timeIntervalSince1970
         )
-        guard let target = resolveSurfaceResumeTarget(
-            routing: routing,
-            explicitTargetID: explicitTargetID,
-            hasResolvedWindowID: hasResolvedWindowID,
-            fallbackTabManager: tabManager
-        ) else {
-            return .surfaceNotFound
-        }
         guard let locatedBinding = target.registeredBinding(binding, inputs: inputs) else {
             return .setFailed
         }
@@ -792,6 +979,14 @@ extension TerminalController {
         }
         guard target.setBinding(effectiveBinding) else {
             return .emptyResumeCommand
+        }
+        if let verifiedSnapshot,
+           let authority = inputs.authority {
+            _ = target.applyAuthorityAttestation(
+                authority.workbenchAuthority,
+                evidence: .launcherOwned,
+                snapshot: verifiedSnapshot
+            )
         }
         return .result(surfaceResumeSnapshot(target: target, binding: effectiveBinding, cleared: false))
     }

@@ -8,6 +8,13 @@ extension DockSplitStore {
               !startupInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
+        guard !WorkbenchSessionAuthority.lowerTrustBindingCannotReplace(
+            current: managedAgentResumeBinding(panelId: panelId)
+                ?? surfaceResumeBindingsByPanelId[panelId],
+            incoming: binding
+        ) else {
+            return false
+        }
         let cachedManagedBinding =
             detachedSurfaceTransfersByPanelId[panelId]?.resolvedManagedAgentResumeBinding
         if binding.isAgentHookBinding,
