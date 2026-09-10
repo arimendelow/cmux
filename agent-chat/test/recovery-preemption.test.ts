@@ -313,6 +313,27 @@ test("running assessment cancellation settles before real Send enters the same B
   } finally { await h.stop(); }
 });
 
+test("automatic assessment is not echoed as user input and Stop still controls the subsequent user turn", async () => {
+  const h = await harness();
+  try {
+    const assessment = await h.prompt();
+    h.send({ op: "user-input" });
+    await h.receipt("cancelling");
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    assessment.finish({ stopReason: "cancelled" });
+    await h.receipt("cancelled");
+    expect(h.messages.all.some((message) => message.evt?.kind === "user")).toBe(false);
+    h.send({ op: "send", sessionId: bossId, requestId: "subsequent-user", prompt: "Follow my request." });
+    const user = await h.prompt(1);
+    h.send({ op: "stop", sessionId: bossId });
+    await h.peers.next((entry) =>
+      entry.message.method === "session/cancel"
+      && h.peers.all.filter((item) => item.message.method === "session/cancel").indexOf(entry) === 1);
+    user.finish({ stopReason: "cancelled" });
+    await h.assertSameBoss();
+  } finally { await h.stop(); }
+});
+
 test("a busy user turn preempts recovery even when native facts arrive later", async () => {
   const h = await harness({ holdNative: true });
   try {
