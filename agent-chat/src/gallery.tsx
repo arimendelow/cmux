@@ -310,6 +310,24 @@ export function GalleryApp() {
               }} />
             </div>
             <div>
+              <div className="gallery-label">Boss after an unclean restart</div>
+              <WorkbenchHeader
+                experience={{
+                  productName: "Ouro Workbench v1",
+                  surfaceName: "Boss",
+                  contextLabel: "Desk / demo-task",
+                  defaultProvider: "ouro-boss",
+                  localAuthorityLabel: "Controlled here",
+                  externalAuthority: { label: "Controlled elsewhere", status: "unknown" },
+                }}
+                continuity={{
+                  appInstanceId: "8f1c2d34-0000-4000-8000-000000000001",
+                  startedAt: "2026-09-09T18:00:00Z",
+                  previousExitClean: false,
+                }}
+              />
+            </div>
+            <div>
               <div className="gallery-label">Blocked Boss recovery</div>
               <BossStatusBanner boss={{
                 status: "blocked",

@@ -143,6 +143,14 @@ button, [role="button"], .menu-item, .model-row, .row-control { cursor: default 
   font: 600 calc(var(--font-size-base) - 4px) var(--font-sans); letter-spacing: .04em; text-transform: uppercase;
 }
 .workbench-header.compact .workbench-scope { margin-top: 0; }
+.workbench-continuity {
+  align-self: flex-start; margin-top: 3px; padding: 1px 7px; border-radius: 999px;
+  color: color-mix(in srgb, var(--amber) 85%, var(--text));
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent);
+  font: 600 calc(var(--font-size-base) - 4px) var(--font-sans);
+}
+.workbench-header.compact .workbench-continuity { margin-top: 0; }
 
 @media (max-width: 560px) {
   .workbench-header { align-items: flex-start; flex-direction: column; gap: 10px; }

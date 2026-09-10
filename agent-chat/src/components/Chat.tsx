@@ -57,7 +57,7 @@ function useStickToBottom(scrollRef: RefObject<HTMLDivElement | null>, stickRef:
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, boss, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, boss, continuity, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff } = useCtx();
   const [text, setText] = useState("");
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -128,7 +128,7 @@ export function Chat() {
 
   return (
     <section id="chat-view" data-image-capability={imageCapability} data-images-allowed={imagesAllowed ? "1" : "0"}>
-      {experience ? <WorkbenchHeader experience={experience} compact /> : null}
+      {experience ? <WorkbenchHeader experience={experience} continuity={continuity} compact /> : null}
       <BossStatusBanner boss={boss} />
       {connection ? (
         <div className="recovery-banner-wrap">

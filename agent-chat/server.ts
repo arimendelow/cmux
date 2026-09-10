@@ -232,6 +232,36 @@ function externalAuthority(config: {
   };
 }
 
+/**
+ * App continuity published by the host. Agent Chat is a consumer only: it
+ * forwards these values unchanged so the Boss surface can preserve a restart
+ * visibly. The world model owns launch identity, restore progress, and
+ * topology; nothing here restates them.
+ */
+export interface AppContinuity {
+  appInstanceId: string;
+  startedAt: string;
+  previousExitClean: boolean;
+}
+
+export function appContinuityFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): AppContinuity | null {
+  const appInstanceId = env.CMUX_WORKBENCH_APP_INSTANCE_ID?.trim() ?? "";
+  if (!appInstanceId) return null;
+  const startedAt = env.CMUX_WORKBENCH_APP_STARTED_AT?.trim() ?? "";
+  const previousExitClean = env.CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN?.trim();
+  return {
+    appInstanceId,
+    startedAt,
+    // Absent or unparsable continuity fails toward "unclean" only when the host
+    // said so explicitly; anything else is treated as clean.
+    previousExitClean: previousExitClean !== "0" && previousExitClean?.toLowerCase() !== "false",
+  };
+}
+
+const APP_CONTINUITY = appContinuityFromEnv();
+
 export function externalAuthorityForTest(config: {
   label?: string;
   url?: string;
@@ -2582,6 +2612,7 @@ async function startServer() {
         pointer: pointerResult.pointer,
         pointerError: pointerResult.error,
         state: bossClientState,
+        continuity: APP_CONTINUITY,
         candidates,
       });
     }
@@ -2663,6 +2694,7 @@ async function startServer() {
         defaultProvider: DEFAULT_PROVIDER,
         experience: WORKBENCH_EXPERIENCE,
         boss: bossClientState,
+        continuity: APP_CONTINUITY,
         keys: keyConfig,
       }));
       ws.send(JSON.stringify({
