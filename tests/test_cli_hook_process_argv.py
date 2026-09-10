@@ -7,7 +7,6 @@ import json
 import os
 import select
 import subprocess
-import sys
 import unittest
 
 
@@ -32,9 +31,9 @@ class HookProcessArgvTests(unittest.TestCase):
         )
 
     def test_preserves_exact_arguments_and_excludes_environment(self) -> None:
-        script = "import sys; print('ready', flush=True); sys.stdin.read()"
+        script = "printf 'ready\\n'; IFS= read -r value"
         arguments = [
-            sys.executable, "-c", script, "",
+            "/bin/sh", "-c", script, "",
             "Explain --allow-all-tools without using tools",
             "--allow-all-tools", "quotes ' \" and \u2603",
         ]
@@ -69,9 +68,9 @@ class HookProcessArgvTests(unittest.TestCase):
         )
 
     def test_invalid_utf8_does_not_return_partial_arguments(self) -> None:
-        script = "import sys; print('ready', flush=True); sys.stdin.read()"
+        script = "printf 'ready\\n'; IFS= read -r value"
         with subprocess.Popen(
-            [sys.executable, "-c", script, b"\xff", "--allow-all-tools"],
+            ["/bin/sh", "-c", script, b"\xff", "--allow-all-tools"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

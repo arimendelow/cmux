@@ -35806,6 +35806,28 @@ export default CMUXSessionRestore;
             print(subcommandUsage("hooks") ?? "Usage: cmux hooks <setup|uninstall|agent>")
             return true
 
+        case "process-argv":
+            // Hidden: launcher hooks need native argv boundaries, not flattened process titles.
+            let requested = commandArgs.dropFirst()
+            guard (1...16).contains(requested.count) else {
+                throw CLIError(message: "invalid_process_ids")
+            }
+            let pids = try requested.map { value -> Int in
+                guard let pid = Int32(value), pid > 0 else {
+                    throw CLIError(message: "invalid_process_ids")
+                }
+                return Int(pid)
+            }
+            let payload: [[String: Any]] = pids.map { pid in
+                guard let identity = sessionsListProcessIdentity(for: pid),
+                      !identity.arguments.isEmpty else {
+                    return ["pid": pid, "argv": NSNull()]
+                }
+                return ["pid": pid, "argv": identity.arguments]
+            }
+            print(jsonString(payload))
+            return true
+
         case "setup":
             try runSetupHooks(
                 uninstall: false,
