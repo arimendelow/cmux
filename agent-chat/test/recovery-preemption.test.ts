@@ -88,6 +88,7 @@ async function harness(options: {
   holdNative?: boolean;
   holdInitialize?: boolean;
   nativeFailure?: boolean;
+  loadFailure?: boolean;
   warm?: boolean;
 } = {}) {
   const scratch = join(import.meta.dir, "../scratch");
@@ -152,7 +153,7 @@ async function harness(options: {
         await initialized.promise;
         entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true } } });
       } else if (message.method === "session/load") {
-        entry.finish({});
+        entry.finish({}, options.loadFailure ? "synthetic saved-session failure" : undefined);
       } else if (message.method !== "session/prompt") {
         entry.finish({});
       }
@@ -384,6 +385,58 @@ test("the real root subscribe path receives recovery even without warm-boss", as
   const h = await harness({ facts: snapshot(), warm: false });
   try {
     await h.receipt("none");
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
+  } finally { await h.stop(); }
+});
+
+test("a clean restore arriving after visible input still reports that no assessment was needed", async () => {
+  const h = await harness({ facts: snapshot("ended"), holdNative: true });
+  try {
+    h.send({ op: "user-input" });
+    await h.barrier();
+    h.releaseNative();
+    const receipt = await h.receipt("none");
+    expect(receipt.unresolved).toEqual([]);
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
+  } finally { await h.stop(); }
+});
+
+test("failed canonical warmup never reports a completed assessment or creates a replacement", async () => {
+  const h = await harness({ loadFailure: true });
+  try {
+    const receipt = await h.receipt("failed");
+    expect(receipt.error).toBe("assessment-failed");
+    expect(receipt.facts).toEqual(snapshot("blocked_unverified"));
+    expect(h.messages.all.some((message) => message.evt?.assessment === "completed")).toBe(false);
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
+    await h.assertSameBoss();
+  } finally { await h.stop(); }
+});
+
+test("facts from another app instance fail closed rather than claiming a clean restore", async () => {
+  const facts = snapshot();
+  facts.topology.app_instance_id = "99999999-9999-4999-8999-999999999999";
+  const h = await harness({ facts });
+  try {
+    const receipt = await h.receipt("failed");
+    expect(receipt.error).toBe("native-unavailable");
+    expect(receipt.facts).toBeNull();
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
+  } finally { await h.stop(); }
+});
+
+test("native event-stream failure keeps the last verified facts and does not retry assessment", async () => {
+  const facts = snapshot("resuming");
+  const h = await harness({ facts });
+  try {
+    await h.receipt("waiting");
+    await h.native.next((request) => Array.isArray(request.stream));
+    h.publish({ type: "error", code: "synthetic_stream_failure" });
+    const receipt = await h.receipt("failed");
+    expect(receipt.error).toBe("native-unavailable");
+    expect(receipt.facts).toEqual(facts);
+    h.send({ op: "warm-boss" });
+    await h.barrier();
     expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
   } finally { await h.stop(); }
 });

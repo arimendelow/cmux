@@ -121,3 +121,24 @@ test("ACP stop waits for prompt settlement, not just the cancellation write", as
   }
   expect(stopped).toBe(true);
 });
+
+test("ACP cancellation-write failure is rejected without claiming the active turn settled", async () => {
+  const adapter = makeAcpAdapter({ id: "cancel-failure", label: "Cancel failure", adapter: "acp" });
+  const session = context("cancel-failure");
+  const turn = Promise.withResolvers<void>();
+  let settled = false;
+  session.internal.acpTurn = turn.promise.then(() => { settled = true; });
+  session.internal.acp = {
+    acpSessionId: "same-session",
+    pendingPermissions: new Map(),
+    pendingElicitations: new Map(),
+    async notify() { throw new Error("synthetic cancellation-write failure"); },
+  };
+  try {
+    await expect(adapter.stop(session)).rejects.toThrow("synthetic cancellation-write failure");
+    expect(settled).toBe(false);
+  } finally {
+    turn.resolve();
+    await session.internal.acpTurn;
+  }
+});
