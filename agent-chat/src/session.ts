@@ -1,6 +1,16 @@
 // Client-side session state: one WebSocket, one session per page.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyThemeVars } from "./theme";
+import type { WorkbenchRestoreReceipt } from "../types";
+
+/** The first visible interaction wins, including drafts and image input before Send. */
+export function observeBossUserInput(target: EventTarget, notify: () => boolean): () => void {
+  const events = ["input", "keydown", "compositionstart", "paste", "drop", "change", "pointerdown"];
+  let delivered = false;
+  const input = () => { if (!delivered) delivered = notify(); };
+  for (const event of events) target.addEventListener(event, input, true);
+  return () => { for (const event of events) target.removeEventListener(event, input, true); };
+}
 
 export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
@@ -13,6 +23,7 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  | WorkbenchRestoreReceipt
   | { kind: "capabilities"; image: ImagePromptCapability }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
@@ -268,6 +279,7 @@ export interface SessionState {
   actionsAllowed: WorkbenchActionAvailability;
   connection: ConnectionState | null;
   recovery: RecoveryState | null;
+  restore: WorkbenchRestoreReceipt | null;
   ctrlJ: CtrlJMode;
   phase: "composer" | "chat";
   session: SessionSummary | null;
@@ -466,6 +478,7 @@ export function useSession(): SessionState {
   const [imageCapability, setImageCapability] = useState<ImagePromptCapability>("unknown");
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
+  const [restore, setRestore] = useState<WorkbenchRestoreReceipt | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
   const [phase, setPhase] = useState<"composer" | "chat">(routedSessionId ? "chat" : "composer");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -482,6 +495,7 @@ export function useSession(): SessionState {
   const [composerAttachments, setComposerAttachments] = useState<PromptAttachment[]>([]);
   const [forkPending, setForkPending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const bossInputObservedRef = useRef(false);
   const providersRef = useRef<Provider[]>([]);
   const sessionIdRef = useRef<string | null>(routedSessionId);
   const pendingFileDiffKeysRef = useRef<Record<string, string[]>>({});
@@ -561,11 +575,20 @@ export function useSession(): SessionState {
   }, []);
 
   useEffect(() => {
+    if (!experience) return;
+    return observeBossUserInput(window, () => {
+      bossInputObservedRef.current = true;
+      return sendRaw({ op: "user-input" });
+    });
+  }, [experience, connectionEpoch, sendRaw]);
+
+  useEffect(() => {
     let closed = false;
     const connect = () => {
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + appPath("/ws"));
       wsRef.current = ws;
       ws.onopen = () => {
+        if (bossInputObservedRef.current) sendRaw({ op: "user-input" });
         for (const requestId of retiredStartRequestIdsRef.current) {
           sendRaw({ op: "cancel-start", requestId, retire: true });
         }
@@ -658,6 +681,7 @@ export function useSession(): SessionState {
             setBlocks((msg.events as AgentEvent[]).reduce(foldEvent, [] as Block[]));
             setConnection(latestConnection(msg.events as AgentEvent[]));
             setRecovery(latestRecovery(msg.events as AgentEvent[]));
+            setRestore(msg.restore ?? latestWorkbenchRestore(msg.events as AgentEvent[]));
             setImageCapability(latestImageCapability(msg.events as AgentEvent[]));
             optimisticUsersRef.current = [];
             setOptions(latestOptions(msg.events as AgentEvent[]));
@@ -676,6 +700,7 @@ export function useSession(): SessionState {
             setCommands([]);
             setConnection(null);
             setRecovery(null);
+            setRestore(null);
             pendingFileDiffKeysRef.current = {};
             setFileDiffs({});
             setPhase("composer");
@@ -710,6 +735,10 @@ export function useSession(): SessionState {
           case "event":
             if (msg.sessionId === sessionIdRef.current) {
               const evt = msg.evt as AgentEvent;
+              if (evt.kind === "workbench-restore") {
+                setRestore(evt);
+                break;
+              }
               if (evt.kind === "connection") {
                 setConnection(evt.state === "starting"
                   ? { state: "starting", title: evt.title, message: evt.message }
@@ -786,7 +815,8 @@ export function useSession(): SessionState {
             if (msg.op === "send") {
               const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
               settlePendingReply(pendingRepliesRef.current, requestId, false);
-              setLastError(String(msg.message ?? "Failed to send message"));
+              // Cancellation failure is already shown by the localized native receipt.
+              setLastError(msg.recoveryError === "cancel-failed" ? null : String(msg.message ?? "Failed to send message"));
             }
             if (msg.op === "fork") setForkPending(false);
             if (msg.op === "get-file-diff" && typeof msg.path === "string" && msg.path) {
@@ -976,6 +1006,7 @@ export function useSession(): SessionState {
     actionsAllowed: workbenchActionsAllowed(experience),
     connection,
     recovery,
+    restore,
     ctrlJ,
     phase,
     session,
@@ -1032,6 +1063,14 @@ function latestRecovery(events: AgentEvent[]): RecoveryState | null {
     if (event.kind === "recovery") {
       return { mode: event.mode, title: event.title, message: event.message };
     }
+  }
+  return null;
+}
+
+function latestWorkbenchRestore(events: AgentEvent[]): WorkbenchRestoreReceipt | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind === "workbench-restore") return event;
   }
   return null;
 }

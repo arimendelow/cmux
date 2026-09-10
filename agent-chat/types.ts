@@ -10,6 +10,7 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  | WorkbenchRestoreReceipt
   // Negotiated peer capabilities. `image` is three-state: `unknown` until the
   // ACP peer answers initialize, then `supported` / `unsupported`.
   | { kind: "capabilities"; image: ImagePromptCapability }
@@ -25,6 +26,21 @@ export type AgentEvent =
   | { kind: "error"; message: string };
 
 export type SessionStatus = "idle" | "running" | "exited" | "error";
+
+export interface WorkbenchRestoreReceipt {
+  kind: "workbench-restore";
+  facts: Record<string, unknown> | null;
+  unresolved: {
+    window_id: string;
+    workspace_id: string;
+    pane_id: string;
+    surface_id: string;
+    reason: string;
+  }[];
+  assessment: "waiting" | "none" | "pending" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  error?: "native-unavailable" | "assessment-failed" | "cancel-failed";
+}
+
 export type ImagePromptCapability = "unknown" | "supported" | "unsupported";
 export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;

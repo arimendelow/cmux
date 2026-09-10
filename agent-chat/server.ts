@@ -11,6 +11,7 @@ import type {
   SessionCtx,
   SessionOption,
   SessionStatus,
+  WorkbenchRestoreReceipt,
 } from "./types";
 import { claudeAdapter } from "./adapters/claude";
 import { codexAdapter } from "./adapters/codex";
@@ -35,6 +36,7 @@ import {
   type CanonicalBossPointer,
   type CanonicalBossState,
 } from "./canonical-boss";
+import { callWorkbenchNative, watchWorkbenchRestore, workbenchRestoreFacts } from "./workbench-mcp";
 import { pickAccentColor, resolveGhosttyTheme, resolveGhosttyThemeAsync, type GhosttyTheme } from "./theme";
 import { agentModelCatalog, type AgentModelProviderCatalog } from "./catalog";
 import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
@@ -702,7 +704,9 @@ function providerInfo(p: ProviderDef) {
   };
 }
 
-class BossGuardError extends Error {}
+class BossGuardError extends Error {
+  recoveryError?: WorkbenchRestoreReceipt["error"];
+}
 
 // The pointer is written asynchronously after the peer reports its session id,
 // so a synchronous reservation closes the race where two concurrent opens each
@@ -910,6 +914,12 @@ function createSession(
       }
       if (sess.status === status) return;
       sess.status = status;
+      const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+      if (status === "idle" && recovery) {
+        recovery.active = false;
+        completeRestoreAssessmentIfIdle(sess);
+        maybeAssessRestore(sess);
+      }
       const payload = JSON.stringify({ kind: "session-status", sessionId: id, status });
       for (const ws of sess.sockets) ws.send(payload);
       if (!sess.headless) broadcastSessions();
@@ -988,6 +998,10 @@ function emitSessionEvent(sess: Session, evt: AgentEvent) {
 }
 
 function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
+  const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+  if (evt.kind === "error" && recovery?.active && !recovery.inputObserved) {
+    updateRestoreReceipt(sess, { assessment: "failed", error: "assessment-failed" });
+  }
   if (evt.kind === "files-changed") recordFileDiffAllowlist(sess, evt.files);
   if (!sess.headless && evt.kind === "meta" && evt.providerSessionId) {
     sess.internal.persistedProviderSessionId = evt.providerSessionId;
@@ -1097,6 +1111,139 @@ function isCanonicalBossSession(sess: Session): boolean {
   if (!WORKBENCH_EXPERIENCE) return false;
   return canonicalBossSessionId() === sess.id
     || (!sess.headless && providerDefinitionRole(sess.provider) === "boss");
+}
+
+interface BossRecovery {
+  receipt: WorkbenchRestoreReceipt;
+  inputObserved: boolean;
+  active: boolean;
+  admitted: boolean;
+  nativeStarted: boolean;
+  nativeFinished: boolean;
+  cancellation?: Promise<void>;
+  stopWatching?: () => void;
+}
+
+function bossRecovery(sess: Session): BossRecovery {
+  return (sess.internal.workbenchRecovery ??= {
+    receipt: { kind: "workbench-restore", facts: null, unresolved: [], assessment: "waiting" },
+    inputObserved: false,
+    active: false,
+    admitted: false,
+    nativeStarted: false,
+    nativeFinished: false,
+  }) as BossRecovery;
+}
+
+function updateRestoreReceipt(sess: Session, patch: Partial<WorkbenchRestoreReceipt>) {
+  const recovery = bossRecovery(sess);
+  const receipt = { ...recovery.receipt, ...patch };
+  if (JSON.stringify(receipt) === JSON.stringify(recovery.receipt)) return;
+  recovery.receipt = receipt;
+  sess.emit(receipt);
+}
+
+function completeRestoreAssessmentIfIdle(sess: Session) {
+  const recovery = bossRecovery(sess);
+  if (!recovery.active && recovery.admitted && recovery.receipt.assessment === "running") {
+    updateRestoreReceipt(sess, { assessment: "completed" });
+  }
+}
+
+function maybeAssessRestore(sess: Session) {
+  const recovery = bossRecovery(sess);
+  if (canonicalBossSessionId() !== sess.id || !recovery.nativeFinished
+    || !recovery.receipt.facts || !recovery.receipt.unresolved.length || recovery.inputObserved
+    || recovery.receipt.assessment !== "waiting" || sess.status !== "idle") return;
+  updateRestoreReceipt(sess, { assessment: "pending" });
+  // Warm the existing canonical relationship; this is not a second turn queue.
+  void Promise.resolve(sess.adapter.warmup?.(sess)).then(async () => {
+    if (canonicalBossSessionId() !== sess.id || recovery.inputObserved || recovery.receipt.assessment !== "pending") return;
+    if (sess.status !== "idle") {
+      updateRestoreReceipt(sess, { assessment: "waiting" });
+      return;
+    }
+    recovery.active = true;
+    updateRestoreReceipt(sess, { assessment: "running" });
+    await sendPrompt(
+      sess,
+      "Assess the unresolved native restart recovery items. Do not repeat deterministic restoration or take control of externally owned sessions.",
+      [],
+      () => !recovery.inputObserved && canonicalBossSessionId() === sess.id,
+      true,
+    );
+    recovery.admitted = true;
+    completeRestoreAssessmentIfIdle(sess);
+  }).catch(() => {
+    if (!recovery.inputObserved) updateRestoreReceipt(sess, { assessment: "failed", error: "assessment-failed" });
+  });
+}
+
+function startWorkbenchRestore(sess: Session) {
+  if (!APP_CONTINUITY || canonicalBossSessionId() !== sess.id) return;
+  const recovery = bossRecovery(sess);
+  if (recovery.nativeStarted) return;
+  recovery.nativeStarted = true;
+  let reading = false;
+  let changedDuringRead = false;
+  const failed = () => {
+    recovery.nativeFinished = true;
+    recovery.stopWatching?.();
+    updateRestoreReceipt(sess, { assessment: "failed", error: "native-unavailable" });
+  };
+  const refresh = async () => {
+    if (recovery.nativeFinished) return;
+    if (reading) { changedDuringRead = true; return; }
+    reading = true;
+    try {
+      const result = workbenchRestoreFacts(
+        await callWorkbenchNative("workbench.list", { after_sequence: 0 }),
+        APP_CONTINUITY.appInstanceId,
+      );
+      if (recovery.nativeFinished) return;
+      recovery.nativeFinished = result.ready;
+      updateRestoreReceipt(sess, {
+        facts: result.facts,
+        unresolved: result.unresolved,
+        assessment: result.ready && !result.unresolved.length ? "none" : recovery.inputObserved ? "cancelled" : "waiting",
+      });
+      if (result.ready) recovery.stopWatching?.();
+      else recovery.stopWatching ??= watchWorkbenchRestore(result.revision, () => { void refresh(); }, failed);
+      maybeAssessRestore(sess);
+    } catch { failed(); }
+    finally {
+      reading = false;
+      if (changedDuringRead) {
+        changedDuringRead = false;
+        void refresh();
+      }
+    }
+  };
+  void refresh();
+}
+
+async function preemptWorkbenchRestore(sess: Session): Promise<void> {
+  if (!isCanonicalBossSession(sess)) return;
+  const recovery = bossRecovery(sess);
+  recovery.inputObserved = true;
+  if (recovery.receipt.facts
+    && ["waiting", "pending", "running"].includes(recovery.receipt.assessment)) {
+    updateRestoreReceipt(sess, { assessment: recovery.active ? "cancelling" : "cancelled" });
+  }
+  if (!recovery.active) {
+    if (recovery.receipt.error === "cancel-failed") updateRestoreReceipt(sess, { assessment: "cancelled", error: undefined });
+    return;
+  }
+  // Share cancellation across draft input, Send, and duplicate notifications.
+  recovery.cancellation ??= Promise.resolve().then(() => sess.adapter.stop(sess)).catch(() => {
+    updateRestoreReceipt(sess, { assessment: "failed", error: "cancel-failed" });
+    const error = new BossGuardError("Recovery cancellation did not settle; the user turn was not started.");
+    error.recoveryError = "cancel-failed";
+    throw error;
+  });
+  await recovery.cancellation;
+  recovery.active = false;
+  if (recovery.receipt.assessment === "cancelling") updateRestoreReceipt(sess, { assessment: "cancelled" });
 }
 
 function broadcastBossState() {
@@ -1505,20 +1652,35 @@ function promptAttachmentsSupported(adapter: Adapter, attachments: PromptAttachm
   return attachments.length === 0 || adapter.capabilities?.imageAttachments === true;
 }
 
-function sendPrompt(
+async function sendPrompt(
   sess: Session,
   prompt: string,
   attachments: PromptAttachment[] = [],
   canAdmit?: () => boolean,
+  recoveryAssessment = false,
 ): Promise<void> {
+  if (!recoveryAssessment && isCanonicalBossSession(sess)) await preemptWorkbenchRestore(sess);
   if (!promptAttachmentsSupported(sess.adapter, attachments)) {
     return Promise.reject(new Error(`${providerDisplayLabel(sess.provider)} does not support image prompts`));
   }
   delete sess.internal.userStopped;
   const displayText = promptDisplayText(prompt, attachments);
+  const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+  if (recovery?.receipt.facts) {
+    const topology = recovery.receipt.facts.topology as Record<string, unknown>;
+    // Keep the complete native receipt available, but do not repeat the entire world on every turn.
+    const context = {
+      app_instance_id: topology.app_instance_id,
+      previous_exit_clean: topology.previous_exit_clean,
+      restore_state: topology.restore_state,
+      revision: topology.revision,
+      unresolved: recovery.receipt.unresolved,
+    };
+    prompt = `${prompt}\n\n<workbench_restore_facts>\n${JSON.stringify(context)}\n</workbench_restore_facts>`;
+  }
   const activeGeneration = activeAttributionGeneration(sess);
   if (adapterAttributionMode(sess) === "current-turn" && activeGeneration) {
-    const onAdmitted = () => sess.emit({ kind: "user", text: displayText });
+    const onAdmitted = () => { if (!recoveryAssessment) sess.emit({ kind: "user", text: displayText }); };
     if (sess.adapter.sendWithAdmission) {
       return sess.adapter.sendWithAdmission(
         sess,
@@ -1550,7 +1712,7 @@ function sendPrompt(
     }));
     baselines.set(generation, baseline);
     pruneTurnBaselines(baselines);
-    sess.emit({ kind: "user", text: displayText });
+    if (!recoveryAssessment) sess.emit({ kind: "user", text: displayText });
   };
   if (sess.adapter.sendWithAdmission) {
     return sess.adapter.sendWithAdmission(
@@ -2952,6 +3114,9 @@ async function startServer() {
         pointerError: pointerResult.error,
         state: bossClientState,
         continuity: APP_CONTINUITY,
+        restore: canonicalBossSessionId()
+          ? (sessions.get(canonicalBossSessionId()!)?.internal.workbenchRecovery as BossRecovery | undefined)?.receipt ?? null
+          : null,
         candidates,
       });
     }
@@ -3065,14 +3230,12 @@ async function startServer() {
       } catch {
         return;
       }
-      try {
-        handleMessage(ws, msg);
-      } catch (err) {
+      void handleMessage(ws, msg).catch((err) => {
         sendWsErrorDetails(ws, String(msg.op ?? ""), err, {
           ...(typeof msg.requestId === "string" ? { requestId: msg.requestId } : {}),
           ...(typeof msg.sessionId === "string" ? { sessionId: msg.sessionId } : {}),
         });
-      }
+      });
       },
     },
   });
@@ -3168,10 +3331,21 @@ function sendWsErrorDetails(
 ) {
   console.error(`[agent-chat] ${op || "request"} failed`, err);
   const { provider, ...publicDetails } = details;
-  ws.send(JSON.stringify({ kind: "error", op, message: safeErrorMessage(op, err, { provider }), ...publicDetails }));
+  ws.send(JSON.stringify({
+    kind: "error", op, message: safeErrorMessage(op, err, { provider }), ...publicDetails,
+    recoveryError: err instanceof BossGuardError ? err.recoveryError : undefined,
+  }));
 }
 
-function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
+async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
+  if (["user-input", "start", "send", "stop", "set-option", "permission-response",
+    "elicitation-response", "fork", "delete", "cancel-start"].includes(msg.op)) {
+    const id = canonicalBossSessionId();
+    const boss = id ? sessions.get(id) : undefined;
+    const wasAssessment = (boss?.internal.workbenchRecovery as BossRecovery | undefined)?.active;
+    if (boss) await preemptWorkbenchRestore(boss);
+    if (msg.op === "user-input" || (msg.op === "stop" && wasAssessment)) return;
+  }
   switch (msg.op) {
     case "start":
     case "headless-start": {
@@ -3302,6 +3476,7 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const sess = sessionId ? sessions.get(sessionId) : undefined;
       if (!sess) return;
       subscribe(ws, sess);
+      startWorkbenchRestore(sess);
       Promise.resolve(sess.adapter.warmup?.(sess)).catch((err) => {
         sendWsErrorDetails(ws, "warm-boss", err, { sessionId: sess.id });
       });
@@ -3365,11 +3540,13 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         return;
       }
       subscribe(ws, sess);
+      startWorkbenchRestore(sess);
       ws.send(JSON.stringify({
         kind: "history",
         sessionId: sess.id,
         session: sessionSummary(sess),
         events: sess.events,
+        restore: (sess.internal.workbenchRecovery as BossRecovery | undefined)?.receipt ?? null,
       }));
       refreshSession(sess);
       break;
@@ -3528,7 +3705,10 @@ function subscribe(ws: Bun.ServerWebSocket<WsData>, sess: Session) {
 }
 
 function shutdown() {
-  for (const sess of sessions.values()) sess.adapter.dispose(sess);
+  for (const sess of sessions.values()) {
+    (sess.internal.workbenchRecovery as BossRecovery | undefined)?.stopWatching?.();
+    sess.adapter.dispose(sess);
+  }
   process.exit(0);
 }
 
