@@ -91,3 +91,33 @@ test("server classifies provider cancellation without turning it into an error",
   expect(isAgentCancellationErrorForTest(new Error("ouro-boss ACP startup cancelled"))).toBe(true);
   expect(isAgentCancellationErrorForTest(new Error("provider crashed"))).toBe(false);
 });
+
+test("ACP stop waits for prompt settlement, not just the cancellation write", async () => {
+  const adapter = makeAcpAdapter({ id: "settlement", label: "Settlement", adapter: "acp" });
+  const session = context("settlement");
+  const turn = Promise.withResolvers<void>();
+  const notified = Promise.withResolvers<void>();
+  session.internal.acpTurn = turn.promise;
+  session.internal.acp = {
+    acpSessionId: "same-session",
+    pendingPermissions: new Map(),
+    pendingElicitations: new Map(),
+    async notify(method: string, params: unknown) {
+      expect(method).toBe("session/cancel");
+      expect(params).toEqual({ sessionId: "same-session" });
+      notified.resolve();
+    },
+  };
+  let stopped = false;
+  const stopping = Promise.resolve(adapter.stop(session)).then(() => { stopped = true; });
+  try {
+    await notified.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+  } finally {
+    turn.resolve();
+    await stopping;
+  }
+  expect(stopped).toBe(true);
+});
