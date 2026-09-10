@@ -1191,12 +1191,22 @@ struct CmuxAgentChatConfigTests {
         #expect(firstSidebar.mode == .dock)
         #expect(app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
 
+        let firstDockPanelCount = app.windowDock(forWindowId: firstWindowID).panels.count
         let reusedID = try #require(app.openWorkbenchBossPanelForTesting(
             tabManager: secondManager,
             url: secondURL
         ))
         #expect(reusedID == panelID)
         #expect(secondManager.tabs.count == secondWorkspaceCount)
+        // One global viewport rehomed on demand: summoning from the second
+        // window must move the surface, never mint a per-window copy.
+        #expect(
+            app.windowDock(forWindowId: firstWindowID).panels.count
+                + app.windowDock(forWindowId: secondWindowID).panels.count
+                == firstDockPanelCount
+        )
+        #expect(WorkbenchBossViewport.snapshot()?.windowId == secondWindowID)
+        #expect(WorkbenchBossViewport.snapshot()?.surfaceId == panelID)
         // Summoning Boss from another window rehomes the one global surface
         // rather than duplicating it or leaving it in the previous window.
         #expect(!app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
@@ -1438,5 +1448,117 @@ struct CmuxAgentChatConfigTests {
             fileManager: fileManager
         )
         #expect(configured["CMUX_AGENT_UI_CWD"] == home.path)
+    }
+
+    @Test func bossViewportTopologyEntryNamesTheOneAppGlobalSurface() {
+        let window = UUID()
+        let surface = UUID()
+        let stable = UUID()
+        let entry = try? #require(WorkbenchBossViewport.topologyEntry(
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: window,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            )
+        ))
+        #expect(entry?["scope"] as? String == "app")
+        #expect(entry?["window_id"] as? String == window.uuidString)
+        #expect(entry?["surface_id"] as? String == surface.uuidString)
+        #expect(entry?["stable_surface_id"] as? String == stable.uuidString)
+        // One global viewport rehomed on demand: the entry is a single object,
+        // never a per-window collection.
+        #expect(entry?["per_window"] == nil)
+        #expect(WorkbenchBossViewport.topologyEntry(snapshot: nil) == nil)
+    }
+
+    @Test func bossViewportPublishesOpenAndRehomeOntoTheSharedEventBus() {
+        let first = UUID()
+        let second = UUID()
+        let surface = UUID()
+        let stable = UUID()
+        var published: [(name: String, category: String, windowId: String?, surfaceId: String?, payload: [String: Any])] = []
+        let record: WorkbenchBossViewport.Publish = { name, category, windowId, surfaceId, payload in
+            published.append((name, category, windowId, surfaceId, payload))
+        }
+
+        WorkbenchBossViewport.publishOpened(
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: first,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            ),
+            publish: record
+        )
+        WorkbenchBossViewport.publishRehomed(
+            from: first,
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: second,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            ),
+            publish: record
+        )
+
+        #expect(published.map(\.name) == [
+            "workbench.boss.viewport.opened",
+            "workbench.boss.viewport.rehomed",
+        ])
+        // The world model already filters deltas by category; ride its
+        // `surface` channel rather than inventing a Boss-only one.
+        #expect(published.allSatisfy { $0.category == "surface" })
+        #expect(published.allSatisfy { $0.surfaceId == surface.uuidString })
+        #expect(published[0].windowId == first.uuidString)
+        #expect(published[1].windowId == second.uuidString)
+        #expect(published[1].payload["from_window_id"] as? String == first.uuidString)
+        #expect(published[1].payload["to_window_id"] as? String == second.uuidString)
+        #expect(published.allSatisfy { $0.payload["scope"] as? String == "app" })
+    }
+
+    @Test func agentChatEnvironmentForwardsHostAppContinuityWithoutOwningIt() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-continuity-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+        let defaultsName = "CmuxAgentChatConfigTests.continuity.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+        let instance = UUID()
+        let started = Date(timeIntervalSince1970: 1_725_000_000)
+
+        let forwarded = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            appContinuity: WorkbenchAgentChatContinuity(
+                appInstanceId: instance,
+                startedAt: started,
+                previousExitClean: false
+            ),
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(forwarded["CMUX_WORKBENCH_APP_INSTANCE_ID"] == instance.uuidString)
+        #expect(forwarded["CMUX_WORKBENCH_APP_STARTED_AT"] == ISO8601DateFormatter().string(from: started))
+        #expect(forwarded["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] == "0")
+
+        // Absent host continuity stays absent rather than being invented here.
+        let neutral = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            appContinuity: nil,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(neutral["CMUX_WORKBENCH_APP_INSTANCE_ID"] == nil)
+        #expect(neutral["CMUX_WORKBENCH_APP_STARTED_AT"] == nil)
+        #expect(neutral["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] == nil)
     }
 }

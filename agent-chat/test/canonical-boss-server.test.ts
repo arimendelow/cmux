@@ -549,3 +549,48 @@ test("a cwd-unavailable repair target reports blocked instead of a canonical Bos
     await rm(root, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("host app continuity reaches the Boss client and the repair contract verbatim", async () => {
+  const root = await tempRoot("boss-continuity-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  await writeRecord(join(root, "sessions", "slugger"), "boss-1", work, 10);
+  const server = await startServer(root, {
+    CMUX_WORKBENCH_APP_INSTANCE_ID: "6E7F1B2C-0000-4000-8000-00000000ABCD",
+    CMUX_WORKBENCH_APP_STARTED_AT: "2026-09-09T18:00:00Z",
+    CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN: "0",
+  });
+  try {
+    const client = await connect(server.port);
+    expect(client.hello.continuity).toEqual({
+      appInstanceId: "6E7F1B2C-0000-4000-8000-00000000ABCD",
+      startedAt: "2026-09-09T18:00:00Z",
+      previousExitClean: false,
+    });
+
+    const listed = await (await fetch(`http://127.0.0.1:${server.port}/boss-token/api/boss`)).json();
+    expect(listed.continuity.appInstanceId).toBe("6E7F1B2C-0000-4000-8000-00000000ABCD");
+    expect(listed.continuity.previousExitClean).toBe(false);
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("a host that publishes no continuity leaves the client neutral", async () => {
+  const root = await tempRoot("boss-continuity-absent-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  const server = await startServer(root);
+  try {
+    const client = await connect(server.port);
+    expect(client.hello.continuity).toBeNull();
+    const listed = await (await fetch(`http://127.0.0.1:${server.port}/boss-token/api/boss`)).json();
+    expect(listed.continuity).toBeNull();
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
