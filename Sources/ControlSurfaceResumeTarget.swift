@@ -651,9 +651,6 @@ extension TerminalController {
                 agent: agent
             )
             let permissionMode = binding?.permissionMode ?? agent.permissionMode
-            let mode: AgentRestoreRequestMode = agent.kind.restoreMode == .relaunchCommand
-                ? .relaunchAgent
-                : .resumeAgent
             let launcherOwnedArguments: [String]? =
                 if binding?.workbenchAuthorityEvidence == .launcherOwned,
                    let arguments = binding?.launchCommand?.arguments,
@@ -661,6 +658,14 @@ extension TerminalController {
                     arguments
                 } else {
                     nil
+                }
+            let mode: AgentRestoreRequestMode =
+                if launcherOwnedArguments != nil {
+                    .direct
+                } else if agent.kind.restoreMode == .relaunchCommand {
+                    .relaunchAgent
+                } else {
+                    .resumeAgent
                 }
             let preparedArguments = launcherOwnedArguments
                 ?? (

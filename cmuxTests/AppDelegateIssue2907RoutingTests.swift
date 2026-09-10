@@ -1208,6 +1208,7 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         )
         let restoreRecord = try XCTUnwrap(getResult["restore_record"] as? [String: Any])
 
+        XCTAssertEqual(restoreRecord["mode"] as? String, "direct")
         XCTAssertEqual(restoreRecord["prepared_arguments"] as? [String], arguments)
         XCTAssertEqual(
             restoreRecord["prepared_arguments_working_directory"] as? String,
