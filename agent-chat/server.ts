@@ -413,6 +413,7 @@ interface StartRequest {
   settledAt?: number;
   retired?: boolean;
   retirement?: Promise<void>;
+  retirementCompletedAt?: number;
 }
 const startRequests = new Map<string, StartRequest>();
 type AttributionMode = "new-turn" | "current-turn";
@@ -459,7 +460,22 @@ function pruneStartRequests() {
 
 function retireStartSession(entry: StartRequest): Promise<void> {
   if (entry.retirement) return entry.retirement;
-  const retirement = entry.promise.then((sess) => retireSession(sess));
+  const retirement = (async () => {
+    let sess = entry.session;
+    if (!sess) {
+      try {
+        sess = await entry.promise;
+      } catch (error) {
+        sess = entry.session;
+        if (!sess) {
+          entry.retirementCompletedAt = Date.now();
+          return;
+        }
+      }
+    }
+    await retireSession(sess);
+    entry.retirementCompletedAt = Date.now();
+  })();
   entry.retirement = retirement;
   void retirement.catch(() => {
     if (entry.retirement === retirement) entry.retirement = undefined;
@@ -521,9 +537,13 @@ async function retireStartRequestById(requestId: string): Promise<void> {
 }
 
 export function startRequestShouldPruneForTest(
-  entry: Pick<StartRequest, "settledAt">,
+  entry: Pick<StartRequest, "settledAt" | "retired" | "retirementCompletedAt">,
   now: number,
 ): boolean {
+  if (entry.retired) {
+    return entry.retirementCompletedAt !== undefined
+      && now - entry.retirementCompletedAt > START_REQUEST_TTL_MS;
+  }
   return entry.settledAt !== undefined && now - entry.settledAt > START_REQUEST_TTL_MS;
 }
 

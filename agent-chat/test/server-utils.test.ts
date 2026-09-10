@@ -92,6 +92,17 @@ assert(sessionPersistenceEnabledForTest({ headless: false, internal: {} } as any
 assert(!startRequestShouldPruneForTest({}, 120_000), "unresolved starts must never be pruned");
 assert(!startRequestShouldPruneForTest({ settledAt: 70_000 }, 120_000), "settled starts stay replayable through the TTL");
 assert(startRequestShouldPruneForTest({ settledAt: 50_000 }, 120_001), "settled starts should prune after the TTL");
+assert(!startRequestShouldPruneForTest({ retired: true, settledAt: 1 }, 120_001), "pending or failed retirement must retain its cleanup state");
+assert(startRequestShouldPruneForTest({ retired: true, settledAt: 1, retirementCompletedAt: 50_000 }, 120_001), "completed retirement may prune after its replay TTL");
+const rejectedStartEntry = {
+  createdAt: 0,
+  cancelled: true,
+  retired: true,
+  settledAt: 1,
+  promise: Promise.reject(new Error("cwd unavailable")),
+};
+await retireStartSessionForTest(rejectedStartEntry as any);
+assert(typeof (rejectedStartEntry as any).retirementCompletedAt === "number", "a rejected start with no session should complete retirement");
 const retirementCounts: Record<"stop" | "dispose" | "invalidate", number> = {
   stop: 0,
   dispose: 0,
