@@ -772,7 +772,10 @@ enum WorkbenchLocalActionRouter {
                 agent: dock.restoredAgentLifecycle.snapshotsByPanelId[surfaceID],
                 binding: binding,
                 state: dock.restoredAgentLifecycle.resumeStatesByPanelId[surfaceID],
-                canTakeOver: dock.canTakeControlOfExternalSession(panelId: surfaceID)
+                canTakeOver: dock.canTakeControlOfExternalSession(panelId: surfaceID),
+                autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled(
+                    defaults: dock.agentSessionAutoResumeDefaults
+                )
             )
         }
         guard let owner = AppDelegate.shared?.workspaceContainingPanel(panelId: surfaceID) else {
@@ -780,7 +783,8 @@ enum WorkbenchLocalActionRouter {
                 agent: nil,
                 binding: nil,
                 state: nil,
-                canTakeOver: false
+                canTakeOver: false,
+                autoResumeAgentSessions: false
             )
         }
         return resumeContextResponse(
@@ -788,7 +792,10 @@ enum WorkbenchLocalActionRouter {
             binding: owner.workspace.managedAgentResumeBinding(panelId: surfaceID)
                 ?? owner.workspace.surfaceResumeBinding(panelId: surfaceID),
             state: owner.workspace.restoredAgentResumeStatesByPanelId[surfaceID],
-            canTakeOver: owner.workspace.canTakeControlOfExternalSession(panelId: surfaceID)
+            canTakeOver: owner.workspace.canTakeControlOfExternalSession(panelId: surfaceID),
+            autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled(
+                defaults: owner.workspace.agentSessionAutoResumeDefaults
+            )
         )
     }
 
@@ -796,7 +803,8 @@ enum WorkbenchLocalActionRouter {
         agent: SessionRestorableAgentSnapshot?,
         binding: SurfaceResumeBindingSnapshot?,
         state: Workspace.RestoredAgentResumeState?,
-        canTakeOver: Bool
+        canTakeOver: Bool,
+        autoResumeAgentSessions: Bool
     ) -> [String: Any] {
         let managedBinding = binding?.isAgentHookBinding == true ? binding : nil
         let compatibleAgent = managedBinding.map {
@@ -853,6 +861,8 @@ enum WorkbenchLocalActionRouter {
             "externally_controlled"
         case "blocked_unverified":
             "authority_unverified"
+        case "manual_resume_available" where !autoResumeAgentSessions:
+            "auto_resume_disabled"
         default:
             NSNull()
         }
@@ -927,7 +937,8 @@ enum WorkbenchLocalActionRouter {
             agent: agent,
             binding: binding,
             state: state,
-            canTakeOver: canTakeOver
+            canTakeOver: canTakeOver,
+            autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled()
         )
     }
 
