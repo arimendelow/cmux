@@ -28,3 +28,16 @@ test("native recovery states are localized for Japanese without changing the und
     expect(html).not.toContain("Native restore");
   }
 });
+
+test("a failed native observer distinguishes unavailable updates from retained facts", () => {
+  const receipt = {
+    kind: "workbench-restore", facts: { topology: { restore_state: "restoring" } },
+    unresolved: [], assessment: "failed", error: "native-unavailable",
+  };
+  const html = renderToStaticMarkup(createElement((recovery as any).WorkbenchRestoreBanner, { receipt, locale: "en" }));
+  expect(html).toContain("Native restore updates are unavailable.");
+  expect(html).toContain("Last verified restore facts are retained.");
+  const japanese = renderToStaticMarkup(createElement((recovery as any).WorkbenchRestoreBanner, { receipt, locale: "ja-JP" }));
+  expect(japanese).toContain("最後に確認できた復元情報は保持されています。");
+  expect(japanese).not.toContain("Native restore");
+});
