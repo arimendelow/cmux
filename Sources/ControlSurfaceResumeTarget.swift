@@ -104,58 +104,17 @@ enum ControlSurfaceResumeTarget {
                 workbenchAuthority: binding.workbenchAuthority
             )
         }
-        let inMemorySnapshot = [
+        let candidates: [SessionRestorableAgentSnapshot?] = [
             cachedEntry?.snapshot,
             restorableAgent,
             managedSnapshot,
-        ].compactMap { $0 }.first(where: matches)
-        let freshEntry = inMemorySnapshot == nil
-            ? ProcessDetectedResumeIndexes.loadSynchronously(
-                maximumSnapshotAge: 0
-            ).restorableAgentIndex.entry(
-                workspaceId: workspaceID,
-                panelId: surfaceID
-            )
-            : nil
-        let indexedEntry = matches(cachedEntry?.snapshot)
-            ? cachedEntry
-            : freshEntry
-        let snapshot = inMemorySnapshot ?? freshEntry?.snapshot
-        guard let snapshot else { return nil }
-
-        var processIDs = Set((indexedEntry?.agentProcessIDs ?? []).compactMap {
-            pid_t(exactly: $0)
-        })
-        switch self {
-        case .workspace(_, let workspace, let surfaceID):
-            for key in workspace.agentPIDKeysByPanelId[surfaceID] ?? [] {
-                guard let processID = workspace.agentPIDs[key],
-                      processID > 0,
-                      let recordedIdentity =
-                        workspace.agentPIDProcessIdentitiesByKey[key],
-                      Workspace.agentPIDProcessIdentity(pid: processID) ==
-                        recordedIdentity else {
-                    continue
-                }
-                processIDs.insert(processID)
-            }
-        case .dock(_, let dock, let surfaceID):
-            let runtime = dock.agentRuntimeByPanelId[surfaceID]
-            for (key, processID) in runtime?.agentPIDs ?? [:] {
-                guard processID > 0,
-                      let recordedIdentity =
-                        runtime?.agentPIDProcessIdentities[key],
-                      Workspace.agentPIDProcessIdentity(pid: processID) ==
-                        recordedIdentity else {
-                    continue
-                }
-                processIDs.insert(processID)
-            }
-        }
-        guard !processIDs.isEmpty else { return nil }
+        ]
+        let inMemorySnapshot = candidates
+            .compactMap { $0 }
+            .first(where: matches)
         return WorkbenchLauncherBindingTarget(
-            snapshot: snapshot,
-            agentProcessIDs: processIDs
+            surfaceID: surfaceID,
+            snapshot: inMemorySnapshot
         )
     }
 

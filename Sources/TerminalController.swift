@@ -1554,12 +1554,16 @@ class TerminalController {
                 return
             }
             let capabilityEnvelope = SocketClientCapabilityCommand(receivedCommand)
+            let hasVerifiedSocketCapability = capabilityEnvelope.map {
+                socketClientCapabilityAuthority.verifies($0.capability)
+            } ?? false
             let callerEvidence = ControlCommandCallerEvidence(
                 processID: pid,
                 hasSameUserID: peerHasSameUID,
-                hasVerifiedSocketCapability: capabilityEnvelope.map {
-                    socketClientCapabilityAuthority.verifies($0.capability)
-                } ?? false
+                hasVerifiedSocketCapability: hasVerifiedSocketCapability,
+                agentSession: peerHasSameUID && hasVerifiedSocketCapability
+                    ? freshLauncherSessionEvidence(for: trimmed)
+                    : nil
             )
             lineReader.clearLimits()
             if holdsPreauthorizationSlot {
@@ -1663,6 +1667,68 @@ class TerminalController {
         return SocketLineProcessingResult(
             response: response,
             passwordAuthorization: nextPasswordAuthorization
+        )
+    }
+
+    private nonisolated func freshLauncherSessionEvidence(
+        for command: String
+    ) -> ControlAgentSessionCallerEvidence? {
+        guard case .success(let request) = Self.v2Parser.request(fromLine: command),
+              request.method == "surface.resume.set" else {
+            return nil
+        }
+        func string(_ key: String) -> String? {
+            guard case .string(let value)? = request.params[key] else {
+                return nil
+            }
+            let trimmed = value.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard let authority = string("authority"),
+              ["local", "external", "unknown"].contains(authority),
+              let agentSessionID = string("agent_session_id")
+                ?? string("agentSessionId"),
+              let rawSurfaceID = string("surface_id")
+                ?? string("terminal_id")
+                ?? string("tab_id"),
+              let surfaceID = UUID(uuidString: rawSurfaceID) else {
+            return nil
+        }
+
+        let index = ProcessDetectedResumeIndexes.loadSynchronously(
+            maximumSnapshotAge: 0
+        ).restorableAgentIndex
+        guard let entry = index.entry(panelId: surfaceID),
+              entry.processLiveness == .running,
+              entry.snapshot.kind != .claude,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: entry.snapshot.kind.rawValue,
+                  lhs: entry.snapshot.sessionId,
+                  rhs: agentSessionID
+              ) else {
+            return nil
+        }
+        let currentAgentProcessIDs = Set(entry.agentProcessIDs.compactMap {
+            processID -> Int32? in
+            guard processID > 0,
+                  processID <= Int(Int32.max),
+                  let expectedIdentity =
+                    entry.agentProcessIdentities[processID],
+                  AgentPIDProcessIdentity(pid: pid_t(processID)) ==
+                    expectedIdentity else {
+                return nil
+            }
+            return Int32(processID)
+        })
+        guard !currentAgentProcessIDs.isEmpty else { return nil }
+        return ControlAgentSessionCallerEvidence(
+            surfaceID: surfaceID,
+            kind: entry.snapshot.kind.rawValue,
+            sessionID: entry.snapshot.sessionId,
+            agentProcessIDs: currentAgentProcessIDs,
+            workingDirectory: entry.snapshot.workingDirectory
         )
     }
 

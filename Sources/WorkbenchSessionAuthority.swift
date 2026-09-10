@@ -13,8 +13,8 @@ enum WorkbenchAuthorityEvidence: String, Codable, Sendable {
 }
 
 struct WorkbenchLauncherBindingTarget {
-    let snapshot: SessionRestorableAgentSnapshot
-    let agentProcessIDs: Set<pid_t>
+    let surfaceID: UUID
+    let snapshot: SessionRestorableAgentSnapshot?
 }
 
 struct WorkbenchLauncherBindingVerifier {
@@ -30,19 +30,35 @@ struct WorkbenchLauncherBindingVerifier {
               callerEvidence.hasVerifiedSocketCapability,
               let callerProcessID = callerEvidence.processID,
               callerProcessID > 0,
+              let observed = callerEvidence.agentSession,
               let target,
+              observed.surfaceID == target.surfaceID,
+              let observedKind = RestorableAgentKind(rawValue: observed.kind),
               ManagedAgentSessionIdentity.sessionIDsMatch(
-                  kind: target.snapshot.kind.rawValue,
-                  lhs: target.snapshot.sessionId,
+                  kind: observed.kind,
+                  lhs: observed.sessionID,
                   rhs: agentSessionID
               ),
-              target.agentProcessIDs.contains(where: {
-                  $0 == callerProcessID ||
-                      processIsDescendant(callerProcessID, $0)
+              target.snapshot.map({
+                  $0.kind == observedKind &&
+                      ManagedAgentSessionIdentity.sessionIDsMatch(
+                          kind: observed.kind,
+                          lhs: $0.sessionId,
+                          rhs: observed.sessionID
+                      )
+              }) ?? true,
+              observed.agentProcessIDs.contains(where: {
+                  let agentProcessID = pid_t($0)
+                  return agentProcessID == callerProcessID ||
+                      processIsDescendant(callerProcessID, agentProcessID)
               }) else {
             return nil
         }
-        return target.snapshot
+        return target.snapshot ?? SessionRestorableAgentSnapshot(
+            kind: observedKind,
+            sessionId: observed.sessionID,
+            workingDirectory: observed.workingDirectory
+        )
     }
 }
 

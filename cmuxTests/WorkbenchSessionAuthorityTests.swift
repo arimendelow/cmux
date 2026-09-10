@@ -174,10 +174,6 @@ struct WorkbenchSessionAuthorityTests {
 
     @Test func LauncherBindingVerificationRequiresEveryTransportAndSessionProof() {
         let snapshot = localSnapshot()
-        let target = WorkbenchLauncherBindingTarget(
-            snapshot: snapshot,
-            agentProcessIDs: [410]
-        )
         let verifier = WorkbenchLauncherBindingVerifier(
             processIsDescendant: { caller, agent in
                 caller == 420 && agent == 410
@@ -186,45 +182,108 @@ struct WorkbenchSessionAuthorityTests {
         let validEvidence = ControlCommandCallerEvidence(
             processID: 420,
             hasSameUserID: true,
-            hasVerifiedSocketCapability: true
+            hasVerifiedSocketCapability: true,
+            agentSession: ControlAgentSessionCallerEvidence(
+                surfaceID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!,
+                kind: snapshot.kind.rawValue,
+                sessionID: snapshot.sessionId,
+                agentProcessIDs: [410],
+                workingDirectory: snapshot.workingDirectory
+            )
+        )
+        let targetWithSurface = WorkbenchLauncherBindingTarget(
+            surfaceID: validEvidence.agentSession!.surfaceID,
+            snapshot: snapshot
         )
 
         #expect(verifier.verifiedSnapshot(
             agentSessionID: snapshot.sessionId,
             callerEvidence: validEvidence,
-            target: target
+            target: targetWithSurface
         )?.sessionId == snapshot.sessionId)
         #expect(verifier.verifiedSnapshot(
             agentSessionID: "different-session",
             callerEvidence: validEvidence,
-            target: target
+            target: targetWithSurface
         ) == nil)
         #expect(verifier.verifiedSnapshot(
             agentSessionID: snapshot.sessionId,
             callerEvidence: ControlCommandCallerEvidence(
                 processID: 420,
                 hasSameUserID: false,
-                hasVerifiedSocketCapability: true
+                hasVerifiedSocketCapability: true,
+                agentSession: validEvidence.agentSession
             ),
-            target: target
+            target: targetWithSurface
         ) == nil)
         #expect(verifier.verifiedSnapshot(
             agentSessionID: snapshot.sessionId,
             callerEvidence: ControlCommandCallerEvidence(
                 processID: 420,
                 hasSameUserID: true,
-                hasVerifiedSocketCapability: false
+                hasVerifiedSocketCapability: false,
+                agentSession: validEvidence.agentSession
             ),
-            target: target
+            target: targetWithSurface
         ) == nil)
         #expect(verifier.verifiedSnapshot(
             agentSessionID: snapshot.sessionId,
             callerEvidence: ControlCommandCallerEvidence(
                 processID: 421,
                 hasSameUserID: true,
+                hasVerifiedSocketCapability: true,
+                agentSession: validEvidence.agentSession
+            ),
+            target: targetWithSurface
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 420,
+                hasSameUserID: true,
                 hasVerifiedSocketCapability: true
             ),
-            target: target
+            target: targetWithSurface
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: validEvidence,
+            target: WorkbenchLauncherBindingTarget(
+                surfaceID: UUID(),
+                snapshot: snapshot
+            )
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 420,
+                hasSameUserID: true,
+                hasVerifiedSocketCapability: true,
+                agentSession: ControlAgentSessionCallerEvidence(
+                    surfaceID: targetWithSurface.surfaceID,
+                    kind: "codex",
+                    sessionID: snapshot.sessionId,
+                    agentProcessIDs: [410],
+                    workingDirectory: "/tmp"
+                )
+            ),
+            target: targetWithSurface
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 420,
+                hasSameUserID: true,
+                hasVerifiedSocketCapability: true,
+                agentSession: ControlAgentSessionCallerEvidence(
+                    surfaceID: targetWithSurface.surfaceID,
+                    kind: snapshot.kind.rawValue,
+                    sessionID: snapshot.sessionId,
+                    agentProcessIDs: [],
+                    workingDirectory: "/tmp"
+                )
+            ),
+            target: targetWithSurface
         ) == nil)
     }
 
@@ -303,7 +362,14 @@ struct WorkbenchSessionAuthorityTests {
         let callerEvidence = ControlCommandCallerEvidence(
             processID: getpid(),
             hasSameUserID: true,
-            hasVerifiedSocketCapability: true
+            hasVerifiedSocketCapability: true,
+            agentSession: ControlAgentSessionCallerEvidence(
+                surfaceID: panelID,
+                kind: RestorableAgentKind.copilot.rawValue,
+                sessionID: sessionID,
+                agentProcessIDs: [getpid()],
+                workingDirectory: "/tmp"
+            )
         )
 
         let local = TerminalController.shared.controlSurfaceResumeSet(
