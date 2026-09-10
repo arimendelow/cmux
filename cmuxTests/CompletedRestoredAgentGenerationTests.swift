@@ -13,6 +13,26 @@ import CmuxWorkspaces
 struct CompletedRestoredAgentGenerationTests {
     private let restoredSelector = " cmux restore codex 6e8458c7-7970-41e0-8d3e-00beda48097b\n"
 
+    @Test
+    func restoreStateChangesPublishDeduplicatedNativeRecoveryEvents() {
+        let events = CmuxEventBus(eventLogURL: nil)
+        let coordinator = RestoredAgentLifecycleCoordinator(eventBus: events)
+        let panelId = UUID()
+        coordinator.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        coordinator.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        coordinator.resumeStatesByPanelId[panelId] = .autoResumeCommandRunning
+        coordinator.resumeStatesByPanelId.removeValue(forKey: panelId)
+
+        let snapshot = events.retainedSnapshotWithLatestSequence()
+        #expect(snapshot.events.count == 3)
+        #expect(snapshot.events.allSatisfy {
+            $0["name"] as? String == "agent.restore.changed"
+                && $0["category"] as? String == "agent"
+                && $0["surface_id"] as? String == panelId.uuidString
+        })
+        #expect(coordinator.resumeStatesByPanelId.isEmpty)
+    }
+
     private func coordinatorAwaitingStartupInput(panelId: UUID) -> RestoredAgentLifecycleCoordinator {
         let coordinator = RestoredAgentLifecycleCoordinator(dateProvider: { 1_788_868_000 })
         coordinator.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand

@@ -88,6 +88,7 @@ async function harness(options: {
   holdNative?: boolean;
   holdInitialize?: boolean;
   nativeFailure?: boolean;
+  warm?: boolean;
 } = {}) {
   const scratch = join(import.meta.dir, "../scratch");
   await mkdir(scratch, { recursive: true });
@@ -198,7 +199,7 @@ async function harness(options: {
   await messages.next((message) => message.kind === "hello");
   const send = (message: unknown) => socket.send(JSON.stringify(message));
   send({ op: "subscribe", sessionId: bossId });
-  send({ op: "warm-boss" });
+  if (options.warm !== false) send({ op: "warm-boss" });
   return {
     peers,
     native,
@@ -376,5 +377,25 @@ test("native read failure never pretends recovery was clean or starts an assessm
     expect(JSON.stringify(user.message.params.prompt)).toContain("Continue with my request.");
     user.finish();
     await h.assertSameBoss();
+  } finally { await h.stop(); }
+});
+
+test("the real root subscribe path receives recovery even without warm-boss", async () => {
+  const h = await harness({ facts: snapshot(), warm: false });
+  try {
+    await h.receipt("none");
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
+  } finally { await h.stop(); }
+});
+
+test("a resumed shell's native state event completes recovery without waiting for an agent hook", async () => {
+  const h = await harness({ facts: snapshot("resuming") });
+  try {
+    await h.receipt("waiting");
+    await h.native.next((request) => Array.isArray(request.stream));
+    h.setFacts(snapshot("running", "ready", 11));
+    h.publish({ type: "event", name: "agent.restore.changed", category: "agent", seq: 11 });
+    await h.receipt("none");
+    expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
   } finally { await h.stop(); }
 });
