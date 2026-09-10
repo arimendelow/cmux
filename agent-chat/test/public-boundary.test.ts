@@ -44,7 +44,7 @@ test("no Agent Chat source, fixture, or test names a private product or internal
   expect(offenders).toEqual([]);
 });
 
-test("every native file this slice changes stays free of private vocabulary", () => {
+test("native integration sources, fixtures, and downstream ledger stay free of private vocabulary", () => {
   const repo = join(import.meta.dir, "../..");
   const offenders: string[] = [];
   for (const file of [
@@ -52,6 +52,11 @@ test("every native file this slice changes stays free of private vocabulary", ()
     "Sources/CmuxSurfaceTabBarBuiltInAction.swift",
     "Sources/FeatureFlags.swift",
     "Sources/AppDelegate+AgentChat.swift",
+    "cmuxTests/SessionPersistenceResumeBindingTests.swift",
+    "cmuxTests/CmuxAgentChatConfigTests.swift",
+    "cmuxTests/WorkbenchSessionAuthorityTests.swift",
+    "cmuxTests/AppDelegateIssue2907RoutingTests.swift",
+    "OURO_UPSTREAM.md",
   ]) {
     const contents = readFileSync(join(repo, file), "utf8");
     for (const [index, line] of contents.split("\n").entries()) {
