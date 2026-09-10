@@ -223,6 +223,105 @@ struct AgentChatServerAvailability: Sendable {
     var browserURL: URL?
 }
 
+/// Identity of the single app-global Boss viewport.
+///
+/// This slice deliberately owns no topology. The world model enumerates
+/// windows, workspaces, panes, and surfaces; it just cannot know which of
+/// those surfaces is the one Boss viewport, because that fact lives in the
+/// Boss surface gate. `topologyEntry` answers exactly that question so the
+/// topology owner can embed one object — never a per-window collection,
+/// because there is one viewport that rehomes on demand.
+struct WorkbenchBossViewportSnapshot: Equatable {
+    var windowId: UUID
+    var surfaceId: UUID
+    var stableSurfaceId: UUID
+}
+
+enum WorkbenchBossViewport {
+    typealias Publish = (
+        _ name: String,
+        _ category: String,
+        _ windowId: String?,
+        _ surfaceId: String?,
+        _ payload: [String: Any]
+    ) -> Void
+
+    nonisolated static let liveEventBus: Publish = { name, category, windowId, surfaceId, payload in
+        CmuxEventBus.shared.publish(
+            name: name,
+            category: category,
+            source: "workbench",
+            surfaceId: surfaceId,
+            windowId: windowId,
+            payload: payload
+        )
+    }
+
+    nonisolated static func snapshot() -> WorkbenchBossViewportSnapshot? {
+        guard let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              let stableSurfaceId = AgentChatActionInFlightGate.persistedBossStableSurfaceID() else {
+            return nil
+        }
+        return WorkbenchBossViewportSnapshot(
+            windowId: location.ownerWindowId,
+            surfaceId: location.panelId,
+            stableSurfaceId: stableSurfaceId
+        )
+    }
+
+    nonisolated static func topologyEntry(
+        snapshot: WorkbenchBossViewportSnapshot? = WorkbenchBossViewport.snapshot()
+    ) -> [String: Any]? {
+        guard let snapshot else { return nil }
+        return [
+            "scope": "app",
+            "window_id": snapshot.windowId.uuidString,
+            "surface_id": snapshot.surfaceId.uuidString,
+            "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+        ]
+    }
+
+    // Boss viewport movement rides the world model's existing `surface`
+    // delta channel, so a bounded-cursor client sees the rehome without a
+    // Boss-specific stream.
+    nonisolated static func publishOpened(
+        snapshot: WorkbenchBossViewportSnapshot?,
+        publish: Publish = liveEventBus
+    ) {
+        guard let snapshot else { return }
+        publish(
+            "workbench.boss.viewport.opened",
+            "surface",
+            snapshot.windowId.uuidString,
+            snapshot.surfaceId.uuidString,
+            [
+                "scope": "app",
+                "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+            ]
+        )
+    }
+
+    nonisolated static func publishRehomed(
+        from previousWindowId: UUID,
+        snapshot: WorkbenchBossViewportSnapshot?,
+        publish: Publish = liveEventBus
+    ) {
+        guard let snapshot else { return }
+        publish(
+            "workbench.boss.viewport.rehomed",
+            "surface",
+            snapshot.windowId.uuidString,
+            snapshot.surfaceId.uuidString,
+            [
+                "scope": "app",
+                "from_window_id": previousWindowId.uuidString,
+                "to_window_id": snapshot.windowId.uuidString,
+                "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+            ]
+        )
+    }
+}
+
 extension AppDelegate {
     private struct WorkbenchBossChoice {
         var agentName: String
@@ -959,6 +1058,10 @@ extension AppDelegate {
             panelId: location.panelId,
             stableSurfaceId: panel.stableSurfaceId
         )
+        WorkbenchBossViewport.publishRehomed(
+            from: sourceContext.windowId,
+            snapshot: WorkbenchBossViewport.snapshot()
+        )
         revealWorkbenchBossPanel(in: destination, dock: destinationDock, panelId: location.panelId)
         return true
     }
@@ -1023,6 +1126,7 @@ extension AppDelegate {
             panelId: panelId,
             stableSurfaceId: panel.stableSurfaceId
         )
+        WorkbenchBossViewport.publishOpened(snapshot: WorkbenchBossViewport.snapshot())
         sidebar.mode = .dock
         sidebar.setVisible(true)
         revealWorkbenchBossPanel(in: context, dock: dock, panelId: panelId)
@@ -1132,6 +1236,14 @@ extension AppDelegate {
         return unavailable
     }
 
+    /// Seam for the app-lifecycle owner's continuity snapshot.
+    ///
+    /// Boss never derives launch identity or exit cleanliness — it forwards
+    /// whatever the owner published. Returning nil keeps the surface neutral.
+    static func hostAppContinuity() -> WorkbenchAgentChatContinuity? {
+        nil
+    }
+
     private func ensureOwnedAgentChatServerAvailable(
         _ agentChat: CmuxAgentChatConfiguration,
         startCommand: String,
@@ -1177,7 +1289,11 @@ extension AppDelegate {
                 .socketClientCapabilityEnvironment()["CMUX_SOCKET_CAPABILITY"],
             controlSocketReady: TerminalController.shared
                 .socketListenerHealth(expectedSocketPath: controlSocketPath)
-                .isHealthy
+                .isHealthy,
+            // The app-lifecycle owner publishes launch identity and clean/unclean
+            // exit; bind its snapshot here and Boss preserves the restart
+            // visibly. Left nil, Boss simply shows nothing.
+            appContinuity: Self.hostAppContinuity()
         )
         guard let pendingProcess = Self.launchDetachedAgentChatStartCommand(
             startCommand,

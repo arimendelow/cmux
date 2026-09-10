@@ -3,6 +3,17 @@ import Observation
 import PostHog
 import os
 
+/// Host-published app continuity, forwarded verbatim to the Boss surface.
+///
+/// The app lifecycle owner publishes these values; this type only carries them
+/// across the sidecar boundary so Boss can preserve a restart visibly. Nothing
+/// here derives, caches, or re-decides continuity.
+struct WorkbenchAgentChatContinuity: Equatable {
+    var appInstanceId: UUID
+    var startedAt: Date
+    var previousExitClean: Bool
+}
+
 enum OuroWorkbenchProduct {
     private static let bundleIdentifierPrefix = "com.ourostack.workbench"
     private static let copilotHookInstallStarted = OSAllocatedUnfairLock(initialState: false)
@@ -300,6 +311,7 @@ enum OuroWorkbenchProduct {
         controlSocketPath: String? = nil,
         controlSocketCapability: String? = nil,
         controlSocketReady: Bool = false,
+        appContinuity: WorkbenchAgentChatContinuity? = nil,
         sourceFilePath: String = #filePath,
         defaults: UserDefaults = .standard,
         environment baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -356,6 +368,12 @@ enum OuroWorkbenchProduct {
                     .appendingPathComponent(lastGood, isDirectory: true)
                     .path
             }
+        }
+        if let appContinuity {
+            environment["CMUX_WORKBENCH_APP_INSTANCE_ID"] = appContinuity.appInstanceId.uuidString
+            environment["CMUX_WORKBENCH_APP_STARTED_AT"] = ISO8601DateFormatter()
+                .string(from: appContinuity.startedAt)
+            environment["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] = appContinuity.previousExitClean ? "1" : "0"
         }
         let ouroCandidates = [
             homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),

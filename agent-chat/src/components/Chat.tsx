@@ -84,7 +84,7 @@ export function providerSwitchAttachmentState(
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, boss, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, boss, continuity, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
   const [text, setText] = useState("");
   const [sendPending, setSendPending] = useState(false);
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
@@ -182,7 +182,7 @@ export function Chat() {
 
   return (
     <section id="chat-view" data-image-capability={imageCapability} data-images-allowed={imagesAllowed ? "1" : "0"}>
-      {experience ? <WorkbenchHeader experience={experience} compact /> : null}
+      {experience ? <WorkbenchHeader experience={experience} continuity={continuity} compact /> : null}
       <BossStatusBanner boss={boss} />
       {connection ? (
         <div className="recovery-banner-wrap">

@@ -148,6 +148,12 @@ export interface BossState {
   skipped: BossSkippedRecord[];
 }
 export interface WorkbenchActionAvailability { fork: boolean; compose: boolean; delete: boolean; }
+/** Host-published app continuity, consumed read-only by the Boss surface. */
+export interface AppContinuity {
+  appInstanceId: string;
+  startedAt: string;
+  previousExitClean: boolean;
+}
 export interface RecoveryState { mode: "resumed" | "respawned"; title: string; message: string; }
 export interface ConnectionState { state: "starting"; title: string; message?: string; }
 export interface SessionSummary { id: string; provider: string; cwd: string; title: string; status: string; createdAt?: number; capabilities?: ProviderCapabilities; }
@@ -244,6 +250,7 @@ interface Hello {
   defaultProvider?: string;
   experience?: WorkbenchExperience;
   boss?: BossState;
+  continuity?: AppContinuity | null;
   keys?: { ctrlJ?: CtrlJMode };
 }
 
@@ -256,6 +263,7 @@ export interface SessionState {
   defaultProvider: string;
   experience: WorkbenchExperience | null;
   boss: BossState | null;
+  continuity: AppContinuity | null;
   imageCapability: ImagePromptCapability;
   actionsAllowed: WorkbenchActionAvailability;
   connection: ConnectionState | null;
@@ -397,6 +405,17 @@ export function applyCanonicalBoss(
   return sessions.find((session) => session.id === boss.sessionId) ?? null;
 }
 
+/**
+ * Boss preserves a restart visibly without restating the world model: one short
+ * notice when the host reported an unclean previous exit, and nothing at all
+ * otherwise. Restore progress, topology, and launch identity stay with their
+ * owner.
+ */
+export function appContinuityNotice(continuity: AppContinuity | null): string {
+  if (!continuity || continuity.previousExitClean) return "";
+  return "Restarted after an unclean shutdown";
+}
+
 export function bossBlockedMessage(boss: BossState | null): string {
   if (!boss || boss.status !== "blocked") return "";
   return `Boss recovery is blocked (${boss.reason}): ${boss.detail}`;
@@ -443,6 +462,7 @@ export function useSession(): SessionState {
   const [defaultProvider, setDefaultProvider] = useState("");
   const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
   const [boss, setBoss] = useState<BossState | null>(null);
+  const [continuity, setContinuity] = useState<AppContinuity | null>(null);
   const [imageCapability, setImageCapability] = useState<ImagePromptCapability>("unknown");
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
@@ -573,6 +593,7 @@ export function useSession(): SessionState {
             setExperience(experienceRef.current);
             bossRef.current = h.boss ?? null;
             setBoss(bossRef.current);
+            setContinuity(h.continuity ?? null);
             if (h.boss?.status === "blocked") setLastError(bossBlockedMessage(h.boss));
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
@@ -950,6 +971,7 @@ export function useSession(): SessionState {
     defaultProvider,
     experience,
     boss,
+    continuity,
     imageCapability,
     actionsAllowed: workbenchActionsAllowed(experience),
     connection,

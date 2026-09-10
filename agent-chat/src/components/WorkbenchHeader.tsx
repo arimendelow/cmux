@@ -1,4 +1,4 @@
-import type { WorkbenchExperience } from "../session";
+import { appContinuityNotice, type AppContinuity, type WorkbenchExperience } from "../session";
 
 const EXTERNAL_STATUS_LABEL = {
   connected: "Connected",
@@ -10,12 +10,15 @@ const EXTERNAL_STATUS_LABEL = {
 
 export function WorkbenchHeader({
   experience,
+  continuity = null,
   compact = false,
 }: {
   experience: WorkbenchExperience;
+  continuity?: AppContinuity | null;
   compact?: boolean;
 }) {
   const authority = experience.externalAuthority;
+  const continuityNotice = appContinuityNotice(continuity);
   const statusLabel = EXTERNAL_STATUS_LABEL[authority.status];
   return (
     <header className={`workbench-header${compact ? " compact" : ""}`}>
@@ -25,6 +28,7 @@ export function WorkbenchHeader({
         <span className="workbench-scope" title="One Boss conversation shared by every window and workspace">
           App-wide
         </span>
+        {continuityNotice ? <span className="workbench-continuity">{continuityNotice}</span> : null}
         {experience.contextLabel ? <span className="workbench-context">{experience.contextLabel}</span> : null}
       </div>
       <div className="workbench-authority" aria-label="Session control authority">
