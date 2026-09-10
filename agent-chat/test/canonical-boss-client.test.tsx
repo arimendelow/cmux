@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  appContinuityNotice,
   applyCanonicalBoss,
   bossBlockedMessage,
   draftSurvivesCapabilityChange,
@@ -12,6 +13,7 @@ import {
   type SessionSummary,
 } from "../src/session";
 import { BossStatusBanner } from "../src/components/BossStatusBanner";
+import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 
 const experience = {
   productName: "Ouro Workbench v1",
@@ -97,4 +99,35 @@ test("the Workbench header renders injected external authority and stays neutral
     <BossStatusBanner boss={{ status: "canonical", agent: "slugger", sessionId: "boss-1", skipped: [] }} />,
   );
   expect(injected).toBe("");
+});
+
+
+test("an unclean previous exit is visibly preserved without restating the world model", () => {
+  expect(appContinuityNotice(null)).toBe("");
+  expect(appContinuityNotice({
+    appInstanceId: "instance-1",
+    startedAt: "2026-09-09T18:00:00Z",
+    previousExitClean: true,
+  })).toBe("");
+  expect(appContinuityNotice({
+    appInstanceId: "instance-1",
+    startedAt: "2026-09-09T18:00:00Z",
+    previousExitClean: false,
+  })).toBe("Restarted after an unclean shutdown");
+
+  const html = renderToStaticMarkup(
+    <WorkbenchHeader
+      experience={experience}
+      continuity={{
+        appInstanceId: "instance-1",
+        startedAt: "2026-09-09T18:00:00Z",
+        previousExitClean: false,
+      }}
+    />,
+  );
+  expect(html).toContain("Restarted after an unclean shutdown");
+  // Boss identity is unchanged by a restart: it is one continuous relationship.
+  expect(html).toContain("App-wide");
+  expect(renderToStaticMarkup(<WorkbenchHeader experience={experience} />))
+    .not.toContain("Restarted after an unclean shutdown");
 });
