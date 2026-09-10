@@ -1241,7 +1241,13 @@ extension AppDelegate {
     /// Boss never derives launch identity or exit cleanliness — it forwards
     /// whatever the owner published. Returning nil keeps the surface neutral.
     static func hostAppContinuity() -> WorkbenchAgentChatContinuity? {
-        nil
+        WorkbenchAppContinuity.snapshot().map {
+            WorkbenchAgentChatContinuity(
+                appInstanceId: $0.launchID,
+                startedAt: $0.startedAt,
+                previousExitClean: $0.previousExitWasClean
+            )
+        }
     }
 
     private func ensureOwnedAgentChatServerAvailable(

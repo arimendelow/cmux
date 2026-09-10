@@ -120,11 +120,14 @@ async function capabilityAfterStart(imageFlag: string[]): Promise<string> {
     }));
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
-      const event = messages.find((message) =>
+      const liveEvent = messages.find((message) =>
         message.kind === "event" && message.evt?.kind === "capabilities");
+      const historyEvent = messages.find((message) => message.kind === "history")
+        ?.events?.find((event: any) => event.kind === "capabilities");
+      const event = liveEvent?.evt ?? historyEvent;
       if (event) {
         socket.close();
-        return String(event.evt.image);
+        return String(event.image);
       }
       await Bun.sleep(20);
     }
@@ -141,7 +144,7 @@ test("a peer that advertises image prompt capability reaches the client as suppo
 }, 60_000);
 
 test("a peer without image prompt capability reaches the client as unsupported", async () => {
-  expect(await capabilityAfterStart([])).toBe("unsupported");
+  expect(await capabilityAfterStart(["--image-capability", "omitted"])).toBe("unsupported");
 }, 60_000);
 
 test("the canonical Boss negotiates capability before the first user turn", async () => {

@@ -706,6 +706,7 @@ enum WorkbenchLocalActionRouter {
             "previous_exit_clean": continuity?.previousExitWasClean ?? NSNull(),
             "restore_state": restoreState,
             "revision": CmuxEventBus.shared.latestSequence,
+            "boss": WorkbenchBossViewport.topologyEntry() ?? NSNull(),
             "windows": tree.windows.map(topologyWindow),
         ]
     }

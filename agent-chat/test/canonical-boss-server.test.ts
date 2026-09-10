@@ -480,6 +480,67 @@ test("a replayed start request re-attaches instead of being refused as a second 
   }
 }, 60_000);
 
+test("retiring a started Boss clears its pointer and permits a clean replacement", async () => {
+  const root = await tempRoot("boss-retire-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  const server = await startServer(root);
+  try {
+    const client = await connect(server.port);
+    client.send({
+      op: "start",
+      requestId: "retired-start",
+      provider: "ouro-boss",
+      cwd: work,
+      prompt: "hello",
+    });
+    const created = await client.waitFor("created", () =>
+      client.messages.find((message) =>
+        message.kind === "session-created"
+        && message.requestId === "retired-start"));
+    const pointerPath = join(root, "sessions", "canonical-boss.json");
+    const pointerDeadline = Date.now() + 15_000;
+    let pointerReady = false;
+    while (Date.now() < pointerDeadline) {
+      try {
+        const pointer = JSON.parse(await readFile(pointerPath, "utf8"));
+        if (pointer.sessionId === created.session.id) {
+          pointerReady = true;
+          break;
+        }
+      } catch {
+        // Adoption follows provider-session persistence.
+      }
+      await Bun.sleep(20);
+    }
+    expect(pointerReady).toBe(true);
+
+    client.send({ op: "cancel-start", requestId: "retired-start", retire: true });
+    await client.waitFor("retired", () =>
+      client.messages.find((message) =>
+        message.kind === "start-retired"
+        && message.requestId === "retired-start"));
+    expect(await readdir(join(root, "sessions"))).not.toContain("canonical-boss.json");
+
+    client.send({
+      op: "start",
+      requestId: "replacement-start",
+      provider: "ouro-boss",
+      cwd: work,
+      prompt: "replacement",
+    });
+    const replacement = await client.waitFor("replacement created", () =>
+      client.messages.find((message) =>
+        message.kind === "session-created"
+        && message.requestId === "replacement-start"));
+    expect(replacement.session.id).not.toBe(created.session.id);
+    client.close();
+  } finally {
+    await server.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("repair refuses a foreign-agent target and loads the session it repoints to", async () => {
   const root = await tempRoot("boss-repair-guard-");
   const work = join(root, "work");

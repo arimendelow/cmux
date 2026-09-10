@@ -42,13 +42,17 @@ for await (const line of rl) {
       id: msg.id,
       result: {
         protocolVersion: 1,
-        agentCapabilities: {
-          promptCapabilities: {
-            image: imageCapability
-              ? imageCapability === "supported"
-              : imageSupport,
-          },
-        },
+        ...(imageCapability === "omitted"
+          ? {}
+          : {
+              agentCapabilities: {
+                promptCapabilities: {
+                  image: imageCapability
+                    ? imageCapability === "supported"
+                    : imageSupport,
+                },
+              },
+            }),
       },
     });
   } else if (msg.method === "session/new") {

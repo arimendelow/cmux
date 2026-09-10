@@ -10,6 +10,7 @@ import {
   shouldInvalidateImagesForProviderSwitch,
   shouldShowProviderPicker,
 } from "../src/components/Composer";
+import { imageAttachmentAllowed } from "../src/session";
 import { providerInfoForStatusRow } from "../src/components/StatusRow";
 import { WorkbenchHeader } from "../src/components/WorkbenchHeader";
 import { ImageAttachmentTray } from "../src/components/ImageAttachments";
@@ -152,6 +153,26 @@ test("chat provider switches preserve images only for image-capable providers", 
     attachments: [],
     error: "Staged images were removed because the provider does not support image attachments.",
   });
+});
+
+test("capability loss clears staged images while preserving text recovery", () => {
+  const attachments = [{
+    id: "image-1",
+    name: "photo.png",
+    mimeType: "image/png",
+    data: "cG5n",
+    byteCount: 3,
+  }];
+  expect(imageAttachmentAllowed("unknown")).toBe(false);
+  expect(providerSwitchAttachmentState(
+    attachments,
+    imageAttachmentAllowed("unknown"),
+  )).toEqual({
+    attachments: [],
+    error: "Staged images were removed because the provider does not support image attachments.",
+  });
+  const chatSource = readFileSync(join(import.meta.dir, "../src/components/Chat.tsx"), "utf8");
+  expect(chatSource).toContain("invalidateForUnsupportedProvider");
 });
 
 test("Workbench header falls back to a neutral external authority with no link", () => {

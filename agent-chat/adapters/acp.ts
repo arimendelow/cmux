@@ -22,11 +22,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
   const fallbackOptions = acpFallbackOptions(def);
   const requireImagePromptSupport = (st: AcpState, attachments: PromptAttachment[]) => {
     if (attachments.length === 0 || st.imageCapability === "supported") return;
-    throw new Error(
-      st.imageCapability === "unknown"
-        ? `${def.label} image prompt capability is not known`
-        : `${def.label} does not support image prompts`,
-    );
+    throw new Error(`${def.label} does not support image prompts`);
   };
   const enqueuePrompt = (
     sess: SessionCtx,

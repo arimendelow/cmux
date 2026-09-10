@@ -26,6 +26,7 @@ import {
   listBossCandidates,
   listBossCandidatesInPartition,
   readCanonicalBossPointer,
+  removeCanonicalBossPointer,
   repointCanonicalBoss,
   resolveCanonicalBoss,
   writeCanonicalBossPointer,
@@ -601,6 +602,7 @@ function retireSession(sess: Session): Promise<void> {
     await pendingPersistence?.catch((error) => {
       console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
     });
+    await reconcileRetiredCanonicalBoss(sess);
     await sess.invalidatePersistedSession?.();
     sess.adapter.dispose(sess);
     if (sessions.get(sess.id) === sess) sessions.delete(sess.id);
@@ -931,7 +933,12 @@ function registerSession(sess: Session) {
   sessions.set(sess.id, sess);
   delete sess.internal.admissionPending;
   if (typeof sess.internal.persistedProviderSessionId === "string") {
-    queueSessionPersistence(sess);
+    queueSessionPersistence(
+      sess,
+      providerDefinitionRole(sess.provider) === "boss"
+        ? () => adoptCanonicalBoss(sess)
+        : undefined,
+    );
   }
   if (!sess.headless) broadcastSessions();
 }
@@ -1034,6 +1041,13 @@ export interface BossClientState {
 
 let canonicalBossPointer: CanonicalBossPointer | null = null;
 let bossClientState: BossClientState = { status: "none", agent: BOSS_AGENT, skipped: [] };
+let canonicalBossMutationTail: Promise<void> = Promise.resolve();
+
+function withCanonicalBossMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const run = canonicalBossMutationTail.catch(() => {}).then(operation);
+  canonicalBossMutationTail = run.then(() => {}, () => {});
+  return run;
+}
 
 function bossClientStateFrom(state: CanonicalBossState): BossClientState {
   if (state.status === "blocked") {
@@ -1096,19 +1110,44 @@ function broadcastBossState() {
  * through the repair contract.
  */
 async function adoptCanonicalBoss(sess: Session) {
-  if (!WORKBENCH_EXPERIENCE || !BOSS_POINTER_DIR || !BOSS_AGENT) return;
-  if (canonicalBossPointer || bossClientState.status === "blocked") return;
-  const pointer: CanonicalBossPointer = { version: 1, agent: BOSS_AGENT, sessionId: sess.id };
-  await writeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
-  if (bossStartReservation?.sessionId === sess.id) bossStartReservation = null;
-  canonicalBossPointer = pointer;
-  bossClientState = {
-    status: "canonical",
-    agent: pointer.agent,
-    sessionId: pointer.sessionId,
-    skipped: bossClientState.skipped,
-  };
-  broadcastBossState();
+  await withCanonicalBossMutation(async () => {
+    if (!WORKBENCH_EXPERIENCE || !BOSS_POINTER_DIR || !BOSS_AGENT) return;
+    if (sess.internal.retired === true) return;
+    if (canonicalBossPointer || bossClientState.status === "blocked") return;
+    const pointer: CanonicalBossPointer = { version: 1, agent: BOSS_AGENT, sessionId: sess.id };
+    await writeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+    if (sess.internal.retired === true) {
+      await removeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+      return;
+    }
+    if (bossStartReservation?.sessionId === sess.id) bossStartReservation = null;
+    canonicalBossPointer = pointer;
+    bossClientState = {
+      status: "canonical",
+      agent: pointer.agent,
+      sessionId: pointer.sessionId,
+      skipped: bossClientState.skipped,
+    };
+    broadcastBossState();
+  });
+}
+
+async function reconcileRetiredCanonicalBoss(sess: Session) {
+  await withCanonicalBossMutation(async () => {
+    if (bossStartReservation?.sessionId === sess.id) {
+      bossStartReservation = null;
+    }
+    const pointer = canonicalBossPointer;
+    if (!pointer || pointer.sessionId !== sess.id) return;
+    await removeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+    canonicalBossPointer = null;
+    bossClientState = {
+      status: "none",
+      agent: BOSS_AGENT,
+      skipped: bossClientState.skipped,
+    };
+    broadcastBossState();
+  });
 }
 
 /** Load a persisted Boss record into the live session map, idempotently. */
@@ -2920,37 +2959,39 @@ async function startServer() {
       if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
       if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
       const body = await req.json().catch(() => ({}));
-      const result = await repointCanonicalBoss(
-        BOSS_POINTER_DIR,
-        { agent: String(body.agent ?? ""), sessionId: String(body.sessionId ?? "") },
-        { configuredAgent: BOSS_AGENT },
-      );
-      if (!result.ok) return Response.json(result, { status: 400 });
-      // A repointed pointer is only canonical once its record is actually
-      // loaded; otherwise the app would report a Boss no client can open and
-      // refuse to create one.
-      const loaded = await loadCanonicalBossSession(result.session);
-      canonicalBossPointer = result.pointer;
-      if (loaded.ok === false) {
+      return withCanonicalBossMutation(async () => {
+        const result = await repointCanonicalBoss(
+          BOSS_POINTER_DIR,
+          { agent: String(body.agent ?? ""), sessionId: String(body.sessionId ?? "") },
+          { configuredAgent: BOSS_AGENT },
+        );
+        if (!result.ok) return Response.json(result, { status: 400 });
+        // A repointed pointer is only canonical once its record is actually
+        // loaded; otherwise the app would report a Boss no client can open and
+        // refuse to create one.
+        const loaded = await loadCanonicalBossSession(result.session);
+        canonicalBossPointer = result.pointer;
+        if (loaded.ok === false) {
+          bossClientState = {
+            status: "blocked",
+            agent: BOSS_AGENT,
+            reason: "cwd-unavailable",
+            detail: loaded.detail,
+            skipped: bossClientState.skipped,
+          };
+          broadcastBossState();
+          return Response.json({ ok: false, error: loaded.detail }, { status: 400 });
+        }
         bossClientState = {
-          status: "blocked",
-          agent: BOSS_AGENT,
-          reason: "cwd-unavailable",
-          detail: loaded.detail,
+          status: "canonical",
+          agent: result.pointer.agent,
+          sessionId: result.pointer.sessionId,
           skipped: bossClientState.skipped,
         };
         broadcastBossState();
-        return Response.json({ ok: false, error: loaded.detail }, { status: 400 });
-      }
-      bossClientState = {
-        status: "canonical",
-        agent: result.pointer.agent,
-        sessionId: result.pointer.sessionId,
-        skipped: bossClientState.skipped,
-      };
-      broadcastBossState();
-      broadcastSessions();
-      return Response.json({ ok: true, pointer: result.pointer });
+        broadcastSessions();
+        return Response.json({ ok: true, pointer: result.pointer });
+      });
     }
     // REST for the CLI: create a session (optionally with a first prompt) and
     // get back its id/url; list sessions.

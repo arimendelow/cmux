@@ -104,6 +104,20 @@ export async function writeCanonicalBossPointer(root: string, pointer: Canonical
   }
 }
 
+export async function removeCanonicalBossPointer(
+  root: string,
+  expected: CanonicalBossPointer,
+): Promise<boolean> {
+  const current = await readCanonicalBossPointer(root);
+  if (!current.pointer
+    || current.pointer.agent !== expected.agent
+    || current.pointer.sessionId !== expected.sessionId) {
+    return false;
+  }
+  await rm(canonicalBossPointerPath(root), { force: true });
+  return true;
+}
+
 export async function readCanonicalBossPointer(
   root: string,
 ): Promise<{ pointer: CanonicalBossPointer | null; error: string | null }> {

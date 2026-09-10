@@ -106,6 +106,13 @@ export function Chat() {
   const allProviderOptions = providerOptionMap(providers, providerOptions, capabilities);
   const running = session?.status === "running";
 
+  useEffect(() => {
+    if (imagesAllowed) return;
+    imageAttachments.invalidateForUnsupportedProvider(
+      "Staged images were removed because the provider does not support image attachments.",
+    );
+  }, [imageAttachments.invalidateForUnsupportedProvider, imagesAllowed]);
+
   useRestoreModelScopedOptions({ provider: session?.provider, options, setOption, pendingModelRestoreRef });
   usePersistSessionOptions(session?.provider, options, pendingModelRestoreRef.current !== null);
   useProviderCatalogs(ready, connectionEpoch, providers, session?.provider ?? "", cwd, requestProviderOptions, requestProviderCommands);
