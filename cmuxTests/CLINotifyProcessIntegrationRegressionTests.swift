@@ -8646,6 +8646,131 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(request["command"] as? String, "tmux attach -t work")
     }
 
+    func testSurfaceResumeSetCLIForwardsExternalAuthorityWithoutACommand() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("resume-set-external-authority")
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let surfaceId = "22222222-2222-2222-2222-222222222222"
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = self.jsonObject(line),
+                  let id = payload["id"] as? String,
+                  let method = payload["method"] as? String else {
+                return self.malformedRequestResponse(raw: line)
+            }
+            XCTAssertEqual(method, "surface.resume.set")
+            return self.v2Response(id: id, ok: true, result: ["resume_binding": NSNull()])
+        }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
+
+        let result = runProcess(
+            executablePath: cliPath,
+            arguments: [
+                "surface", "resume", "set",
+                "--surface", surfaceId,
+                "--agent-session-id", "session-123",
+                "--authority", "external",
+                "--source", "private-launcher",
+            ],
+            environment: environment,
+            timeout: 5
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stdout, "OK\n")
+
+        let request = try XCTUnwrap(state.commands.compactMap { command -> [String: Any]? in
+            guard let payload = jsonObject(command),
+                  payload["method"] as? String == "surface.resume.set" else {
+                return nil
+            }
+            return payload["params"] as? [String: Any]
+        }.first)
+        XCTAssertEqual(request["surface_id"] as? String, surfaceId)
+        XCTAssertEqual(request["agent_session_id"] as? String, "session-123")
+        XCTAssertEqual(request["authority"] as? String, "external")
+        XCTAssertEqual(request["source"] as? String, "private-launcher")
+        XCTAssertNil(request["command"])
+        XCTAssertNil(request["launch_command"])
+    }
+
+    func testSurfaceResumeSetCLIForwardsLocalAuthorityAndLaunchCommand() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("resume-set-local-authority")
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let surfaceId = "22222222-2222-2222-2222-222222222222"
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = self.jsonObject(line),
+                  let id = payload["id"] as? String,
+                  let method = payload["method"] as? String else {
+                return self.malformedRequestResponse(raw: line)
+            }
+            XCTAssertEqual(method, "surface.resume.set")
+            return self.v2Response(id: id, ok: true, result: ["resume_binding": [:]])
+        }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
+
+        let result = runProcess(
+            executablePath: cliPath,
+            arguments: [
+                "surface", "resume", "set",
+                "--surface", surfaceId,
+                "--agent-session-id", "session-123",
+                "--authority", "local",
+                "--source", "private-launcher",
+                "--checkpoint-id", "session-123",
+                "--",
+                "/usr/local/bin/stable-launcher",
+                "--resume", "session-123",
+            ],
+            environment: environment,
+            timeout: 5
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+
+        let request = try XCTUnwrap(state.commands.compactMap { command -> [String: Any]? in
+            guard let payload = jsonObject(command),
+                  payload["method"] as? String == "surface.resume.set" else {
+                return nil
+            }
+            return payload["params"] as? [String: Any]
+        }.first)
+        XCTAssertEqual(request["agent_session_id"] as? String, "session-123")
+        XCTAssertEqual(request["authority"] as? String, "local")
+        XCTAssertEqual(request["checkpoint_id"] as? String, "session-123")
+        XCTAssertEqual(
+            request["command"] as? String,
+            "'/usr/local/bin/stable-launcher' '--resume' 'session-123'"
+        )
+        let launchCommand = try XCTUnwrap(request["launch_command"] as? [String: Any])
+        XCTAssertEqual(
+            launchCommand["arguments"] as? [String],
+            ["/usr/local/bin/stable-launcher", "--resume", "session-123"]
+        )
+    }
+
     func testSurfaceResumeSetCLIStopsParsingOptionsAfterTerminator() throws {
         let cliPath = try bundledCLIPath()
         let socketPath = makeSocketPath("resume-set-terminator")
@@ -8858,6 +8983,63 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                     "--shell", "--",
                 ],
                 "surface resume set: --shell requires a value"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--agent-session-id",
+                ],
+                "surface resume set: --agent-session-id requires a value"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--authority",
+                ],
+                "surface resume set: --authority requires a value"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--agent-session-id", "session-123",
+                ],
+                "surface resume set requires --agent-session-id and --authority together"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--agent-session-id", "session-123",
+                    "--authority", "elsewhere",
+                ],
+                "surface resume set: --authority must be local, external, or unknown"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--agent-session-id", "session-123",
+                    "--authority", "external",
+                    "--", "must-not-launch",
+                ],
+                "surface resume set: non-local authority must not include a launch command"
+            ),
+            (
+                [
+                    "surface", "resume", "set",
+                    "--workspace", workspaceId,
+                    "--surface", surfaceId,
+                    "--rank", "launcher-owned",
+                ],
+                "surface resume set: --rank is derived by Workbench and must not be sent"
             ),
         ]
 

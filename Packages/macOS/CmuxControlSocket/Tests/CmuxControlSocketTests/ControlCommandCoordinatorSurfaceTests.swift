@@ -357,6 +357,136 @@ struct ControlCommandCoordinatorSurfaceTests {
         ))
     }
 
+    @Test func surfaceResumeSetAcceptsExternalAuthorityWithoutACommand() {
+        let context = FakeSurfaceControlCommandContext()
+        context.resumeResolution = .setFailed
+        let coordinator = ControlCommandCoordinator(context: context)
+        let callerEvidence = ControlCommandCallerEvidence(
+            processID: 42,
+            hasSameUserID: true,
+            hasVerifiedSocketCapability: true
+        )
+
+        let result = coordinator.handle(ControlRequest(
+            id: .int(1),
+            method: "surface.resume.set",
+            params: [
+                "agent_session_id": .string("session-123"),
+                "authority": .string("external"),
+                "source": .string("private-launcher"),
+            ]
+        ), callerEvidence: callerEvidence)
+
+        #expect(result == .err(
+            code: "internal_error",
+            message: "Failed to set resume binding",
+            data: nil
+        ))
+        #expect(context.resumeSetInputs?.command == nil)
+        #expect(context.resumeSetInputs?.agentSessionID == "session-123")
+        #expect(context.resumeSetInputs?.authority == .external)
+        #expect(context.resumeSetInputs?.source == "private-launcher")
+        #expect(context.resumeSetInputs?.callerEvidence == callerEvidence)
+    }
+
+    @Test func surfaceResumeSetParsesLocalAuthorityWithLaunchEvidence() {
+        let context = FakeSurfaceControlCommandContext()
+        context.resumeResolution = .setFailed
+        let coordinator = ControlCommandCoordinator(context: context)
+
+        _ = coordinator.handle(ControlRequest(
+            id: .int(1),
+            method: "surface.resume.set",
+            params: [
+                "agent_session_id": .string("session-123"),
+                "authority": .string("local"),
+                "command": .string("launcher --resume session-123"),
+            ]
+        ))
+
+        #expect(context.resumeSetInputs?.command == "launcher --resume session-123")
+        #expect(context.resumeSetInputs?.agentSessionID == "session-123")
+        #expect(context.resumeSetInputs?.authority == .local)
+    }
+
+    @Test(
+        "surface resume set rejects incomplete or invalid authority evidence",
+        arguments: [
+            ["authority": JSONValue.string("external")],
+            ["agent_session_id": .string("session-123")],
+            [
+                "agent_session_id": .string("session-123"),
+                "authority": .string("elsewhere"),
+            ],
+        ]
+    )
+    func surfaceResumeSetRejectsIncompleteOrInvalidAuthorityEvidence(
+        params: [String: JSONValue]
+    ) {
+        let context = FakeSurfaceControlCommandContext()
+        let coordinator = ControlCommandCoordinator(context: context)
+
+        let result = coordinator.handle(ControlRequest(
+            id: .int(1),
+            method: "surface.resume.set",
+            params: params
+        ))
+
+        guard case .err(let code, _, _) = result else {
+            Issue.record("expected authority validation failure")
+            return
+        }
+        #expect(code == "invalid_params")
+        #expect(context.resumeSetInputs == nil)
+    }
+
+    @Test func surfaceResumeSetRejectsACommandForExternalAuthority() {
+        let context = FakeSurfaceControlCommandContext()
+        let coordinator = ControlCommandCoordinator(context: context)
+
+        let result = coordinator.handle(ControlRequest(
+            id: .int(1),
+            method: "surface.resume.set",
+            params: [
+                "agent_session_id": .string("session-123"),
+                "authority": .string("external"),
+                "command": .string("must not launch"),
+            ]
+        ))
+
+        guard case .err(let code, _, _) = result else {
+            Issue.record("expected non-local command rejection")
+            return
+        }
+        #expect(code == "invalid_params")
+        #expect(context.resumeSetInputs == nil)
+    }
+
+    @Test(
+        "surface resume set rejects caller-supplied trust fields",
+        arguments: ["rank", "priority", "trusted", "launcher_owned", "approved"]
+    )
+    func surfaceResumeSetRejectsCallerSuppliedTrustFields(key: String) {
+        let context = FakeSurfaceControlCommandContext()
+        let coordinator = ControlCommandCoordinator(context: context)
+
+        let result = coordinator.handle(ControlRequest(
+            id: .int(1),
+            method: "surface.resume.set",
+            params: [
+                "command": .string("launcher --resume session-123"),
+                key: .string("caller-controlled"),
+            ]
+        ))
+
+        guard case .err(let code, _, _) = result else {
+            Issue.record("expected caller trust field rejection")
+            return
+        }
+        #expect(code == "invalid_params")
+        #expect(context.resumeSetInputs == nil)
+    }
+
     @Test(
         "surface resume set rejects malformed structured launch data",
         arguments: [

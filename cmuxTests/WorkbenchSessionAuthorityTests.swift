@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import Darwin
+import CmuxControlSocket
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -52,6 +53,29 @@ struct WorkbenchSessionAuthorityTests {
         #expect(local == .controlledHere)
         #expect(external == .controlledExternally)
         #expect(String(data: try JSONEncoder().encode(external), encoding: .utf8) == #""controlledExternally""#)
+    }
+
+    @Test func LauncherAuthorityEvidenceRoundTripsAndLegacyBindingsRemainInferred() throws {
+        let legacy = try JSONDecoder().decode(
+            SurfaceResumeBindingSnapshot.self,
+            from: Data(#"{"command":"copilot --resume legacy","workbenchAuthority":"controlledHere"}"#.utf8)
+        )
+        #expect(legacy.workbenchAuthorityEvidence == .inferred)
+
+        let launcherOwned = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "stable-launcher --resume session",
+            checkpointId: "session",
+            source: "private-launcher",
+            workbenchAuthority: .controlledHere,
+            workbenchAuthorityEvidence: .launcherOwned
+        )
+        let decoded = try JSONDecoder().decode(
+            SurfaceResumeBindingSnapshot.self,
+            from: JSONEncoder().encode(launcherOwned)
+        )
+        #expect(decoded.workbenchAuthorityEvidence == .launcherOwned)
+        #expect(decoded.isAgentHookBinding)
     }
 
     @Test func BindingAuthorityIsExplicitAndCanBeTakenOverOnlyByUserAction() {
@@ -146,6 +170,252 @@ struct WorkbenchSessionAuthorityTests {
                 binding: nil
             ) == nil
         )
+    }
+
+    @Test func LauncherBindingVerificationRequiresEveryTransportAndSessionProof() {
+        let snapshot = localSnapshot()
+        let target = WorkbenchLauncherBindingTarget(
+            snapshot: snapshot,
+            agentProcessIDs: [410]
+        )
+        let verifier = WorkbenchLauncherBindingVerifier(
+            processIsDescendant: { caller, agent in
+                caller == 420 && agent == 410
+            }
+        )
+        let validEvidence = ControlCommandCallerEvidence(
+            processID: 420,
+            hasSameUserID: true,
+            hasVerifiedSocketCapability: true
+        )
+
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: validEvidence,
+            target: target
+        )?.sessionId == snapshot.sessionId)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: "different-session",
+            callerEvidence: validEvidence,
+            target: target
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 420,
+                hasSameUserID: false,
+                hasVerifiedSocketCapability: true
+            ),
+            target: target
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 420,
+                hasSameUserID: true,
+                hasVerifiedSocketCapability: false
+            ),
+            target: target
+        ) == nil)
+        #expect(verifier.verifiedSnapshot(
+            agentSessionID: snapshot.sessionId,
+            callerEvidence: ControlCommandCallerEvidence(
+                processID: 421,
+                hasSameUserID: true,
+                hasVerifiedSocketCapability: true
+            ),
+            target: target
+        ) == nil)
+    }
+
+    @Test func LauncherOwnedBindingsOutrankLowerTrustHookUpdatesAndClears() {
+        let sessionID = "launcher-owned-session"
+        let trusted = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "stable-launcher --resume \(sessionID)",
+            checkpointId: sessionID,
+            source: "private-launcher",
+            autoResume: true,
+            workbenchAuthority: .controlledHere,
+            workbenchAuthorityEvidence: .launcherOwned
+        )
+        let inferred = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume \(sessionID)",
+            checkpointId: sessionID,
+            source: "agent-hook",
+            autoResume: false,
+            workbenchAuthority: .unknown
+        )
+
+        #expect(WorkbenchSessionAuthority.lowerTrustBindingCannotReplace(
+            current: trusted,
+            incoming: inferred
+        ))
+        let preserved =
+            WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                observed: inferred,
+                current: trusted
+            )
+        #expect(preserved.command == trusted.command)
+        #expect(preserved.workbenchAuthority == .controlledHere)
+        #expect(preserved.workbenchAuthorityEvidence == .launcherOwned)
+        #expect(preserved.autoResume == true)
+
+        var staleLocalSnapshot = localSnapshot()
+        staleLocalSnapshot.workbenchAuthority = .controlledHere
+        var externallyAttested = trusted
+        externallyAttested.workbenchAuthority = .controlledExternally
+        externallyAttested.workbenchAuthorityEvidence = .launcherAttested
+        #expect(WorkbenchSessionAuthority.resolved(
+            agent: staleLocalSnapshot,
+            binding: externallyAttested
+        ) == .controlledExternally)
+    }
+
+    @MainActor
+    @Test func SurfaceResumeSetAppliesVerifiedLauncherOwnershipAndAuthorityOnlyUpdates() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        defer { TerminalController.shared.setActiveTabManager(nil) }
+        TerminalController.shared.setActiveTabManager(manager)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelID = try #require(workspace.focusedPanelId)
+        let sessionID = "verified-launcher-session"
+        workspace.restoredAgentSnapshotsByPanelId[panelID] =
+            SessionRestorableAgentSnapshot(
+                kind: .copilot,
+                sessionId: sessionID,
+                workingDirectory: "/tmp"
+            )
+        _ = workspace.recordAgentPID(
+            key: "verified-launcher",
+            pid: getpid(),
+            panelId: panelID
+        )
+        let routing = ControlRoutingSelectors(
+            hasWindowIDParam: false,
+            windowID: nil,
+            groupID: nil,
+            workspaceID: workspace.id,
+            surfaceID: panelID,
+            paneID: nil
+        )
+        let callerEvidence = ControlCommandCallerEvidence(
+            processID: getpid(),
+            hasSameUserID: true,
+            hasVerifiedSocketCapability: true
+        )
+
+        let local = TerminalController.shared.controlSurfaceResumeSet(
+            routing: routing,
+            explicitTargetID: panelID,
+            hasResolvedWindowID: false,
+            inputs: ControlSurfaceResumeSetInputs(
+                name: "Boss worker",
+                kind: "agent-session",
+                command: "stable-launcher --resume \(sessionID)",
+                cwd: "/tmp",
+                checkpointID: sessionID,
+                agentSessionID: sessionID,
+                authority: .local,
+                source: "private-launcher",
+                environment: nil,
+                launchCommand: nil,
+                permissionMode: nil,
+                autoResume: false,
+                remoteWorkspaceID: nil,
+                remoteRelayParameters: nil,
+                callerEvidence: callerEvidence
+            )
+        )
+        guard case .result = local else {
+            Issue.record("expected verified local binding")
+            return
+        }
+        let trusted = try #require(
+            workspace.managedAgentResumeBinding(panelId: panelID)
+        )
+        #expect(trusted.command.contains("stable-launcher"))
+        #expect(trusted.kind == "copilot")
+        #expect(trusted.workbenchAuthority == .controlledHere)
+        #expect(trusted.workbenchAuthorityEvidence == .launcherOwned)
+        #expect(trusted.autoResume == true)
+
+        let external = TerminalController.shared.controlSurfaceResumeSet(
+            routing: routing,
+            explicitTargetID: panelID,
+            hasResolvedWindowID: false,
+            inputs: ControlSurfaceResumeSetInputs(
+                name: nil,
+                kind: nil,
+                command: nil,
+                cwd: nil,
+                checkpointID: nil,
+                agentSessionID: sessionID,
+                authority: .external,
+                source: "private-launcher",
+                environment: nil,
+                launchCommand: nil,
+                permissionMode: nil,
+                autoResume: false,
+                remoteWorkspaceID: nil,
+                remoteRelayParameters: nil,
+                callerEvidence: callerEvidence
+            )
+        )
+        guard case .result = external else {
+            Issue.record("expected authority-only update")
+            return
+        }
+        let externallyControlled = try #require(
+            workspace.managedAgentResumeBinding(panelId: panelID)
+        )
+        #expect(externallyControlled.command == trusted.command)
+        #expect(externallyControlled.workbenchAuthority == .controlledExternally)
+        #expect(externallyControlled.workbenchAuthorityEvidence == .launcherAttested)
+        #expect(
+            workspace.restoredAgentSnapshotsByPanelId[panelID]?
+                .workbenchAuthority == .controlledExternally
+        )
+
+        let target = ControlSurfaceResumeTarget.workspace(
+            tabManager: manager,
+            workspace: workspace,
+            surfaceID: panelID
+        )
+        #expect(target.bindingForClear(
+            expectedCheckpointID: sessionID,
+            expectedSource: "agent-hook",
+            agentSessionEnded: false
+        ) == nil)
+
+        let rejected = TerminalController.shared.controlSurfaceResumeSet(
+            routing: routing,
+            explicitTargetID: panelID,
+            hasResolvedWindowID: false,
+            inputs: ControlSurfaceResumeSetInputs(
+                name: nil,
+                kind: nil,
+                command: nil,
+                cwd: nil,
+                checkpointID: nil,
+                agentSessionID: sessionID,
+                authority: .unknown,
+                source: "private-launcher",
+                environment: nil,
+                launchCommand: nil,
+                permissionMode: nil,
+                autoResume: false,
+                remoteWorkspaceID: nil,
+                remoteRelayParameters: nil,
+                callerEvidence: ControlCommandCallerEvidence(
+                    processID: getpid(),
+                    hasSameUserID: true,
+                    hasVerifiedSocketCapability: false
+                )
+            )
+        )
+        #expect(rejected == .authorityRejected)
     }
 
     @Test func ExternalAuthorityBlocksEveryLocalContinuationUntilExplicitTakeover() throws {
