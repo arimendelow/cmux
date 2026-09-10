@@ -12,6 +12,7 @@ esac
 
 FILES=(
   OuroWorkbenchMCP
+  canonical-boss.ts
   catalog.ts
   cmux-chat
   server.ts

@@ -16,6 +16,7 @@ def main() -> None:
             (source / directory).mkdir(parents=True)
         for filename in (
             "OuroWorkbenchMCP",
+            "canonical-boss.ts",
             "catalog.ts",
             "cmux-chat",
             "server.ts",
@@ -48,6 +49,7 @@ def main() -> None:
         for relative in (
             "OuroWorkbenchMCP",
             "adapters/acp.ts",
+            "canonical-boss.ts",
             "cmux-chat",
             "node_modules/example/index.js",
             "public/app.css",
