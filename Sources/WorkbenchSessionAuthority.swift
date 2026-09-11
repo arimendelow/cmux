@@ -172,6 +172,9 @@ enum WorkbenchSessionAuthority: String, Sendable {
         observed: SurfaceResumeBindingSnapshot,
         current: SurfaceResumeBindingSnapshot?
     ) -> SurfaceResumeBindingSnapshot {
+        if observed.workbenchAuthorityEvidence == .launcherOwned {
+            return observed
+        }
         if let current,
            current.workbenchAuthorityEvidence.isVerifiedLauncherEvidence,
            current.isSameManagedSession(as: observed) {

@@ -600,6 +600,7 @@ extension TerminalController {
         let binding = target.protectedRestoreBinding(
             selectedBinding: selectedBinding
         )
+        let isLauncherOwned = binding?.workbenchAuthorityEvidence == .launcherOwned
         // Structured fields remain untouched; only the explicit legacy fallback
         // receives restore-time provider refreshes that older records depended on.
         let compatibilityBinding = binding.map {
@@ -645,14 +646,16 @@ extension TerminalController {
                 || bindingReplacedAgent
                 ? binding?.source ?? "session-snapshot"
                 : "session-snapshot"
-            let launchCommand = binding?.launchCommand ?? agent.launchCommand
+            let launchCommand = isLauncherOwned
+                ? binding?.launchCommand
+                : binding?.launchCommand ?? agent.launchCommand
             let workingDirectory = target.restoreWorkingDirectory(
                 binding: binding,
                 agent: agent
             )
             let permissionMode = binding?.permissionMode ?? agent.permissionMode
             let launcherOwnedArguments: [String]? =
-                if binding?.workbenchAuthorityEvidence == .launcherOwned,
+                if isLauncherOwned,
                    let arguments = binding?.launchCommand?.arguments,
                    !arguments.isEmpty {
                     arguments
@@ -660,23 +663,25 @@ extension TerminalController {
                     nil
                 }
             let mode: AgentRestoreRequestMode =
-                if launcherOwnedArguments != nil {
+                if isLauncherOwned {
                     .direct
                 } else if agent.kind.restoreMode == .relaunchCommand {
                     .relaunchAgent
                 } else {
                     .resumeAgent
                 }
-            let preparedArguments = launcherOwnedArguments
-                ?? (
-                    agent.kind.restoreMode == .resumeSession
-                        ? agent.preparedResumeArguments(
-                            launchCommand: launchCommand,
-                            workingDirectory: workingDirectory,
-                            observedPermissionMode: permissionMode
-                        )
-                        : nil
-                )
+            let preparedArguments: [String]? =
+                if isLauncherOwned {
+                    launcherOwnedArguments
+                } else if agent.kind.restoreMode == .resumeSession {
+                    agent.preparedResumeArguments(
+                        launchCommand: launchCommand,
+                        workingDirectory: workingDirectory,
+                        observedPermissionMode: permissionMode
+                    )
+                } else {
+                    nil
+                }
             return ControlSurfaceRestoreRecord(
                 modeRawValue: mode.rawValue,
                 kind: agent.kind.rawValue,
@@ -690,22 +695,24 @@ extension TerminalController {
                         replaySafeEnvironmentFor: agent.kind.rawValue
                     )
                 },
-                preparedArguments: launcherOwnedArguments != nil
+                preparedArguments: isLauncherOwned
                     ? preparedArguments
                     : (target.restorableAgent == nil ? nil : preparedArguments),
                 preparedArgumentsWorkingDirectory: preparedArguments == nil
                     ? nil
                     : workingDirectory,
                 permissionMode: permissionMode,
-                legacyCommand: bindingReplacedAgent
-                    ? binding?.command ?? compatibilityBinding?.command
-                    : compatibilityBinding?.inlineStartupInput
+                legacyCommand: isLauncherOwned
+                    ? binding?.command
+                    : bindingReplacedAgent
+                        ? binding?.command ?? compatibilityBinding?.command
+                        : compatibilityBinding?.inlineStartupInput
             )
         }
         guard let binding else { return nil }
         let trimmedKind = binding.kind?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedKind = trimmedKind.flatMap { $0.isEmpty ? nil : $0 } ?? "command"
-        let mode: AgentRestoreRequestMode = binding.isAgentHookBinding
+        let mode: AgentRestoreRequestMode = binding.isAgentHookBinding && !isLauncherOwned
             ? .resumeAgent
             : .direct
         return ControlSurfaceRestoreRecord(
@@ -727,7 +734,7 @@ extension TerminalController {
             preparedArguments: mode == .direct ? binding.launchCommand?.arguments : nil,
             preparedArgumentsWorkingDirectory: nil,
             permissionMode: binding.permissionMode,
-            legacyCommand: compatibilityBinding?.inlineStartupInput
+            legacyCommand: isLauncherOwned ? binding.command : compatibilityBinding?.inlineStartupInput
         )
     }
 
