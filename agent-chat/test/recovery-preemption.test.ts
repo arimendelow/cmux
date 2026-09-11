@@ -614,7 +614,7 @@ test("a Boss startup reservation survives initialize until admission or retireme
     expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(1);
     h.send({ op: "cancel-start", requestId: "first", retire: true });
     await h.messages.next((message) => message.kind === "start-retired");
-    expect((await h.boss()).boss.status).toBe("none");
+    expect((await h.boss()).state.status).toBe("none");
   } finally { await h.stop(); }
 });
 
@@ -631,7 +631,7 @@ test("a failed unadmitted REST Boss start still releases its temporary session",
     h.releaseInitialize();
     expect((await failed).status).toBe(400);
     expect(await (await fetch(`${h.url}/api/sessions`)).json()).toEqual([]);
-    expect((await h.boss()).boss.status).toBe("none");
+    expect((await h.boss()).state.status).toBe("none");
   } finally { await h.stop(); }
 });
 
