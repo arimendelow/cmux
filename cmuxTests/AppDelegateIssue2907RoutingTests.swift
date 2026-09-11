@@ -1338,7 +1338,8 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
                 source: "agent-hook",
                 environment: ["RESTORE_OVERRIDE": "binding"],
                 launchCommand: launch,
-                autoResume: true
+                autoResume: true,
+                workbenchAuthority: .controlledHere
             ),
             panelId: panelId
         ))
@@ -1354,7 +1355,8 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
                 sessionIdSource: .argvOption("--session"),
                 resumeCommand: "{{executable}} --cwd {{cwd}} --session {{sessionId}}",
                 cwd: .preserve
-            )
+            ),
+            workbenchAuthority: .controlledHere
         )
         workspace.restoredResumeSessionWorkingDirectoriesByPanelId[panelId] =
             restoredDirectory
@@ -1393,7 +1395,8 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
                 checkpointId: replacementSessionID,
                 source: "agent-hook",
                 launchCommand: replacementLaunch,
-                autoResume: true
+                autoResume: true,
+                workbenchAuthority: .controlledHere
             ),
             panelId: panelId
         ))
