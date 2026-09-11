@@ -1292,7 +1292,7 @@ async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments:
     textarea: () => findElement(tree, (node) => node.type === "textarea").props,
     tray: () => findElement(tree, (node) => node.type === ImageAttachmentTray).props,
     submit: () => findElement(tree, (node) => node.props["aria-label"] === "Start").props,
-    retry: () => findElement(tray, (node) => node.type === "button" && ["Retry", "再試行"].includes(node.props.children)),
+    retry: () => findElement(tray, (node) => node.type === "button" && ["Retry", "\u518d\u8a66\u884c"].includes(node.props.children)),
     repeatUnknown() {
       if (!repeatUnknown) throw new Error("no received unknown capability packet to replay");
       repeatUnknown();
@@ -1319,8 +1319,8 @@ for (const [initial, replacement, locale] of [
 ] as const) test(`prepared Boss peer exit recovers ${initial} to ${replacement} twice in ${locale}`, async () => {
   const h = await harness({ fresh: true, manualInitialize: true, facts: snapshot() });
   const ui = await rootComposer(h, [stagedNegotiationImage], locale);
-  const connecting = locale === "ja-JP" ? "Boss に接続しています。" : "Connecting to Boss.";
-  const lost = locale === "ja-JP" ? "Boss との接続が失われました。" : "The Boss connection was lost.";
+  const connecting = locale === "ja-JP" ? "Boss \u306b\u63a5\u7d9a\u3057\u3066\u3044\u307e\u3059\u3002" : "Connecting to Boss.";
+  const lost = locale === "ja-JP" ? "Boss \u3068\u306e\u63a5\u7d9a\u304c\u5931\u308f\u308c\u307e\u3057\u305f\u3002" : "The Boss connection was lost.";
   let expectedImages = initial === "supported" ? [stagedNegotiationImage] : [];
   try {
     const first = await h.peers.next((entry) => entry.message.method === "initialize");

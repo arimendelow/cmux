@@ -515,6 +515,7 @@ export function useSession(): SessionState {
   const optimisticUsersRef = useRef<string[]>([]);
   const experienceRef = useRef<WorkbenchExperience | null>(null);
   const bossRef = useRef<BossState | null>(null);
+  const bossPreparationReadyRef = useRef(false);
   const initialSessionListHandledRef = useRef(false);
 
   const clearPendingStartTimeout = useCallback(() => {
@@ -575,6 +576,7 @@ export function useSession(): SessionState {
   const retryBossPreparation = useCallback(() => {
     if (!experienceRef.current || sessionIdRef.current || pendingStartRef.current) return;
     if (sendRaw({ op: "warm-boss" })) {
+      bossPreparationReadyRef.current = false;
       setImageCapability("unknown");
       setBossPreparationError("");
       setLastError("");
@@ -739,9 +741,18 @@ export function useSession(): SessionState {
             break;
           case "boss-capabilities":
             if (experienceRef.current && !sessionIdRef.current) {
+              const prepared = msg.image === "supported" || msg.image === "unsupported";
+              if (prepared) {
+                setBossPreparationError("");
+                setLastError("");
+              } else if (msg.image === "unknown" && bossPreparationReadyRef.current) {
+                const locale = typeof navigator === "undefined" ? "en" : navigator.language ?? "en";
+                setBossPreparationError(locale.toLowerCase().startsWith("ja")
+                  ? "Boss \u3068\u306e\u63a5\u7d9a\u304c\u5931\u308f\u308c\u307e\u3057\u305f\u3002"
+                  : "The Boss connection was lost.");
+              }
+              bossPreparationReadyRef.current = prepared;
               setImageCapability(msg.image);
-              setBossPreparationError("");
-              setLastError("");
             }
             break;
           case "sessions": {
@@ -834,6 +845,7 @@ export function useSession(): SessionState {
               const message = String(msg.message ?? "");
               setLastError(message);
               if (experienceRef.current && !sessionIdRef.current) {
+                bossPreparationReadyRef.current = false;
                 setImageCapability("unknown");
                 setBossPreparationError(message);
               }
