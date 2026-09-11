@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Chat } from "../src/components/Chat";
+import { Chat, clearAcknowledgedDraft } from "../src/components/Chat";
 import { ImageAttachmentTray } from "../src/components/ImageAttachments";
 import { StatusRow } from "../src/components/StatusRow";
 import { Blocks } from "../src/components/Transcript";
@@ -83,6 +83,13 @@ function key(key: string, rest: Record<string, unknown> = {}) {
   const value = { key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, preventDefault() {}, stopPropagation() {}, ...rest };
   return { ...value, nativeEvent: value };
 }
+
+test("a late acknowledgment clears only the draft it accepted, never a newer draft", () => {
+  expect(clearAcknowledgedDraft("submitted", "submitted")).toBe("");
+  expect(clearAcknowledgedDraft("new draft", "submitted")).toBe("new draft");
+  expect(clearAcknowledgedDraft("", "submitted")).toBe("");
+  expect(clearAcknowledgedDraft("new draft", "")).toBe("new draft");
+});
 
 test("chat admission retains a failed draft and images, prevents duplicate submission, and clears only after acceptance", async () => {
   const context = state();
@@ -184,6 +191,10 @@ test("chat gives native restoration precedence over connection and provider reco
     await ui.render({ ...context, restore: null, connection: null, recovery: null, session: null });
     expect(ui.row().provider).toBe("agent");
     expect(ui.row().cwd).toBe("");
+    const help = Object.assign(new Event("keydown", { cancelable: true }), key("/", { ctrlKey: true }));
+    act(() => window.dispatchEvent(help));
+    expect(ui.shortcuts().props.provider).toBe("agent");
+    act(() => ui.shortcuts().props.onClose());
     act(() => ui.transcript().onFileDiff("ignored.ts"));
     act(() => ui.row().onProviderModelChange("demo", "model"));
     expect(diffRequests).toHaveLength(1);

@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { getEventListeners } from "node:events";
 import {
   applyCanonicalBoss, fileDiffCacheKey, foldEvent, latestImageCapability,
-  rememberRetiredId, resolveProviderSelection, useSession,
+  rememberRetiredId, resolveProviderSelection, providerSessionTitle, useSession,
   type AgentEvent, type Block, type SessionState,
 } from "../src/session";
 import { clientFixture } from "./client-fixture";
@@ -363,6 +363,9 @@ test("failed and timed-out starts restore exact drafts, retire late admission, a
     expect(ui.socket().sent.at(-1)).toEqual({ op: "cancel-start", requestId: first.requestId, retire: true });
     act(() => ui.state().start({ provider: "demo", cwd: "/work", prompt: "Retry" }));
     const retry = ui.socket().sent.at(-1);
+    await ui.receive({ kind: "start-retired", requestId: first.requestId, sessionId: "old-canonical" });
+    expect(ui.state().session.id).toBe(`pending-${retry.requestId}`);
+    expect(ui.socket().sent.at(-1)).toBe(retry);
     await ui.expireStartTimeout();
     expect(ui.state().lastError).toBe("Failed to start agent: request timed out");
     expect(ui.state().composerAttachments).toEqual([]);
@@ -431,8 +434,8 @@ test("ordinary pending starts replay unchanged after reconnect and Stop does not
   } finally { await ui.stop(); }
 });
 
-for (const locale of ["en", "ja-JP"]) test(`Boss preparation failure, capability loss, and Retry preserve the input priority in ${locale}`, async () => {
-  const ui = await client("http://example.invalid", locale);
+for (const locale of ["en", "ja-JP", "missing-language", "missing-navigator"]) test(`Boss preparation failure, capability loss, and Retry preserve the input priority in ${locale}`, async () => {
+  const ui = await client("http://example.invalid", locale === "ja-JP" ? locale : "en");
   const target = window;
   try {
     await ui.open();
@@ -442,10 +445,21 @@ for (const locale of ["en", "ja-JP"]) test(`Boss preparation failure, capability
     expect(ui.state().bossPreparationError).toBe("");
     await ui.receive({ kind: "boss-capabilities", image: "supported" });
     expect(ui.state().imageCapability).toBe("supported");
+    if (locale === "missing-navigator") Reflect.deleteProperty(globalThis, "navigator");
+    if (locale === "missing-language") Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: {} });
     await ui.receive({ kind: "boss-capabilities", image: "unknown" });
-    expect(ui.state().bossPreparationError).toBe(locale === "en" ? "The Boss connection was lost." : "Boss との接続が失われました。");
+    expect(ui.state().bossPreparationError).toBe(locale === "ja-JP" ? "Boss との接続が失われました。" : "The Boss connection was lost.");
     await ui.receive({ kind: "error", op: "warm-boss", message: "Preparation failed" });
     expect(ui.state()).toMatchObject({ bossPreparationError: "Preparation failed", lastError: "Preparation failed", imageCapability: "unknown" });
+    if (locale === "en") {
+      const oldSocket = ui.socket();
+      const count = oldSocket.sent.length;
+      const connected = ui.reconnect();
+      act(() => ui.state().retryBossPreparation());
+      expect(oldSocket.sent).toHaveLength(count);
+      expect(ui.state().bossPreparationError).toBe("Preparation failed");
+      await connected;
+    }
     act(() => ui.state().retryBossPreparation());
     expect(ui.state()).toMatchObject({ bossPreparationError: "", lastError: "", imageCapability: "unknown" });
     await ui.receive({ kind: "boss-capabilities", image: "unsupported" });
@@ -561,4 +575,10 @@ test("event folding closes streams, preserves unmatched requests, and leaves non
   expect([...retired]).toEqual(["second", "first"]);
   rememberRetiredId(retired, "third", 2);
   expect([...retired]).toEqual(["first", "third"]);
+  rememberRetiredId(retired, "zero-capacity", 0);
+  expect([...retired]).toEqual([]);
+  rememberRetiredId(retired, "invalid-negative-capacity", -1);
+  expect([...retired]).toEqual([]);
+  expect(providerSessionTitle([{ id: "demo", label: "Demo" }], "demo")).toBe("Demo");
+  expect(providerSessionTitle([], "missing")).toBe("Agent");
 });

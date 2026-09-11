@@ -47,6 +47,13 @@ test("a cold token-prefixed session route subscribes to the exact session and ne
     await receive({ kind: "sessions", sessions: [{ id: "newer", title: "Newer", provider: "demo", cwd: "/work", status: "idle" }] });
     expect(location.pathname).toBe("/token/s/pinned");
     expect(socket.sent.filter((message: any) => message.op === "subscribe")).toEqual([{ op: "subscribe", sessionId: "pinned" }]);
+    let pending: Promise<boolean>;
+    act(() => { pending = state.reply("Reply while history is loading"); });
+    expect(state.session).toBeNull();
+    const sent = socket.sent.at(-1);
+    expect(sent).toMatchObject({ op: "send", sessionId: "pinned", prompt: "Reply while history is loading" });
+    await receive({ kind: "send-accepted", requestId: sent.requestId });
+    expect(await pending).toBe(true);
     await receive({ kind: "history", session: { id: "pinned", title: "Existing Boss", provider: "demo", cwd: "/work", status: "idle" }, events: [] });
     expect(state.session.id).toBe("pinned");
     await receive({ kind: "hello", providers: [], defaultCwd: "/work" });

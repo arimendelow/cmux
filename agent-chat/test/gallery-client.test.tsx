@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GalleryApp } from "../src/gallery";
-import { StatusRow } from "../src/components/StatusRow";
+import { HarnessModelPicker, StatusRow } from "../src/components/StatusRow";
 import { CmdkMenu } from "../src/components/CmdkMenu";
 import { Blocks, ElicitationBlock, PermissionBlock, TurnActions } from "../src/components/Transcript";
 import { clientFixture, findElement as element } from "./client-fixture";
@@ -129,6 +129,7 @@ test("gallery permission, question, and enabled fork examples remain local and d
     forkTree = TurnActions(element(turn, (node) => node.type === TurnActions).props as any);
     return null;
   }
+  function StandaloneForkProbe() { forkTree = TurnActions(current.props as any); return null; }
   try {
     await client.render(createElement(GalleryProbe));
     const permission = element(gallery, (node) => node.type === PermissionBlock);
@@ -158,5 +159,45 @@ test("gallery permission, question, and enabled fork examples remain local and d
       expect(location.pathname).toBe("/");
     }
     expect(messages).toEqual([["gallery fork"]]);
+    const actionExamples = examples(gallery, (node) => node.type === TurnActions);
+    expect(actionExamples).toHaveLength(3);
+    for (const action of actionExamples) {
+      current = action;
+      await client.render(createElement(StandaloneForkProbe));
+      const button = element(forkTree, (node) => node.props.className === "turn-menu-item");
+      expect(button.props.disabled).toBe(Boolean(action.props.forkPending));
+      if (!button.props.disabled) act(() => button.props.onClick());
+    }
+    expect(messages).toEqual([["gallery fork"], ["gallery fork"], ["gallery fork"]]);
+  } finally { console.log = log; await client.stop(); }
+});
+
+test("the static composer keeps option controls diagnostic and does not open a live model picker", async () => {
+  const client = await clientFixture("http://example.invalid");
+  let gallery: ReactElement;
+  let row: ReactElement;
+  let current: ReactElement<any>;
+  const log = console.log;
+  const messages: unknown[] = [];
+  function GalleryProbe() { gallery = GalleryApp(); return null; }
+  function MockProbe() {
+    const mock = (current.type as Function)(current.props);
+    row = StatusRow(element(mock, (node) => node.type === StatusRow).props as any);
+    return null;
+  }
+  try {
+    await client.render(createElement(GalleryProbe));
+    current = element(gallery, (node) => node.props.state === "error");
+    await client.render(createElement(MockProbe));
+    const picker = () => element(row, (node) => node.type === HarnessModelPicker).props;
+    expect(picker().open).toBe(false);
+    act(() => picker().onOpenChange(true));
+    expect(picker().open).toBe(false);
+    const fast = element(row, (node) => node.props["aria-label"] === "Fast mode");
+    expect(fast).not.toBeNull();
+    console.log = (...args) => { messages.push(args); };
+    act(() => fast.props.onClick());
+    expect(messages).toEqual([["gallery composer option", "fastMode", false]]);
+    expect(location.pathname).toBe("/");
   } finally { console.log = log; await client.stop(); }
 });
