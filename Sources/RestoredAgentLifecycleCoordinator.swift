@@ -9,8 +9,15 @@ final class RestoredAgentLifecycleCoordinator {
     @ObservationIgnored
     private let dateProvider: @MainActor () -> TimeInterval
 
-    init(dateProvider: @escaping @MainActor () -> TimeInterval = { Date.now.timeIntervalSince1970 }) {
+    @ObservationIgnored
+    private let eventBus: CmuxEventBus?
+
+    init(
+        dateProvider: @escaping @MainActor () -> TimeInterval = { Date.now.timeIntervalSince1970 },
+        eventBus: CmuxEventBus? = OuroWorkbenchProduct.isCurrentBundle ? .shared : nil
+    ) {
         self.dateProvider = dateProvider
+        self.eventBus = eventBus
     }
 
     var snapshotsByPanelId: [UUID: SessionRestorableAgentSnapshot] = [:] {
@@ -34,6 +41,16 @@ final class RestoredAgentLifecycleCoordinator {
                 completedGenerationsByPanelId[panelId] = RestoredAgentCompletedGeneration(
                     completedAt: dateProvider(),
                     processIdentities: []
+                )
+            }
+            // Shell integration can settle a restore without an agent hook; wake the native-facts reader.
+            for panelId in Set(oldValue.keys).union(resumeStatesByPanelId.keys)
+                where oldValue[panelId] != resumeStatesByPanelId[panelId] {
+                eventBus?.publish(
+                    name: "agent.restore.changed",
+                    category: "agent",
+                    source: "workbench",
+                    surfaceId: panelId.uuidString
                 )
             }
         }

@@ -102,10 +102,13 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       await queued.completion;
     },
     async stop(sess) {
+      const turn = sess.internal.acpTurn as Promise<void> | undefined;
       const st = sess.internal.acp as AcpState | undefined;
       if (st?.acpSessionId) {
         await cancelPendingPermissions(sess, st);
         await st.notify("session/cancel", { sessionId: st.acpSessionId });
+        // Cancellation is a notification; only the prompt response settles the turn.
+        await turn;
         return;
       }
       const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
@@ -114,6 +117,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
         sess.internal.userStopped = true;
         startingProc.kill();
       }
+      await turn;
     },
     async warmup(sess) {
       await ensureAcp(sess, def);

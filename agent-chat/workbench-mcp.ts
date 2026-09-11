@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline";
+import { readLines, tryParse } from "./adapters/lines";
+import type { WorkbenchRestoreReceipt } from "./types";
 
 type MCPRequest = {
   jsonrpc?: unknown;
@@ -351,6 +353,92 @@ export async function callWorkbenchNative(
   if (exitCode !== 0) throw new Error(stderr.trim() || `cmux exited ${exitCode}`);
   const parsed = JSON.parse(stdout);
   return object(parsed);
+}
+
+/** Read the native projection, without interpreting process names or relaunching workers. */
+export function workbenchRestoreFacts(facts: Record<string, unknown>, appInstanceId: string) {
+  const topology = object(facts.topology);
+  if (topology.app_instance_id !== appInstanceId
+    || !["pending", "restoring", "ready"].includes(String(topology.restore_state))
+    || !Number.isSafeInteger(topology.revision) || Number(topology.revision) < 0) {
+    throw new Error("invalid native restore identity or readiness");
+  }
+  const array = (value: unknown): Record<string, unknown>[] => {
+    if (!Array.isArray(value)) throw new Error("invalid native topology");
+    return value.map(object);
+  };
+  const id = (value: unknown): string => {
+    if (typeof value !== "string" || !UUID.test(value)) throw new Error("invalid native topology ID");
+    return value;
+  };
+  const unresolved: WorkbenchRestoreReceipt["unresolved"] = [];
+  let resuming = false;
+  for (const window of array(topology.windows)) {
+    for (const workspace of array(window.workspaces)) {
+      for (const pane of array(workspace.panes)) {
+        for (const surface of array(pane.surfaces)) {
+          const resume = object(surface.resume);
+          const state = String(resume.state);
+          if (!["none", "resuming", "running", "ended", "manual_resume_available", "resume_available",
+            "waiting_for_supervisor", "blocked_unverified"].includes(state)) {
+            throw new Error("unsupported native resume state");
+          }
+          resuming ||= state === "resuming";
+          const reason = typeof resume.blocked_reason === "string" && resume.blocked_reason
+            ? resume.blocked_reason
+            : ["manual_resume_available", "resume_available", "waiting_for_supervisor", "blocked_unverified"].includes(state)
+              ? state : null;
+          if (reason) unresolved.push({
+            window_id: id(window.window_id),
+            workspace_id: id(workspace.workspace_id),
+            pane_id: id(pane.pane_id),
+            surface_id: id(surface.surface_id),
+            reason,
+          });
+        }
+      }
+    }
+  }
+  return {
+    facts,
+    unresolved,
+    ready: topology.restore_state === "ready" && !resuming,
+    revision: Number(topology.revision),
+  };
+}
+
+/** Subscribe after the snapshot cursor so completion during connection is replayed. */
+export function watchWorkbenchRestore(
+  afterSequence: number,
+  changed: () => void,
+  failed: () => void,
+  environment: Record<string, string | undefined> = process.env,
+): () => void {
+  const cli = environment.CMUX_BUNDLED_CLI_PATH;
+  const socket = environment.CMUX_SOCKET_PATH;
+  if (!cli || !socket) throw new Error("Workbench control coordinates are unavailable");
+  const child = Bun.spawn([
+    cli, "--socket", socket, "events", "--after", String(afterSequence),
+    "--category", "app", "--category", "agent", "--no-heartbeats",
+  ], { stdout: "pipe", stderr: "ignore", env: { ...environment } });
+  let stopped = false;
+  let lastSequence = afterSequence;
+  const stop = () => { stopped = true; child.kill(); };
+  void readLines(child.stdout, (line) => {
+    if (stopped) return;
+    const frame = tryParse(line);
+    if (frame?.type === "ack") {
+      if (frame.resume?.gap) changed();
+    } else if (frame?.type === "event" && Number.isSafeInteger(frame.seq)) {
+      if (frame.seq <= lastSequence) return;
+      lastSequence = frame.seq;
+      changed();
+    } else if (frame?.type !== "heartbeat") {
+      stop();
+      failed();
+    }
+  }, () => { if (!stopped) failed(); });
+  return stop;
 }
 
 export async function runWorkbenchMCP(

@@ -14,7 +14,7 @@ import { StatusRow } from "./StatusRow";
 import { Blocks } from "./Transcript";
 import { WorkbenchHeader } from "./WorkbenchHeader";
 import { BossStatusBanner } from "./BossStatusBanner";
-import { RecoveryBanner } from "./RecoveryBanner";
+import { RecoveryBanner, WorkbenchRestoreBanner } from "./RecoveryBanner";
 import { ShortcutOverlay, useKeymap } from "../hooks/useKeymap";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 import { providerOptionMap, useFileCatalog, useProviderCatalogs, withFileTrigger } from "../hooks/useCatalogs";
@@ -84,7 +84,7 @@ export function providerSwitchAttachmentState(
 }
 
 export function Chat() {
-  const { ready, connectionEpoch, providers, capabilities, experience, boss, continuity, imageCapability, actionsAllowed, connection, recovery, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
+  const { ready, connectionEpoch, providers, capabilities, experience, boss, continuity, imageCapability, actionsAllowed, connection, recovery, restore, providerOptions, session, blocks, options, actions, commands, filesByCwd, fileDiffs, lastError, ctrlJ, forkPending, reply, stop, setOption, respondPermission, respondElicitation, fork, compose, requestProviderOptions, requestProviderCommands, requestFiles, requestFileDiff, clearError } = useCtx();
   const [text, setText] = useState("");
   const [sendPending, setSendPending] = useState(false);
   const [openOptionId, setOpenOptionId] = useState<string | null>(null);
@@ -191,7 +191,7 @@ export function Chat() {
     <section id="chat-view" data-image-capability={imageCapability} data-images-allowed={imagesAllowed ? "1" : "0"}>
       {experience ? <WorkbenchHeader experience={experience} continuity={continuity} compact /> : null}
       <BossStatusBanner boss={boss} />
-      {connection ? (
+      {restore ? <WorkbenchRestoreBanner receipt={restore} /> : connection ? (
         <div className="recovery-banner-wrap">
           <div className="recovery-banner startup-banner" role="status">
             <strong>{connection.title}</strong>
