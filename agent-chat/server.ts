@@ -632,6 +632,8 @@ function pruneStartRequests() {
 
 function retireStartSession(entry: StartRequest): Promise<string | void> {
   if (entry.retirement) return entry.retirement;
+  entry.cancelled = true;
+  entry.retired = !entry.session || !hasBossRelationship(entry.session);
   const retirement = (async () => {
     let sess = entry.session;
     if (!sess) {
@@ -709,8 +711,6 @@ function retireSession(sess: Session): Promise<string | void> {
 async function retireStartRequestById(requestId: string): Promise<string | void> {
   const pending = startRequests.get(requestId);
   if (pending) {
-    pending.cancelled = true;
-    pending.retired = !pending.session || !hasBossRelationship(pending.session);
     return retireStartSession(pending);
   }
   const live = [...sessions.values()].find((session) =>
