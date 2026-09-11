@@ -122,6 +122,24 @@ test("a definitive unsupported result releases staged images but keeps the initi
   } finally { await ui.stop(); }
 });
 
+test("initial Boss images remain visible and removable while negotiation is unknown", async () => {
+  const state = context("supported");
+  let submitted: unknown;
+  state.start = (value) => { submitted = value; return true; };
+  const ui = await composerFixture(state);
+  try {
+    act(() => ui.textarea().onChange({ target: { value: "Keep the text." } }));
+    await act(async () => ui.tray().onAdd([fileEvent().image]));
+    await ui.render({ ...state, imageCapability: "unknown" });
+    expect(ui.html()).toContain('aria-label="Remove example.png"');
+    expect(ui.html()).not.toContain("+ Image");
+    act(() => ui.tray().onRemove(ui.tray().attachments[0].id));
+    expect(ui.submit().disabled).toBe(false);
+    act(() => ui.submit().onClick());
+    expect(submitted).toMatchObject({ prompt: "Keep the text.", attachments: [] });
+  } finally { await ui.stop(); }
+});
+
 test("ordinary non-Boss composers retain their existing static image behavior", async () => {
   const ui = await composerFixture(context("unknown", false));
   try {
