@@ -2,6 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readLines } from "../adapters/lines";
+import { act, createElement } from "react";
+import { useSession, type SessionState } from "../src/session";
+import { clientFixture } from "./client-fixture";
 
 const appId = "11111111-1111-4111-8111-111111111111";
 const bossId = "boss-1";
@@ -90,13 +93,16 @@ async function harness(options: {
   nativeFailure?: boolean;
   loadFailure?: boolean;
   warm?: boolean;
+  fresh?: boolean;
+  imageSupport?: boolean;
+  startRequestId?: string;
 } = {}) {
   const scratch = join(import.meta.dir, "../scratch");
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, "recovery-"));
   const partition = join(root, "sessions", "example-boss");
   await mkdir(partition, { recursive: true });
-  await writeFile(join(partition, `${bossId}.json`), JSON.stringify({
+  if (!options.fresh) await writeFile(join(partition, `${bossId}.json`), JSON.stringify({
     id: bossId,
     provider: "ouro-boss",
     providerSessionId: peerSessionId,
@@ -105,6 +111,7 @@ async function harness(options: {
     autoApprove: false,
     startOptions: {},
     createdAt: 1,
+    ...(options.startRequestId ? { startRequestId: options.startRequestId } : {}),
   }));
   const peers = new Inbox<PeerRequest>();
   const native = new Inbox<any>();
@@ -151,7 +158,9 @@ async function harness(options: {
       peers.push(entry);
       if (message.method === "initialize") {
         await initialized.promise;
-        entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true } } });
+        entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
+      } else if (message.method === "session/new") {
+        entry.finish({ sessionId: message.params.sessionId });
       } else if (message.method === "session/load") {
         entry.finish({}, options.loadFailure ? "synthetic saved-session failure" : undefined);
       } else if (message.method !== "session/prompt") {
@@ -199,9 +208,13 @@ async function harness(options: {
   socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
   await messages.next((message) => message.kind === "hello");
   const send = (message: unknown) => socket.send(JSON.stringify(message));
-  send({ op: "subscribe", sessionId: bossId });
-  if (options.warm !== false) send({ op: "warm-boss" });
+  if (!options.fresh) {
+    send({ op: "subscribe", sessionId: bossId });
+    if (options.warm !== false) send({ op: "warm-boss" });
+  }
   return {
+    url,
+    root,
     peers,
     native,
     messages,
@@ -236,12 +249,12 @@ async function harness(options: {
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
-    async assertSameBoss() {
+    async assertSameBoss(id = bossId, providerSession = peerSessionId) {
       const pointer = JSON.parse(await readFile(join(root, "sessions/canonical-boss.json"), "utf8"));
-      expect(pointer).toEqual({ version: 1, agent: "example-boss", sessionId: bossId });
-      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(0);
+      expect(pointer).toEqual({ version: 1, agent: "example-boss", sessionId: id });
+      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(options.fresh ? 1 : 0);
       expect(peers.all.filter((entry) => entry.message.method === "session/load")
-        .every((entry) => entry.message.params.sessionId === peerSessionId)).toBe(true);
+        .every((entry) => entry.message.params.sessionId === providerSession)).toBe(true);
     },
   };
 }
@@ -473,3 +486,119 @@ test("a resumed shell's native state event completes recovery without waiting fo
     expect(h.peers.all.some((entry) => entry.message.method === "session/prompt")).toBe(false);
   } finally { await h.stop(); }
 });
+
+test("a timed-out client reattaches to the admitted Boss when its first acknowledgment was lost", async () => {
+  const h = await harness({ fresh: true });
+  const frames = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  let holdAcknowledgment = true;
+  const client = await clientFixture(h.url, (message) => {
+    frames.push(message);
+    if (message.kind === "start-retired") holdAcknowledgment = false;
+    return holdAcknowledgment && ["session-created", "history"].includes(message.kind);
+  });
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => {
+      expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt: "Keep this relationship." })).toBe(true);
+    });
+    const first = await h.prompt();
+    const acknowledged = await frames.next((message) => message.kind === "session-created");
+    const id = acknowledged.session.id;
+    expect(state.session?.id).not.toBe(id);
+    await client.expireStartTimeout();
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    first.finish({ stopReason: "cancelled" });
+    const retained = await frames.next((message) => message.kind === "start-retired");
+    await h.assertSameBoss(id, id);
+    expect(retained.sessionId).toBe(id);
+    await renders.next((value) => value.phase === "chat" && value.session?.id === id);
+
+    let admitted: Promise<boolean>;
+    act(() => { admitted = state.reply("Continue in this same Boss."); });
+    const user = await h.prompt(1);
+    await admitted;
+    const cancels = h.peers.all.filter((entry) => entry.message.method === "session/cancel").length;
+    h.send({ op: "cancel-start", requestId: acknowledged.requestId, retire: true });
+    await h.messages.next((message) => message.kind === "start-retired" && message.requestId === acknowledged.requestId);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(cancels);
+    await h.assertSameBoss(id, id);
+    user.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
+
+test("replayed retirement after server recovery preserves the established Boss record", async () => {
+  const h = await harness({ startRequestId: "earlier-start", facts: snapshot() });
+  try {
+    h.send({ op: "cancel-start", requestId: "earlier-start", retire: true });
+    const retained = await h.messages.next((message) => message.kind === "start-retired");
+    await h.assertSameBoss();
+    expect(JSON.parse(await readFile(join(h.root, "sessions/example-boss", `${bossId}.json`), "utf8")).providerSessionId)
+      .toBe(peerSessionId);
+    expect(retained.sessionId).toBe(bossId);
+    h.send({ op: "send", sessionId: bossId, requestId: "same-after-replay", prompt: "Use the saved conversation." });
+    const user = await h.prompt();
+    expect(user.message.params.sessionId).toBe(peerSessionId);
+    user.finish();
+  } finally { await h.stop(); }
+});
+
+test("an unadmitted temporary Boss start can still be retired without leaving a relationship", async () => {
+  const h = await harness({ fresh: true, holdInitialize: true });
+  try {
+    h.send({ op: "start", requestId: "temporary", provider: "ouro-boss", cwd: h.root, prompt: "Not admitted." });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    h.send({ op: "cancel-start", requestId: "temporary", retire: true });
+    await h.messages.next((message) => message.kind === "start-retired");
+    expect((await h.boss()).state.status).toBe("none");
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    h.releaseInitialize();
+    h.send({ op: "start", requestId: "real-start", provider: "ouro-boss", cwd: h.root, prompt: "Begin the relationship." });
+    const user = await h.prompt();
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.status === "canonical");
+    await h.assertSameBoss(user.message.params.sessionId, user.message.params.sessionId);
+    user.finish();
+  } finally { await h.stop(); }
+});
+
+for (const imageSupport of [true, false]) {
+  test(`the fresh root client negotiates ${imageSupport ? "supported" : "unsupported"} images before first input`, async () => {
+    const h = await harness({ fresh: true, holdInitialize: true, imageSupport });
+    const renders = new Inbox<SessionState>();
+    const client = await clientFixture(h.url);
+    let state: SessionState;
+    function Root() { state = useSession(); renders.push(state); return null; }
+    try {
+      await client.render(createElement(Root));
+      await renders.next((value) => value.ready);
+      expect(state.phase).toBe("composer");
+      expect(state.boss?.status).toBe("none");
+      expect(state.imageCapability).toBe("unknown");
+      await h.peers.next((entry) => entry.message.method === "initialize");
+      h.releaseInitialize();
+      await renders.next((value) => value.imageCapability === (imageSupport ? "supported" : "unsupported"));
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(0);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+
+      const cwd = join(h.root, "selected");
+      await mkdir(cwd);
+      act(() => {
+        expect(state.start({
+          provider: "ouro-boss", cwd, prompt: "First request.",
+          attachments: imageSupport ? [{ id: "image-1", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3 }] : [],
+        })).toBe(true);
+      });
+      const user = await h.prompt();
+      const created = h.peers.all.find((entry) => entry.message.method === "session/new")!;
+      expect(created.message.params.cwd).toBe(cwd);
+      expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(1);
+      if (imageSupport) expect(user.message.params.prompt[0]).toEqual({ type: "image", mimeType: "image/png", data: "cG5n" });
+      await renders.next((value) => value.boss?.status === "canonical");
+      await h.assertSameBoss(user.message.params.sessionId, user.message.params.sessionId);
+      user.finish();
+    } finally { await client.stop(); await h.stop(); }
+  });
+}
