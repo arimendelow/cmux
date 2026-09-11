@@ -1145,7 +1145,7 @@ for (const failure of ["error", "timeout"]) for (const supported of [true, false
       if (failure === "timeout") await h.expireStartup();
       else first.finish({}, "synthetic negotiation failure");
       const failed = await ui.frames.next((message) => message.kind === "error" && message.op === "warm-boss");
-      if (failure === "timeout") expect(failed.message).toContain("did not finish ACP startup");
+      if (failure === "timeout") expect(failed.message).toBe("Request failed: unexpected error");
       act(() => ui.textarea().onChange({ target: { value: "Keep the edited draft." } }));
       expect(ui.html()).toContain(failed.message);
       expect(ui.html()).not.toContain("Connecting to Boss.");
@@ -1192,12 +1192,15 @@ test("initial negotiation retry failure keeps its reason and images until anothe
   const ui = await rootComposer(h, [stagedNegotiationImage]);
   try {
     let initialize = await h.peers.next((entry) => entry.message.method === "initialize");
-    for (const reason of ["first synthetic negotiation failure", "second synthetic negotiation failure"]) {
+    let previousReason = "";
+    for (const reason of ["synthetic initialization timeout", "synthetic initialization permission failure"]) {
       const cursor = ui.frames.all.length;
       initialize.finish({}, reason);
       const failure = await ui.frames.next((message) => ui.frames.all.indexOf(message) >= cursor && message.kind === "error" && message.op === "warm-boss");
       act(() => ui.textarea().onChange({ target: { value: "Keep retrying this draft." } }));
       expect(ui.html()).toContain(failure.message);
+      if (previousReason) expect(ui.html()).not.toContain(previousReason);
+      previousReason = failure.message;
       expect(ui.html()).not.toContain("Connecting to Boss.");
       expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
       expect(ui.submit().disabled).toBe(true);
