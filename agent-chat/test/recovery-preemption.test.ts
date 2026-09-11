@@ -526,6 +526,10 @@ test("a timed-out client reattaches to the admitted Boss when its first acknowle
     await h.messages.next((message) => message.kind === "start-retired" && message.requestId === acknowledged.requestId);
     expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(cancels);
     await h.assertSameBoss(id, id);
+    h.send({ op: "start", requestId: acknowledged.requestId, provider: "ouro-boss", cwd: h.root, prompt: "Keep this relationship." });
+    const replayed = await h.messages.next((message) => message.kind === "session-created" && message.requestId === acknowledged.requestId);
+    expect(replayed.session.id).toBe(id);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(2);
     user.finish();
   } finally { await client.stop(); await h.stop(); }
 });
