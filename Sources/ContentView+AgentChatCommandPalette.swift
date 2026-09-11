@@ -22,17 +22,20 @@ extension ContentView {
     }
 
     static func commandPaletteNewAgentChatContributions(
-        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        hasCanonicalBoss: Bool = OuroWorkbenchProduct.hasCanonicalBoss()
     ) -> [CommandPaletteCommandContribution] {
         guard CmuxFeatureFlags.shared.isAgentChatUIEnabled else { return [] }
         var contributions = [CommandPaletteCommandContribution(
             commandId: "palette.newAgentChat",
             title: { _ in OuroWorkbenchProduct.agentChatActionTitle() },
             subtitle: { _ in OuroWorkbenchProduct.agentChatSubtitle() },
-            keywords: ["create", "new", "agent", "chat", "boss", "copilot", "agency"],
+            keywords: ["create", "new", "agent", "chat", "boss", "summon"],
             when: { !$0.bool(CommandPaletteContextKeys.browserDisabled) }
         )]
-        if OuroWorkbenchProduct.isWorkbenchBundleIdentifier(bundleIdentifier) {
+        // Boss selection is one-time onboarding: once a canonical relationship
+        // exists, routine switching disappears from the palette.
+        if OuroWorkbenchProduct.isWorkbenchBundleIdentifier(bundleIdentifier), !hasCanonicalBoss {
             contributions.append(CommandPaletteCommandContribution(
                 commandId: "palette.chooseWorkbenchBoss",
                 title: { _ in "Choose Workbench Boss..." },

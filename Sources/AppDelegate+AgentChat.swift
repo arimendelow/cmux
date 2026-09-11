@@ -223,6 +223,105 @@ struct AgentChatServerAvailability: Sendable {
     var browserURL: URL?
 }
 
+/// Identity of the single app-global Boss viewport.
+///
+/// This slice deliberately owns no topology. The world model enumerates
+/// windows, workspaces, panes, and surfaces; it just cannot know which of
+/// those surfaces is the one Boss viewport, because that fact lives in the
+/// Boss surface gate. `topologyEntry` answers exactly that question so the
+/// topology owner can embed one object — never a per-window collection,
+/// because there is one viewport that rehomes on demand.
+struct WorkbenchBossViewportSnapshot: Equatable {
+    var windowId: UUID
+    var surfaceId: UUID
+    var stableSurfaceId: UUID
+}
+
+enum WorkbenchBossViewport {
+    typealias Publish = (
+        _ name: String,
+        _ category: String,
+        _ windowId: String?,
+        _ surfaceId: String?,
+        _ payload: [String: Any]
+    ) -> Void
+
+    nonisolated static let liveEventBus: Publish = { name, category, windowId, surfaceId, payload in
+        CmuxEventBus.shared.publish(
+            name: name,
+            category: category,
+            source: "workbench",
+            surfaceId: surfaceId,
+            windowId: windowId,
+            payload: payload
+        )
+    }
+
+    nonisolated static func snapshot() -> WorkbenchBossViewportSnapshot? {
+        guard let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              let stableSurfaceId = AgentChatActionInFlightGate.persistedBossStableSurfaceID() else {
+            return nil
+        }
+        return WorkbenchBossViewportSnapshot(
+            windowId: location.ownerWindowId,
+            surfaceId: location.panelId,
+            stableSurfaceId: stableSurfaceId
+        )
+    }
+
+    nonisolated static func topologyEntry(
+        snapshot: WorkbenchBossViewportSnapshot? = WorkbenchBossViewport.snapshot()
+    ) -> [String: Any]? {
+        guard let snapshot else { return nil }
+        return [
+            "scope": "app",
+            "window_id": snapshot.windowId.uuidString,
+            "surface_id": snapshot.surfaceId.uuidString,
+            "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+        ]
+    }
+
+    // Boss viewport movement rides the world model's existing `surface`
+    // delta channel, so a bounded-cursor client sees the rehome without a
+    // Boss-specific stream.
+    nonisolated static func publishOpened(
+        snapshot: WorkbenchBossViewportSnapshot?,
+        publish: Publish = liveEventBus
+    ) {
+        guard let snapshot else { return }
+        publish(
+            "workbench.boss.viewport.opened",
+            "surface",
+            snapshot.windowId.uuidString,
+            snapshot.surfaceId.uuidString,
+            [
+                "scope": "app",
+                "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+            ]
+        )
+    }
+
+    nonisolated static func publishRehomed(
+        from previousWindowId: UUID,
+        snapshot: WorkbenchBossViewportSnapshot?,
+        publish: Publish = liveEventBus
+    ) {
+        guard let snapshot else { return }
+        publish(
+            "workbench.boss.viewport.rehomed",
+            "surface",
+            snapshot.windowId.uuidString,
+            snapshot.surfaceId.uuidString,
+            [
+                "scope": "app",
+                "from_window_id": previousWindowId.uuidString,
+                "to_window_id": snapshot.windowId.uuidString,
+                "stable_surface_id": snapshot.stableSurfaceId.uuidString,
+            ]
+        )
+    }
+}
+
 extension AppDelegate {
     private struct WorkbenchBossChoice {
         var agentName: String
@@ -900,21 +999,51 @@ extension AppDelegate {
         return workbenchBossPanelID(in: dock)
     }
 
+    /// Boss is one app-global surface. Summoning it from the window that
+    /// already owns it reveals it; summoning it from any other window rehomes
+    /// the same surface (same session, same transcript) into that window.
+    enum WorkbenchBossSummonAction {
+        case create
+        case reveal
+        case rehome
+    }
+
+    nonisolated static func workbenchBossSummonAction(
+        ownerWindowId: UUID?,
+        requestingWindowId: UUID?
+    ) -> WorkbenchBossSummonAction {
+        guard let ownerWindowId else { return .create }
+        return ownerWindowId == requestingWindowId ? .reveal : .rehome
+    }
+
     @discardableResult
     func rehomeWorkbenchBossPanelIfNeeded(from closingContext: MainWindowContext) -> Bool {
         guard !isTerminatingApp,
               let location = AgentChatActionInFlightGate.bossPanelLocation(),
               location.ownerWindowId == closingContext.windowId,
-              let sourceDock = closingContext.existingWindowDock(),
-              let sourcePane = sourceDock.paneId(forPanelId: location.panelId),
-              let detached = sourceDock.detachSurface(panelId: location.panelId) else {
+              let destination = mainWindowContexts.values.first(where: {
+                  $0 !== closingContext && $0.fileExplorerState != nil
+              }) else {
             return false
         }
-        guard let destination = mainWindowContexts.values.first(where: {
-            $0 !== closingContext && $0.fileExplorerState != nil
-        }) else {
-            _ = sourceDock.attachDetachedSurface(detached, inPane: sourcePane, focus: false)
-            AgentChatActionInFlightGate.clearBossPanel()
+        return moveWorkbenchBossPanel(from: closingContext, to: destination, clearOnFailure: true)
+    }
+
+    /// Shared move path for both owner-window closure and cross-window summon.
+    /// On any failure the surface is put back where it was, so Boss is never
+    /// duplicated and never lost.
+    @discardableResult
+    private func moveWorkbenchBossPanel(
+        from sourceContext: MainWindowContext,
+        to destination: MainWindowContext,
+        clearOnFailure: Bool
+    ) -> Bool {
+        guard let location = AgentChatActionInFlightGate.bossPanelLocation(),
+              location.ownerWindowId == sourceContext.windowId,
+              let sourceDock = sourceContext.existingWindowDock(),
+              let sourcePane = sourceDock.paneId(forPanelId: location.panelId),
+              let detached = sourceDock.detachSurface(panelId: location.panelId) else {
+            if clearOnFailure { AgentChatActionInFlightGate.clearBossPanel() }
             return false
         }
         let destinationDock = destination.windowDockStore()
@@ -928,6 +1057,10 @@ extension AppDelegate {
             ownerWindowId: destination.windowId,
             panelId: location.panelId,
             stableSurfaceId: panel.stableSurfaceId
+        )
+        WorkbenchBossViewport.publishRehomed(
+            from: sourceContext.windowId,
+            snapshot: WorkbenchBossViewport.snapshot()
         )
         revealWorkbenchBossPanel(in: destination, dock: destinationDock, panelId: location.panelId)
         return true
@@ -952,7 +1085,21 @@ extension AppDelegate {
                let panel = dock.browserPanel(for: location.panelId) {
                 panel.setOmnibarVisible(false)
                 panel.navigateSmart(url.absoluteString)
-                revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                let requesting = mainWindowContext(for: tabManager)
+                switch Self.workbenchBossSummonAction(
+                    ownerWindowId: owner.windowId,
+                    requestingWindowId: requesting?.windowId
+                ) {
+                case .rehome:
+                    if let requesting,
+                       requesting.fileExplorerState != nil,
+                       moveWorkbenchBossPanel(from: owner, to: requesting, clearOnFailure: false) {
+                        return location.panelId
+                    }
+                    revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                case .create, .reveal:
+                    revealWorkbenchBossPanel(in: owner, dock: dock, panelId: location.panelId)
+                }
                 return location.panelId
             }
             AgentChatActionInFlightGate.clearBossPanel()
@@ -979,6 +1126,7 @@ extension AppDelegate {
             panelId: panelId,
             stableSurfaceId: panel.stableSurfaceId
         )
+        WorkbenchBossViewport.publishOpened(snapshot: WorkbenchBossViewport.snapshot())
         sidebar.mode = .dock
         sidebar.setVisible(true)
         revealWorkbenchBossPanel(in: context, dock: dock, panelId: panelId)
@@ -1088,6 +1236,20 @@ extension AppDelegate {
         return unavailable
     }
 
+    /// Seam for the app-lifecycle owner's continuity snapshot.
+    ///
+    /// Boss never derives launch identity or exit cleanliness — it forwards
+    /// whatever the owner published. Returning nil keeps the surface neutral.
+    static func hostAppContinuity() -> WorkbenchAgentChatContinuity? {
+        WorkbenchAppContinuity.snapshot().map {
+            WorkbenchAgentChatContinuity(
+                appInstanceId: $0.launchID,
+                startedAt: $0.startedAt,
+                previousExitClean: $0.previousExitWasClean
+            )
+        }
+    }
+
     private func ensureOwnedAgentChatServerAvailable(
         _ agentChat: CmuxAgentChatConfiguration,
         startCommand: String,
@@ -1133,7 +1295,11 @@ extension AppDelegate {
                 .socketClientCapabilityEnvironment()["CMUX_SOCKET_CAPABILITY"],
             controlSocketReady: TerminalController.shared
                 .socketListenerHealth(expectedSocketPath: controlSocketPath)
-                .isHealthy
+                .isHealthy,
+            // The app-lifecycle owner publishes launch identity and clean/unclean
+            // exit; bind its snapshot here and Boss preserves the restart
+            // visibly. Left nil, Boss simply shows nothing.
+            appContinuity: Self.hostAppContinuity()
         )
         guard let pendingProcess = Self.launchDetachedAgentChatStartCommand(
             startCommand,

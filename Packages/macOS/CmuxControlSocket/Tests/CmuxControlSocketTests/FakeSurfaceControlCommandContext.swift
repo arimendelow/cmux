@@ -8,6 +8,8 @@ final class FakeSurfaceControlCommandContext: ControlCommandContext {
     var surfaceListSnapshot: ControlSurfaceListSnapshot?
     var resumeResolution: ControlSurfaceResumeResolution = .surfaceNotFound
     var resumeSetInputs: ControlSurfaceResumeSetInputs?
+    var resumeGetExpectedKind: String?
+    var resumeGetExpectedCheckpointID: String?
     var resumeClearAgentSessionEnded: Bool?
     var resumeStrings = ControlSurfaceResumeStrings(
         agentSessionEndedMustBeBoolean: "agent_session_ended must be a boolean",
@@ -67,9 +69,13 @@ final class FakeSurfaceControlCommandContext: ControlCommandContext {
     func controlSurfaceResumeGet(
         routing: ControlRoutingSelectors,
         explicitTargetID: UUID?,
-        hasResolvedWindowID: Bool
+        hasResolvedWindowID: Bool,
+        expectedKind: String?,
+        expectedCheckpointID: String?
     ) -> ControlSurfaceResumeResolution {
-        resumeResolution
+        resumeGetExpectedKind = expectedKind
+        resumeGetExpectedCheckpointID = expectedCheckpointID
+        return resumeResolution
     }
 
     func controlSurfaceResumeClear(

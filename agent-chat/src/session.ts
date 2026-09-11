@@ -1,6 +1,16 @@
 // Client-side session state: one WebSocket, one session per page.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyThemeVars } from "./theme";
+import type { WorkbenchRestoreReceipt } from "../types";
+
+/** The first visible interaction wins, including drafts and image input before Send. */
+export function observeBossUserInput(target: EventTarget, notify: () => boolean): () => void {
+  const events = ["input", "keydown", "compositionstart", "paste", "drop", "change", "pointerdown"];
+  let delivered = false;
+  const input = () => { if (!delivered) delivered = notify(); };
+  for (const event of events) target.addEventListener(event, input, true);
+  return () => { for (const event of events) target.removeEventListener(event, input, true); };
+}
 
 export type AgentEvent =
   | { kind: "meta"; model?: string; providerSessionId?: string }
@@ -13,6 +23,8 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  | WorkbenchRestoreReceipt
+  | { kind: "capabilities"; image: ImagePromptCapability }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string }
@@ -28,6 +40,13 @@ export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
 export interface PermissionOption { optionId: string; name: string; kind: string; }
+export interface PromptAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  byteCount: number;
+}
 export interface PlanEntry { content: string; status?: string; }
 export type ElicitationAction = "accept" | "decline" | "cancel";
 export interface ElicitationField {
@@ -52,7 +71,11 @@ export interface SessionOption {
 }
 export interface CommandEntry { name: string; description?: string; source?: string; }
 export interface CommandGroup { trigger: CommandTrigger; commands: CommandEntry[]; }
-export interface ProviderCapabilities { options: SessionOption[]; triggers: CommandTrigger[]; }
+export interface ProviderCapabilities {
+  options: SessionOption[];
+  triggers: CommandTrigger[];
+  imageAttachments?: boolean;
+}
 export interface SessionActions { fork?: boolean; }
 export interface ChangedFile { path: string; adds: number; dels: number; status: string; }
 
@@ -100,15 +123,47 @@ export interface Provider {
   installCommand?: string;
   startupTimeoutMs?: number;
 }
+export type ExternalAuthorityStatus =
+  | "connected"
+  | "disconnected"
+  | "stopped"
+  | "unavailable"
+  | "unknown";
+export interface ExternalAuthority {
+  label: string;
+  openUrl?: string;
+  openLabel?: string;
+  status: ExternalAuthorityStatus;
+}
 export interface WorkbenchExperience {
   productName: string;
   surfaceName: string;
   contextLabel?: string;
   defaultProvider: string;
   localAuthorityLabel: string;
-  hubAuthorityLabel: string;
-  hubUrl: string;
-  hubStatus?: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
+  externalAuthority: ExternalAuthority;
+}
+export type ImagePromptCapability = "unknown" | "supported" | "unsupported";
+export type BossSkipReason =
+  | "corrupt-record"
+  | "cwd-unavailable"
+  | "agent-mismatch"
+  | "not-canonical";
+export interface BossSkippedRecord { id: string; agent: string; reason: BossSkipReason; }
+export interface BossState {
+  status: "none" | "canonical" | "blocked";
+  agent: string;
+  sessionId?: string;
+  reason?: string;
+  detail?: string;
+  skipped: BossSkippedRecord[];
+}
+export interface WorkbenchActionAvailability { fork: boolean; compose: boolean; delete: boolean; }
+/** Host-published app continuity, consumed read-only by the Boss surface. */
+export interface AppContinuity {
+  appInstanceId: string;
+  startedAt: string;
+  previousExitClean: boolean;
 }
 export interface RecoveryState { mode: "resumed" | "respawned"; title: string; message: string; }
 export interface ConnectionState { state: "starting"; title: string; message?: string; }
@@ -193,6 +248,7 @@ export function foldEvent(blocks: Block[], evt: AgentEvent): Block[] {
       );
     case "recovery":
     case "connection":
+    case "capabilities":
       return blocks;
     default:
       return blocks;
@@ -204,6 +260,8 @@ interface Hello {
   defaultCwd: string;
   defaultProvider?: string;
   experience?: WorkbenchExperience;
+  boss?: BossState;
+  continuity?: AppContinuity | null;
   keys?: { ctrlJ?: CtrlJMode };
 }
 
@@ -215,8 +273,14 @@ export interface SessionState {
   defaultCwd: string;
   defaultProvider: string;
   experience: WorkbenchExperience | null;
+  boss: BossState | null;
+  continuity: AppContinuity | null;
+  imageCapability: ImagePromptCapability;
+  bossPreparationError: string;
+  actionsAllowed: WorkbenchActionAvailability;
   connection: ConnectionState | null;
   recovery: RecoveryState | null;
+  restore: WorkbenchRestoreReceipt | null;
   ctrlJ: CtrlJMode;
   phase: "composer" | "chat";
   session: SessionSummary | null;
@@ -230,10 +294,11 @@ export interface SessionState {
   cwdChecks: Record<string, { ok: boolean; message?: string }>;
   fileDiffs: Record<string, string>;
   lastError: string;
+  composerAttachments: PromptAttachment[];
   forkPending: boolean;
-  start(opts: { provider: string; cwd: string; prompt: string; options?: Record<string, OptionValue> }): boolean;
-  compose(): void;
-  reply(text: string): void;
+  start(opts: { provider: string; cwd: string; prompt: string; attachments?: PromptAttachment[]; options?: Record<string, OptionValue> }): boolean;
+  compose(options?: { attachments?: PromptAttachment[]; error?: string }): void;
+  reply(text: string, attachments?: PromptAttachment[]): Promise<boolean>;
   stop(): void;
   setOption(id: string, value: OptionValue): void;
   respondPermission(requestId: string, optionId: string): void;
@@ -249,6 +314,7 @@ export interface SessionState {
   requestFileDiff(sessionId: string, path: string): void;
   checkCwd(cwd: string): void;
   clearError(): void;
+  retryBossPreparation(): void;
 }
 
 declare global {
@@ -287,6 +353,38 @@ export function consumeOptimisticUserEcho(queue: string[], text: string): boolea
   return true;
 }
 
+export function settlePendingReply(
+  pending: Map<string, (accepted: boolean) => void>,
+  requestId: string,
+  accepted: boolean,
+): boolean {
+  const resolve = pending.get(requestId);
+  if (!resolve) return false;
+  pending.delete(requestId);
+  resolve(accepted);
+  return true;
+}
+
+export function rememberRetiredId(ids: Set<string>, id: string, limit = 32): void {
+  ids.delete(id);
+  ids.add(id);
+  while (ids.size > limit) {
+    const oldest = ids.values().next().value;
+    if (typeof oldest !== "string") break;
+    ids.delete(oldest);
+  }
+}
+
+export function promptDisplayText(
+  prompt: string,
+  attachments: ReadonlyArray<Pick<PromptAttachment, "name">>,
+): string {
+  return [
+    prompt,
+    ...attachments.map((attachment) => `[Image: ${attachment.name}]`),
+  ].filter(Boolean).join("\n");
+}
+
 export function providerSessionTitle(
   providers: Provider[],
   provider: string,
@@ -308,14 +406,60 @@ export function resolveProviderSelection(providers: Provider[], current: string,
   return installed[0]?.id ?? current;
 }
 
-export function pickInitialBossSession(
+/**
+ * The canonical Boss always comes from the server. Recency heuristics are gone
+ * on purpose: a newer session must never win over the server's pointer.
+ */
+export function applyCanonicalBoss(
   sessions: SessionSummary[],
+  boss: BossState | null,
   experience: WorkbenchExperience | null,
 ): SessionSummary | null {
-  if (!experience) return null;
-  return sessions
-    .filter((session) => session.provider === experience.defaultProvider)
-    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0] ?? null;
+  if (!experience || !boss || boss.status !== "canonical" || !boss.sessionId) return null;
+  return sessions.find((session) => session.id === boss.sessionId) ?? null;
+}
+
+/**
+ * Boss preserves a restart visibly without restating the world model: one short
+ * notice when the host reported an unclean previous exit, and nothing at all
+ * otherwise. Restore progress, topology, and launch identity stay with their
+ * owner.
+ */
+export function appContinuityNotice(continuity: AppContinuity | null): string {
+  if (!continuity || continuity.previousExitClean) return "";
+  return "Restarted after an unclean shutdown";
+}
+
+export function bossBlockedMessage(boss: BossState | null): string {
+  if (!boss || boss.status !== "blocked") return "";
+  return `Boss recovery is blocked (${boss.reason}): ${boss.detail}`;
+}
+
+/** Workbench has one continuous Boss relationship: replies stay available, but new, reset, delete, and fork do not. */
+export function workbenchActionsAllowed(
+  experience: WorkbenchExperience | null,
+): WorkbenchActionAvailability {
+  if (experience) return { fork: false, compose: true, delete: false };
+  return { fork: true, compose: true, delete: true };
+}
+
+/** Images require positive capability. Established conversations keep text recovery available while reconnecting; initial Workbench input waits for negotiation. */
+export function imageAttachmentAllowed(capability: ImagePromptCapability): boolean {
+  return capability === "supported";
+}
+
+/** The composer keeps its draft in every capability state. */
+export function draftSurvivesCapabilityChange(): boolean {
+  return true;
+}
+
+/** Rebuild the negotiated capability from replayed history after a reconnect. */
+export function latestImageCapability(events: AgentEvent[]): ImagePromptCapability {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind === "capabilities") return event.image;
+  }
+  return "unknown";
 }
 
 export function useSession(): SessionState {
@@ -326,8 +470,13 @@ export function useSession(): SessionState {
   const [defaultCwd, setDefaultCwd] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("");
   const [experience, setExperience] = useState<WorkbenchExperience | null>(null);
+  const [boss, setBoss] = useState<BossState | null>(null);
+  const [continuity, setContinuity] = useState<AppContinuity | null>(null);
+  const [imageCapability, setImageCapability] = useState<ImagePromptCapability>("unknown");
+  const [bossPreparationError, setBossPreparationError] = useState("");
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
+  const [restore, setRestore] = useState<WorkbenchRestoreReceipt | null>(null);
   const [ctrlJ, setCtrlJ] = useState<CtrlJMode>("newline");
   const [phase, setPhase] = useState<"composer" | "chat">(routedSessionId ? "chat" : "composer");
   const [session, setSession] = useState<SessionSummary | null>(null);
@@ -341,8 +490,10 @@ export function useSession(): SessionState {
   const [cwdChecks, setCwdChecks] = useState<Record<string, { ok: boolean; message?: string }>>({});
   const [fileDiffs, setFileDiffs] = useState<Record<string, string>>({});
   const [lastError, setLastError] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<PromptAttachment[]>([]);
   const [forkPending, setForkPending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const bossInputObservedRef = useRef(false);
   const providersRef = useRef<Provider[]>([]);
   const sessionIdRef = useRef<string | null>(routedSessionId);
   const pendingFileDiffKeysRef = useRef<Record<string, string[]>>({});
@@ -352,13 +503,19 @@ export function useSession(): SessionState {
     provider: string;
     cwd: string;
     prompt: string;
+    attachments?: PromptAttachment[];
     options?: Record<string, OptionValue>;
-    queuedReplies: string[];
+    queuedReplies: Array<{ requestId: string; prompt: string; attachments?: PromptAttachment[] }>;
     failed?: boolean;
   } | null>(null);
   const pendingStartTimeoutRef = useRef<number | null>(null);
+  const pendingRepliesRef = useRef(new Map<string, (accepted: boolean) => void>());
+  const retiredStartRequestIdsRef = useRef(new Set<string>());
+  const retiredSessionIdsRef = useRef(new Set<string>());
   const optimisticUsersRef = useRef<string[]>([]);
   const experienceRef = useRef<WorkbenchExperience | null>(null);
+  const bossRef = useRef<BossState | null>(null);
+  const bossPreparationReadyRef = useRef(false);
   const initialSessionListHandledRef = useRef(false);
 
   const clearPendingStartTimeout = useCallback(() => {
@@ -369,9 +526,15 @@ export function useSession(): SessionState {
   const failPendingStart = useCallback((message: string) => {
     const pending = pendingStartRef.current;
     if (!pending) return;
+    rememberRetiredId(retiredStartRequestIdsRef.current, pending.requestId);
+    for (const queued of pending.queuedReplies) {
+      pendingRepliesRef.current.get(queued.requestId)?.(false);
+      pendingRepliesRef.current.delete(queued.requestId);
+    }
     clearPendingStartTimeout();
     pendingStartRef.current = null;
     restoreComposerDraft(sessionStorage, pending.prompt);
+    setComposerAttachments(pending.attachments ?? []);
     history.replaceState(null, "", appPath("/"));
     document.title = "cmux agent";
     sessionIdRef.current = null;
@@ -390,7 +553,14 @@ export function useSession(): SessionState {
   const armPendingStartTimeout = useCallback((provider: string) => {
     clearPendingStartTimeout();
     pendingStartTimeoutRef.current = window.setTimeout(() => {
+      const pending = pendingStartRef.current;
       failPendingStart("Failed to start agent: request timed out");
+      if (pending) {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ op: "cancel-start", requestId: pending.requestId, retire: true }));
+        }
+      }
     }, providerStartTimeoutMs(providersRef.current, provider));
   }, [clearPendingStartTimeout, failPendingStart]);
 
@@ -403,16 +573,41 @@ export function useSession(): SessionState {
     return false;
   }, []);
 
+  const retryBossPreparation = useCallback(() => {
+    if (!experienceRef.current || sessionIdRef.current || pendingStartRef.current) return;
+    if (sendRaw({ op: "warm-boss" })) {
+      bossPreparationReadyRef.current = false;
+      setImageCapability("unknown");
+      setBossPreparationError("");
+      setLastError("");
+    }
+  }, [sendRaw]);
+
+  useEffect(() => {
+    if (!experience) return;
+    return observeBossUserInput(window, () => {
+      bossInputObservedRef.current = true;
+      return sendRaw({ op: "user-input" });
+    });
+  }, [experience, connectionEpoch, sendRaw]);
+
   useEffect(() => {
     let closed = false;
     const connect = () => {
       const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + appPath("/ws"));
       wsRef.current = ws;
       ws.onopen = () => {
+        if (bossInputObservedRef.current) sendRaw({ op: "user-input" });
+        for (const requestId of retiredStartRequestIdsRef.current) {
+          sendRaw({ op: "cancel-start", requestId, retire: true });
+        }
         const pending = pendingStartRef.current;
-        if (sessionIdRef.current) sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
-        else if (pending && !pending.failed) {
-          sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, options: pending.options });
+        if (sessionIdRef.current) {
+          sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
+          sendRaw({ op: "warm-boss" });
+        }
+        else if (pending && !pending.failed && !retiredStartRequestIdsRef.current.has(pending.requestId)) {
+          sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, attachments: pending.attachments, options: pending.options });
           armPendingStartTimeout(pending.provider);
         }
       };
@@ -428,12 +623,32 @@ export function useSession(): SessionState {
             setDefaultProvider(h.defaultProvider ?? "");
             experienceRef.current = h.experience ?? null;
             setExperience(experienceRef.current);
+            bossRef.current = h.boss ?? null;
+            setBoss(bossRef.current);
+            setContinuity(h.continuity ?? null);
+            if (h.boss?.status === "blocked") setLastError(bossBlockedMessage(h.boss));
+            else if (h.experience) {
+              if (!sessionIdRef.current && !pendingStartRef.current) retryBossPreparation();
+              else sendRaw({ op: "warm-boss" });
+            }
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
             break;
           }
           case "session-created":
+            if (
+              typeof msg.requestId === "string"
+              && retiredStartRequestIdsRef.current.has(msg.requestId)
+            ) {
+              rememberRetiredId(retiredSessionIdsRef.current, String(msg.session.id));
+              sendRaw({ op: "cancel-start", requestId: msg.requestId, retire: true });
+              if (sessionIdRef.current) {
+                sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
+              }
+              break;
+            }
+            if (experienceRef.current && msg.requestId && pendingStartRef.current?.requestId !== msg.requestId) break;
             sessionIdRef.current = msg.session.id;
             history.replaceState(null, "", appPath("/s/" + msg.session.id));
             document.title = msg.session.title || "cmux agent";
@@ -442,8 +657,11 @@ export function useSession(): SessionState {
               clearPendingStartTimeout();
               pendingStartRef.current = null;
               setSession({ ...msg.session, status: "running" });
-              for (const prompt of queuedReplies) {
-                sendRaw({ op: "send", sessionId: msg.session.id, prompt });
+              for (const queued of queuedReplies) {
+                if (!sendRaw({ op: "send", sessionId: msg.session.id, ...queued })) {
+                  pendingRepliesRef.current.get(queued.requestId)?.(false);
+                  pendingRepliesRef.current.delete(queued.requestId);
+                }
               }
             } else {
               setSession(msg.session);
@@ -459,13 +677,40 @@ export function useSession(): SessionState {
             setFileDiffs({});
             setPhase("chat");
             break;
+          case "start-retired":
+            if (experienceRef.current && !retiredStartRequestIdsRef.current.has(msg.requestId)) break;
+            if (experienceRef.current && pendingStartRef.current && pendingStartRef.current.requestId !== msg.requestId) break;
+            if (experienceRef.current && !msg.sessionId && pendingStartRef.current?.requestId === msg.requestId) {
+              failPendingStart("");
+            }
+            if (typeof msg.requestId === "string") {
+              retiredStartRequestIdsRef.current.delete(msg.requestId);
+            }
+            if (experienceRef.current && typeof msg.sessionId === "string") {
+              retiredSessionIdsRef.current.delete(msg.sessionId);
+              clearPendingStartTimeout();
+              pendingStartRef.current = null;
+              sessionIdRef.current = msg.sessionId;
+              history.replaceState(null, "", appPath("/s/" + msg.sessionId));
+              setLastError("");
+              sendRaw({ op: "subscribe", sessionId: msg.sessionId });
+            }
+            break;
+          case "send-accepted": {
+            const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+            settlePendingReply(pendingRepliesRef.current, requestId, true);
+            break;
+          }
           case "history":
+            if (retiredSessionIdsRef.current.has(String(msg.session.id))) break;
             sessionIdRef.current = msg.session.id;
             document.title = msg.session.title || "cmux agent";
             setSession(msg.session);
             setBlocks((msg.events as AgentEvent[]).reduce(foldEvent, [] as Block[]));
             setConnection(latestConnection(msg.events as AgentEvent[]));
             setRecovery(latestRecovery(msg.events as AgentEvent[]));
+            setRestore(msg.restore ?? latestWorkbenchRestore(msg.events as AgentEvent[]));
+            setImageCapability(latestImageCapability(msg.events as AgentEvent[]));
             optimisticUsersRef.current = [];
             setOptions(latestOptions(msg.events as AgentEvent[]));
             setActions(latestActions(msg.events as AgentEvent[]));
@@ -483,16 +728,38 @@ export function useSession(): SessionState {
             setCommands([]);
             setConnection(null);
             setRecovery(null);
+            setRestore(null);
             pendingFileDiffKeysRef.current = {};
             setFileDiffs({});
             setPhase("composer");
             optimisticUsersRef.current = [];
             break;
+          case "boss-state":
+            bossRef.current = (msg.boss as BossState) ?? null;
+            setBoss(bossRef.current);
+            if (bossRef.current?.status === "blocked") setLastError(bossBlockedMessage(bossRef.current));
+            break;
+          case "boss-capabilities":
+            if (experienceRef.current && !sessionIdRef.current) {
+              const prepared = msg.image === "supported" || msg.image === "unsupported";
+              if (prepared) {
+                setBossPreparationError("");
+                setLastError("");
+              } else if (msg.image === "unknown" && bossPreparationReadyRef.current) {
+                const locale = typeof navigator === "undefined" ? "en" : navigator.language ?? "en";
+                setBossPreparationError(locale.toLowerCase().startsWith("ja")
+                  ? "Boss \u3068\u306e\u63a5\u7d9a\u304c\u5931\u308f\u308c\u307e\u3057\u305f\u3002"
+                  : "The Boss connection was lost.");
+              }
+              bossPreparationReadyRef.current = prepared;
+              setImageCapability(msg.image);
+            }
+            break;
           case "sessions": {
             if (initialSessionListHandledRef.current) break;
             initialSessionListHandledRef.current = true;
             if (routedSessionId || sessionIdRef.current || pendingStartRef.current) break;
-            const recovered = pickInitialBossSession(msg.sessions ?? [], experienceRef.current);
+            const recovered = applyCanonicalBoss(msg.sessions ?? [], bossRef.current, experienceRef.current);
             if (!recovered) break;
             sessionIdRef.current = recovered.id;
             history.replaceState(null, "", appPath("/s/" + recovered.id));
@@ -512,6 +779,10 @@ export function useSession(): SessionState {
           case "event":
             if (msg.sessionId === sessionIdRef.current) {
               const evt = msg.evt as AgentEvent;
+              if (evt.kind === "workbench-restore") {
+                setRestore(evt);
+                break;
+              }
               if (evt.kind === "connection") {
                 setConnection(evt.state === "starting"
                   ? { state: "starting", title: evt.title, message: evt.message }
@@ -520,6 +791,10 @@ export function useSession(): SessionState {
               }
               if (evt.kind === "recovery") {
                 setRecovery({ mode: evt.mode, title: evt.title, message: evt.message });
+                break;
+              }
+              if (evt.kind === "capabilities") {
+                setImageCapability(evt.image);
                 break;
               }
               if (evt.kind === "user" && consumeOptimisticUserEcho(optimisticUsersRef.current, evt.text)) {
@@ -566,7 +841,22 @@ export function useSession(): SessionState {
             }
             break;
           case "error":
+            if (msg.op === "warm-boss") {
+              const message = String(msg.message ?? "");
+              setLastError(message);
+              if (experienceRef.current && !sessionIdRef.current) {
+                bossPreparationReadyRef.current = false;
+                setImageCapability("unknown");
+                setBossPreparationError(message);
+              }
+            }
             if (msg.op === "start") {
+              if (
+                typeof msg.requestId === "string"
+                && retiredStartRequestIdsRef.current.has(msg.requestId)
+              ) {
+                break;
+              }
               const message = String(msg.message ?? "");
               const pending = pendingStartRef.current;
               if (pending && (!msg.requestId || msg.requestId === pending.requestId)) {
@@ -574,6 +864,12 @@ export function useSession(): SessionState {
               } else {
                 setLastError(message);
               }
+            }
+            if (msg.op === "send") {
+              const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+              settlePendingReply(pendingRepliesRef.current, requestId, false);
+              // Cancellation failure is already shown by the localized native receipt.
+              setLastError(msg.recoveryError === "cancel-failed" ? null : String(msg.message ?? "Failed to send message"));
             }
             if (msg.op === "fork") setForkPending(false);
             if (msg.op === "get-file-diff" && typeof msg.path === "string" && msg.path) {
@@ -586,21 +882,39 @@ export function useSession(): SessionState {
             break;
         }
       };
-      ws.onclose = () => { if (!closed) setTimeout(connect, 800); };
+      ws.onclose = () => {
+        for (const resolve of pendingRepliesRef.current.values()) resolve(false);
+        pendingRepliesRef.current.clear();
+        if (!closed) setTimeout(connect, 800);
+      };
     };
     connect();
-    return () => { closed = true; clearPendingStartTimeout(); wsRef.current?.close(); };
-  }, [armPendingStartTimeout, clearPendingStartTimeout, failPendingStart, sendRaw]);
+    return () => {
+      closed = true;
+      clearPendingStartTimeout();
+      for (const resolve of pendingRepliesRef.current.values()) resolve(false);
+      pendingRepliesRef.current.clear();
+      wsRef.current?.close();
+    };
+  }, [armPendingStartTimeout, clearPendingStartTimeout, failPendingStart, retryBossPreparation, sendRaw]);
 
-  const start = useCallback((opts: { provider: string; cwd: string; prompt: string; options?: Record<string, OptionValue> }) => {
-    const key = JSON.stringify([opts.provider, opts.cwd, opts.prompt, opts.options ?? {}]);
+  const start = useCallback((opts: { provider: string; cwd: string; prompt: string; attachments?: PromptAttachment[]; options?: Record<string, OptionValue> }) => {
+    const key = JSON.stringify([
+      opts.provider,
+      opts.cwd,
+      opts.prompt,
+      opts.attachments?.map((attachment) => attachment.id) ?? [],
+      opts.options ?? {},
+    ]);
     const current = pendingStartRef.current;
-    if (current && !current.failed && current.key === key) return false;
+    if (current && !current.failed && (current.key === key || retiredStartRequestIdsRef.current.has(current.requestId))) return false;
     const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     if (!sendRaw({ op: "start", requestId, ...opts })) return false;
     pendingStartRef.current = { requestId, key, queuedReplies: [], ...opts };
+    setComposerAttachments([]);
     armPendingStartTimeout(opts.provider);
-    optimisticUsersRef.current = [opts.prompt];
+    const displayPrompt = promptDisplayText(opts.prompt, opts.attachments ?? []);
+    optimisticUsersRef.current = [displayPrompt];
     sessionIdRef.current = null;
     history.replaceState(null, "", appPath("/"));
     const title = providerSessionTitle(providers, opts.provider, experience);
@@ -613,7 +927,7 @@ export function useSession(): SessionState {
       title,
       status: "running",
     });
-    setBlocks([{ kind: "user", text: opts.prompt }]);
+    setBlocks([{ kind: "user", text: displayPrompt }]);
     setOptions([]);
     setActions({});
     setCommands([]);
@@ -628,9 +942,11 @@ export function useSession(): SessionState {
     setPhase("chat");
     return true;
   }, [armPendingStartTimeout, experience, providers, sendRaw]);
-  const compose = useCallback(() => {
+  const compose = useCallback((options: { attachments?: PromptAttachment[]; error?: string } = {}) => {
+    if (experienceRef.current) return;
     clearPendingStartTimeout();
     pendingStartRef.current = null;
+    setComposerAttachments(options.attachments ?? []);
     history.replaceState(null, "", appPath("/"));
     document.title = "cmux agent";
     sessionIdRef.current = null;
@@ -643,25 +959,40 @@ export function useSession(): SessionState {
     setRecovery(null);
     pendingFileDiffKeysRef.current = {};
     setFileDiffs({});
+    setLastError(options.error ?? "");
     setPhase("composer");
   }, [clearPendingStartTimeout]);
-  const reply = useCallback((text: string) => {
+  const reply = useCallback((text: string, attachments: PromptAttachment[] = []): Promise<boolean> => {
+    const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const pending = pendingStartRef.current;
     if (!sessionIdRef.current && pending?.failed) {
-      start({ provider: pending.provider, cwd: pending.cwd, prompt: text, options: pending.options });
-      return;
+      return Promise.resolve(start({
+        provider: pending.provider,
+        cwd: pending.cwd,
+        prompt: text,
+        attachments,
+        options: pending.options,
+      }));
     }
-    if (!sessionIdRef.current && pending && !pending.failed) {
-      pending.queuedReplies.push(text);
-      optimisticUsersRef.current.push(text);
-      setBlocks((bs) => [...closeStreaming(bs), { kind: "user", text }]);
-      return;
-    }
-    if (sessionIdRef.current) {
-      if (sendRaw({ op: "send", sessionId: sessionIdRef.current, prompt: text })) {
-        setSession((s) => (s ? { ...s, status: "running" } : s));
+    return new Promise<boolean>((resolve) => {
+      pendingRepliesRef.current.set(requestId, resolve);
+      if (!sessionIdRef.current && pending && !pending.failed) {
+        pending.queuedReplies.push({ requestId, prompt: text, attachments });
+        return;
       }
-    }
+      if (sessionIdRef.current && sendRaw({
+        op: "send",
+        requestId,
+        sessionId: sessionIdRef.current,
+        prompt: text,
+        attachments,
+      })) {
+        setSession((s) => (s ? { ...s, status: "running" } : s));
+        return;
+      }
+      pendingRepliesRef.current.delete(requestId);
+      resolve(false);
+    });
   }, [sendRaw, start]);
   const stop = useCallback(() => {
     if (sessionIdRef.current) {
@@ -669,8 +1000,14 @@ export function useSession(): SessionState {
       return;
     }
     const pending = pendingStartRef.current;
-    if (pending && !pending.failed) sendRaw({ op: "cancel-start", requestId: pending.requestId });
-  }, [sendRaw]);
+    if (pending && !pending.failed) {
+      if (experienceRef.current) {
+        rememberRetiredId(retiredStartRequestIdsRef.current, pending.requestId);
+        clearPendingStartTimeout();
+      }
+      sendRaw({ op: "cancel-start", requestId: pending.requestId, ...(experienceRef.current ? { retire: true } : {}) });
+    }
+  }, [clearPendingStartTimeout, sendRaw]);
   const setOption = useCallback((id: string, value: OptionValue) => {
     if (sessionIdRef.current) sendRaw({ op: "set-option", sessionId: sessionIdRef.current, id, value });
   }, [sendRaw]);
@@ -689,6 +1026,7 @@ export function useSession(): SessionState {
     }
   }, [sendRaw]);
   const fork = useCallback(() => {
+    if (experienceRef.current) return;
     if (sessionIdRef.current) {
       if (sendRaw({ op: "fork", sessionId: sessionIdRef.current })) setForkPending(true);
     }
@@ -721,8 +1059,14 @@ export function useSession(): SessionState {
     defaultCwd,
     defaultProvider,
     experience,
+    boss,
+    continuity,
+    imageCapability,
+    bossPreparationError,
+    actionsAllowed: workbenchActionsAllowed(experience),
     connection,
     recovery,
+    restore,
     ctrlJ,
     phase,
     session,
@@ -736,6 +1080,7 @@ export function useSession(): SessionState {
     cwdChecks,
     fileDiffs,
     lastError,
+    composerAttachments,
     forkPending,
     start,
     compose,
@@ -751,6 +1096,7 @@ export function useSession(): SessionState {
     requestFileDiff,
     checkCwd,
     clearError,
+    retryBossPreparation,
   };
 }
 
@@ -778,6 +1124,14 @@ function latestRecovery(events: AgentEvent[]): RecoveryState | null {
     if (event.kind === "recovery") {
       return { mode: event.mode, title: event.title, message: event.message };
     }
+  }
+  return null;
+}
+
+function latestWorkbenchRestore(events: AgentEvent[]): WorkbenchRestoreReceipt | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind === "workbench-restore") return event;
   }
   return null;
 }

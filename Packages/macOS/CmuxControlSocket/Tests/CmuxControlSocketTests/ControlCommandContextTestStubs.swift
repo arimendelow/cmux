@@ -503,7 +503,9 @@ extension ControlSurfaceContext {
     func controlSurfaceResumeGet(
         routing: ControlRoutingSelectors,
         explicitTargetID: UUID?,
-        hasResolvedWindowID: Bool
+        hasResolvedWindowID: Bool,
+        expectedKind: String?,
+        expectedCheckpointID: String?
     ) -> ControlSurfaceResumeResolution { .surfaceNotFound }
 
     func controlSurfaceResumeClear(

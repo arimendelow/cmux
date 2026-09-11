@@ -14,40 +14,79 @@ extension DockSplitStore {
         invalidatedCachedTransferAgentSessionPanelIds.remove(panelId)
         replacedCachedTransferAgentSessionPanelIds.remove(panelId)
         restoredResumeSessionWorkingDirectoriesByPanelId.removeValue(forKey: panelId)
+        restoredAgentLifecycle.clearStartupInput(panelId: panelId)
         agentRuntimeByPanelId.removeValue(forKey: panelId)
     }
 
-    func canTakeControlOfHubSession(panelId: UUID) -> Bool {
-        hubSessionLocalTakeover(panelId: panelId) != nil
+    func canTakeControlOfExternalSession(panelId: UUID) -> Bool {
+        externalSessionLocalTakeover(panelId: panelId) != nil
     }
 
     @discardableResult
-    func takeControlOfHubSession(
+    func takeControlOfExternalSession(
         panelId: UUID,
         send: (TerminalPanel, String) -> Bool
     ) -> Bool {
         guard let terminal = panels[panelId] as? TerminalPanel,
-              let takeover = hubSessionLocalTakeover(panelId: panelId),
+              let takeover = externalSessionLocalTakeover(panelId: panelId),
+              let localBinding = WorkbenchSessionAuthority.localTakeoverBinding(
+                  snapshot: takeover.snapshot,
+                  replacing: managedAgentResumeBinding(panelId: panelId)
+                      ?? surfaceResumeBindingsByPanelId[panelId]
+              ),
               send(terminal, takeover.input) else {
             return false
         }
         restoredAgentLifecycle.snapshotsByPanelId[panelId] = takeover.snapshot
-        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
-        managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
+        surfaceResumeBindingsByPanelId[panelId] = localBinding
+        managedAgentResumeBindingsByPanelId[panelId] = localBinding
         restoredAgentLifecycle.resumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        restoredAgentLifecycle.registerStartupInput(takeover.input, panelId: panelId)
         restoredAgentLifecycle.invalidatedFingerprintsByPanelId.removeValue(forKey: panelId)
+        agentRuntimeByPanelId.removeValue(forKey: panelId)
+        invalidatedCachedTransferAgentSessionPanelIds.remove(panelId)
+        replacedCachedTransferAgentSessionPanelIds.remove(panelId)
+        if var transfer = detachedSurfaceTransfersByPanelId[panelId] {
+            transfer.restorableAgent = takeover.snapshot
+            transfer.restorableAgentResumeState = .awaitingAutoResumeCommand
+            transfer.restoredAgentCompletedGeneration = nil
+            transfer.restoredResumeSessionWorkingDirectory = takeover.snapshot.workingDirectory
+            transfer.restoredStartupInput = takeover.input
+            transfer.resumeBinding = localBinding
+            transfer.managedAgentResumeBinding = localBinding
+            transfer.agentRuntime = nil
+            setDetachedSurfaceTransfer(transfer, forPanelID: panelId)
+        }
         return true
     }
 
-    private func hubSessionLocalTakeover(
+    private func externalSessionLocalTakeover(
         panelId: UUID
     ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
-        guard restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable,
+        let agent = restoredAgentLifecycle.snapshotsByPanelId[panelId]
+        let binding = managedAgentResumeBinding(panelId: panelId)
+            ?? surfaceResumeBindingsByPanelId[panelId]
+        let compatibleAgent = Workspace.restorableAgentForSessionRestore(
+            agent,
+            resumeBinding: binding
+        )
+        let bindingSupersedesAgent =
+            agent != nil && binding?.isAgentHookBinding == true && compatibleAgent == nil
+        let canResume =
+            (
+                restoredAgentLifecycle.resumeStatesByPanelId[panelId] == .manualResumeAvailable &&
+                !bindingSupersedesAgent
+            ) ||
+            (
+                compatibleAgent == nil &&
+                binding != nil &&
+                (panels[panelId] as? TerminalPanel)?.shellActivity.state == .promptIdle
+            )
+        guard canResume,
               detachedSurfaceTransfersByPanelId[panelId]?.isRemoteTerminal != true,
               let snapshot = WorkbenchSessionAuthority.localTakeoverSnapshot(
-                agent: restoredAgentLifecycle.snapshotsByPanelId[panelId],
-                binding: managedAgentResumeBinding(panelId: panelId)
-                    ?? surfaceResumeBindingsByPanelId[panelId]
+                agent: agent,
+                binding: binding
               ),
               let command = snapshot.resumeCommand else {
             return nil
@@ -63,6 +102,9 @@ extension DockSplitStore {
         switch (state, restoredAgentLifecycle.resumeStatesByPanelId[panelId]) {
         case (.commandRunning, .some(.awaitingAutoResumeCommand)):
             restoredAgentLifecycle.resumeStatesByPanelId[panelId] = .autoResumeCommandRunning
+            restoredAgentLifecycle.clearStartupInput(panelId: panelId)
+        case (.promptIdle, .some(.awaitingAutoResumeCommand)):
+            scheduleRestoredStartupInputResend(panelId: panelId)
         case (.commandRunning, .some(.manualResumeAvailable)):
             restoredAgentLifecycle.snapshotsByPanelId.removeValue(forKey: panelId)
             restoredAgentLifecycle.resumeStatesByPanelId.removeValue(forKey: panelId)
@@ -82,14 +124,21 @@ extension DockSplitStore {
     }
 
     func adoptSessionRestoreState(from detached: Workspace.DetachedSurfaceTransfer) {
+        if let shellActivityState = detached.shellActivityState {
+            (detached.panel as? TerminalPanel)?.updateShellActivityState(shellActivityState)
+        }
         invalidatedCachedTransferAgentSessionPanelIds.remove(detached.panelId)
         replacedCachedTransferAgentSessionPanelIds.remove(detached.panelId)
         restoredAgentLifecycle.seedTransferredState(
             panelId: detached.panelId,
             snapshot: detached.restorableAgent,
             resumeState: detached.restorableAgentResumeState,
-            completedGeneration: detached.restoredAgentCompletedGeneration
+            completedGeneration: detached.restoredAgentCompletedGeneration,
+            startupInput: detached.restoredStartupInput
         )
+        if detached.shellActivityState == .promptIdle {
+            scheduleRestoredStartupInputResend(panelId: detached.panelId)
+        }
         managedAgentResumeBindingsByPanelId.removeValue(forKey: detached.panelId)
         if let resumeBinding = detached.resumeBinding {
             surfaceResumeBindingsByPanelId[detached.panelId] = resumeBinding
@@ -108,10 +157,36 @@ extension DockSplitStore {
     }
 
     func configureAgentHibernationResume(for terminal: TerminalPanel) {
+        terminal.surface.onExplicitInput = { [weak self, weak terminal] in
+            guard let self, let terminal else { return }
+            self.restoredAgentLifecycle.clearStartupInput(panelId: terminal.id)
+        }
         terminal.onRequestAgentHibernationResume = { [weak self, weak terminal] focus in
             guard let self, let terminal else { return false }
             return self.resumeAgentHibernation(panelId: terminal.id, focus: focus)
         }
+    }
+
+    func scheduleRestoredStartupInputResend(panelId: UUID) {
+        guard restoredAgentLifecycle.armStartupInputResend(panelId: panelId) else { return }
+        let grace = Workspace.restoredStartupInputResendGrace
+        DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.resendRestoredStartupInputIfStillIdle(panelId: panelId)
+            }
+        }
+    }
+
+    func resendRestoredStartupInputIfStillIdle(panelId: UUID) {
+        guard let terminal = panels[panelId] as? TerminalPanel,
+              let input = restoredAgentLifecycle.takeStartupInputForResend(
+                  panelId: panelId,
+                  shellState: terminal.shellActivity.state
+              ),
+              terminal.surface.surface != nil else {
+            return
+        }
+        _ = terminal.sendInputResult(input)
     }
 
     @discardableResult

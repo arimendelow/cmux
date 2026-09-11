@@ -49,7 +49,8 @@ extension SurfaceResumeBindingSnapshot {
     func restoreStartupInput(
         repairPortableAgentExecutable: Bool
     ) -> String? {
-        if usesLocalRestoreVerb {
+        if usesLocalRestoreVerb,
+           workbenchAuthorityEvidence != .launcherOwned {
             return localRestoreCLIInput
         }
         return inlineStartupInput(

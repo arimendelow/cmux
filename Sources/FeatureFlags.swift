@@ -3,6 +3,17 @@ import Observation
 import PostHog
 import os
 
+/// Host-published app continuity, forwarded verbatim to the Boss surface.
+///
+/// The app lifecycle owner publishes these values; this type only carries them
+/// across the sidecar boundary so Boss can preserve a restart visibly. Nothing
+/// here derives, caches, or re-decides continuity.
+struct WorkbenchAgentChatContinuity: Equatable {
+    var appInstanceId: UUID
+    var startedAt: Date
+    var previousExitClean: Bool
+}
+
 enum OuroWorkbenchProduct {
     private static let bundleIdentifierPrefix = "com.ourostack.workbench"
     private static let copilotHookInstallStarted = OSAllocatedUnfairLock(initialState: false)
@@ -74,7 +85,7 @@ enum OuroWorkbenchProduct {
         guard let script = scripts.first(where: {
             fileManager.isExecutableFile(atPath: $0.path)
         }) else { return nil }
-        return "BUN_BIN=\"$(command -v bun)\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
+        return "BUN_BIN=\"${BUN_BIN:-$(command -v bun)}\" \(TerminalStartupShellQuoting.singleQuoted(script.path)) --no-open"
     }
 
     static var currentAgentChatStartCommand: String? {
@@ -177,6 +188,10 @@ enum OuroWorkbenchProduct {
         }
     }
 
+    /// Boss selection is one-time onboarding. A configured agent that is not
+    /// currently usable blocks visibly; it never falls back to "the only other
+    /// installed agent", because that would silently start a second Boss
+    /// relationship under a different identity.
     static func resolveBossSelection(
         selectedBossName: String? = nil,
         legacyBossName: String?,
@@ -185,23 +200,62 @@ enum OuroWorkbenchProduct {
         let usable = usableAgentNames
             .filter(isSafeAgentName)
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        if let selectedBossName = selectedBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           isSafeAgentName(selectedBossName),
-           usable.contains(selectedBossName) {
-            return .selected(selectedBossName)
-        }
-        if let legacyBossName = legacyBossName?.trimmingCharacters(in: .whitespacesAndNewlines),
-           isSafeAgentName(legacyBossName),
-           usable.contains(legacyBossName) {
-            return .selected(legacyBossName)
-        }
-        if usable.count == 1 {
-            return .selected(usable[0])
+        // An explicit selection decides on its own: if it is not usable the
+        // relationship blocks rather than silently adopting the legacy record
+        // or the only other installed agent. The legacy record only applies to
+        // a configured upgrade that has no explicit selection yet.
+        let configured = [selectedBossName, legacyBossName]
+            .map { $0?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+            .map { isSafeAgentName($0) ? $0 : "" }
+        if let configuredName = configured.first(where: { !$0.isEmpty }) {
+            return usable.contains(configuredName)
+                ? .selected(configuredName)
+                : .unavailable(
+                    "Boss agent \(configuredName) is not available. Reinstall it or choose a Boss again."
+                )
         }
         if usable.isEmpty {
             return .unavailable("No enabled Ouro agents are installed.")
         }
         return .unavailable("Choose one Ouro agent as Boss: \(usable.joined(separator: ", ")).")
+    }
+
+    /// The canonical Boss pointer is owned by the Agent Chat server; the app
+    /// only needs to know whether a canonical relationship exists yet.
+    static func bossSessionsRootURL(
+        applicationSupportURL: URL
+    ) -> URL {
+        applicationSupportURL
+            .appendingPathComponent("Ouro Workbench v1", isDirectory: true)
+            .appendingPathComponent("Agent Chat", isDirectory: true)
+            .appendingPathComponent("Sessions", isDirectory: true)
+    }
+
+    static func canonicalBossPointerURL(
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        let appSupport = applicationSupportURL
+            ?? homeURL.appendingPathComponent("Library/Application Support")
+        return bossSessionsRootURL(applicationSupportURL: appSupport)
+            .appendingPathComponent("canonical-boss.json")
+    }
+
+    static func hasCanonicalBoss(
+        applicationSupportURL: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        fileManager.fileExists(atPath: canonicalBossPointerURL(
+            applicationSupportURL: applicationSupportURL,
+            homeURL: homeURL
+        ).path)
     }
 
     static func usableBossAgentNames(
@@ -257,6 +311,7 @@ enum OuroWorkbenchProduct {
         controlSocketPath: String? = nil,
         controlSocketCapability: String? = nil,
         controlSocketReady: Bool = false,
+        appContinuity: WorkbenchAgentChatContinuity? = nil,
         sourceFilePath: String = #filePath,
         defaults: UserDefaults = .standard,
         environment baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -264,17 +319,26 @@ enum OuroWorkbenchProduct {
     ) -> [String: String] {
         guard isWorkbenchBundleIdentifier(bundleIdentifier) else { return [:] }
         let sourceRoot = repositoryRoot(sourceFilePath: sourceFilePath)
-        let deskRoot = homeURL.appendingPathComponent("ms-desk", isDirectory: true)
+        // The primary workspace root is host configuration, not a public
+        // default: an integration supplies it through the environment and the
+        // fallback stays neutral.
+        let configuredWorkspaceRoot = baseEnvironment["CMUX_WORKBENCH_WORKSPACE_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspaceRoot = (configuredWorkspaceRoot?.isEmpty == false)
+            ? URL(fileURLWithPath: configuredWorkspaceRoot!)
+            : homeURL
         let appSupport = applicationSupportURL
             ?? homeURL.appendingPathComponent("Library/Application Support")
         var environment = [
             "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
+            "CMUX_AGENT_CHAT_APP_SUPPORT_ROOT": appSupport
+                .appendingPathComponent("Ouro Workbench v1", isDirectory: true).path,
             "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
             "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
-            "CMUX_AGENT_UI_CWD": deskRoot.path,
+            "CMUX_AGENT_UI_CWD": workspaceRoot.path,
             "CMUX_AGENT_CHAT_ALLOWED_ROOTS": [
                 homeURL.appendingPathComponent("code").path,
-                deskRoot.path,
+                workspaceRoot.path,
                 sourceRoot.path,
             ].joined(separator: ":"),
             "CMUX_AGENT_CHAT_SESSION_DIR": appSupport
@@ -282,6 +346,8 @@ enum OuroWorkbenchProduct {
                 .path,
             "CMUX_AGENT_MODELS_URL": "http://127.0.0.1:1",
         ]
+        let sessionsRoot = bossSessionsRootURL(applicationSupportURL: appSupport)
+        environment["CMUX_AGENT_CHAT_BOSS_POINTER_DIR"] = sessionsRoot.path
         switch currentBossSelection(
             homeURL: homeURL,
             applicationSupportURL: appSupport,
@@ -290,12 +356,26 @@ enum OuroWorkbenchProduct {
         ) {
         case .selected(let agentName):
             environment["CMUX_AGENT_CHAT_BOSS_AGENT"] = agentName
-            environment["CMUX_AGENT_CHAT_SESSION_DIR"] = appSupport
-                .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions")
+            environment["CMUX_AGENT_CHAT_SESSION_DIR"] = sessionsRoot
                 .appendingPathComponent(agentName, isDirectory: true)
                 .path
         case .unavailable(let message):
             environment["CMUX_AGENT_CHAT_BOSS_ERROR"] = message
+            // An unavailable selection keeps its last-good agent-scoped records
+            // so the blocked state never points at a different session root.
+            if let lastGood = defaults.string(forKey: selectedBossDefaultsKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                isSafeAgentName(lastGood) {
+                environment["CMUX_AGENT_CHAT_SESSION_DIR"] = sessionsRoot
+                    .appendingPathComponent(lastGood, isDirectory: true)
+                    .path
+            }
+        }
+        if let appContinuity {
+            environment["CMUX_WORKBENCH_APP_INSTANCE_ID"] = appContinuity.appInstanceId.uuidString
+            environment["CMUX_WORKBENCH_APP_STARTED_AT"] = ISO8601DateFormatter()
+                .string(from: appContinuity.startedAt)
+            environment["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] = appContinuity.previousExitClean ? "1" : "0"
         }
         let ouroCandidates = [
             homeURL.appendingPathComponent(".ouro-cli/bin/ouro"),
@@ -384,15 +464,14 @@ enum OuroWorkbenchProduct {
             }
             return boss["agentName"] as? String
         }()
-        let selection = resolveBossSelection(
+        // Resolution is read-only: it never writes the selection back to
+        // defaults, so a legacy or transiently usable agent cannot silently
+        // become the persisted choice.
+        return resolveBossSelection(
             selectedBossName: defaults.string(forKey: selectedBossDefaultsKey),
             legacyBossName: legacyBossName,
             usableAgentNames: usableBossAgentNames(homeURL: homeURL, fileManager: fileManager)
         )
-        if case .selected(let agentName) = selection {
-            defaults.set(agentName, forKey: selectedBossDefaultsKey)
-        }
-        return selection
     }
 
     private static func isSafeAgentName(_ name: String) -> Bool {

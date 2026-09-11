@@ -203,6 +203,7 @@ extension SessionPersistencePolicy {
         guard terminal.agent == nil,
               terminal.hibernation == nil,
               terminal.resumeBinding == nil,
+              terminal.managedAgentResumeBinding == nil,
               isNilOrBlank(terminal.tmuxStartCommand),
               terminal.isRemoteTerminal != true,
               isNilOrBlank(terminal.remotePTYSessionID) else {

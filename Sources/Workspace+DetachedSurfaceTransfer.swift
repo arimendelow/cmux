@@ -44,15 +44,16 @@ extension Workspace {
         let customTitleSource: Workspace.CustomTitleSource?
         let manuallyUnread: Bool
         let restoredUnreadIndicator: RestoredPanelUnreadIndicator?
-        let restorableAgent: SessionRestorableAgentSnapshot?
-        let restorableAgentResumeState: RestoredAgentResumeState?
-        let restoredAgentCompletedGeneration: RestoredAgentCompletedGeneration?
+        var restorableAgent: SessionRestorableAgentSnapshot?
+        var restorableAgentResumeState: RestoredAgentResumeState?
+        var restoredAgentCompletedGeneration: RestoredAgentCompletedGeneration?
         let shellActivityState: PanelShellActivityState?
-        let restoredResumeSessionWorkingDirectory: String?
-        let resumeBinding: SurfaceResumeBindingSnapshot?
+        var restoredResumeSessionWorkingDirectory: String?
+        var restoredStartupInput: String?
+        var resumeBinding: SurfaceResumeBindingSnapshot?
         /// Authoritative hook identity when `resumeBinding` is an effective
         /// process-detected binding.
-        let managedAgentResumeBinding: SurfaceResumeBindingSnapshot?
+        var managedAgentResumeBinding: SurfaceResumeBindingSnapshot?
         var agentRuntime: DetachedAgentRuntimeState?
         let isRemoteTerminal: Bool
         var remoteTerminalSessionPhase: WorkspaceRemoteTerminalSessionPhase? = nil
@@ -104,6 +105,7 @@ extension Workspace {
                 restoredAgentCompletedGeneration: restoredAgentCompletedGeneration,
                 shellActivityState: shellActivityState,
                 restoredResumeSessionWorkingDirectory: restoredResumeSessionWorkingDirectory,
+                restoredStartupInput: restoredStartupInput,
                 resumeBinding: resumeBinding,
                 managedAgentResumeBinding: managedAgentResumeBinding,
                 agentRuntime: agentRuntime,

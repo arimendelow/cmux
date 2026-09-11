@@ -288,6 +288,7 @@ extension DockSplitStore {
             restoredAgentCompletedGeneration: transferredCompletedGeneration,
             shellActivityState: transferredShellActivityState,
             restoredResumeSessionWorkingDirectory: restoredResumeSessionWorkingDirectory,
+            restoredStartupInput: restoredAgentLifecycle.startupInput(panelId: panelId),
             resumeBinding: resumeBinding,
             managedAgentResumeBinding: managedResumeBinding,
             agentRuntime: agentProvenExited ? nil : cachedRuntime,

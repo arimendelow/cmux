@@ -10,6 +10,10 @@ export type AgentEvent =
   | { kind: "permission-resolved"; requestId: string; optionId: string }
   | { kind: "connection"; state: "starting" | "ready" | "failed"; title: string; message?: string }
   | { kind: "recovery"; mode: "resumed" | "respawned"; title: string; message: string }
+  | WorkbenchRestoreReceipt
+  // Negotiated peer capabilities. `image` is three-state: `unknown` until the
+  // ACP peer answers initialize, then `supported` / `unsupported`.
+  | { kind: "capabilities"; image: ImagePromptCapability }
   | { kind: "user"; text: string }
   | { kind: "status"; text: string }
   | { kind: "delta"; text: string } // streaming assistant text
@@ -22,6 +26,22 @@ export type AgentEvent =
   | { kind: "error"; message: string };
 
 export type SessionStatus = "idle" | "running" | "exited" | "error";
+
+export interface WorkbenchRestoreReceipt {
+  kind: "workbench-restore";
+  facts: Record<string, unknown> | null;
+  unresolved: {
+    window_id: string;
+    workspace_id: string;
+    pane_id: string;
+    surface_id: string;
+    reason: string;
+  }[];
+  assessment: "waiting" | "none" | "pending" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  error?: "native-unavailable" | "assessment-failed" | "cancel-failed";
+}
+
+export type ImagePromptCapability = "unknown" | "supported" | "unsupported";
 export type OptionKind = "select" | "toggle";
 export type OptionValue = string | boolean;
 export type CommandTrigger = "/" | "$" | "@";
@@ -77,6 +97,15 @@ export interface CommandEntry {
 export interface ProviderCapabilities {
   options: SessionOption[];
   triggers: CommandTrigger[];
+  imageAttachments?: boolean;
+}
+
+export interface PromptAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  byteCount: number;
 }
 
 export interface SessionActions {
@@ -108,8 +137,25 @@ export interface SessionCtx {
 }
 
 export interface Adapter {
-  send(sess: SessionCtx, prompt: string): void | Promise<void>;
-  stop(sess: SessionCtx): void;
+  preparePromptAttachments?(
+    sess: SessionCtx,
+    attachments: PromptAttachment[],
+  ): void | Promise<void>;
+  sendWithAdmission?(
+    sess: SessionCtx,
+    prompt: string,
+    generation: number | undefined,
+    attachments: PromptAttachment[],
+    onAdmitted: () => void,
+    canAdmit?: () => boolean,
+  ): Promise<void>;
+  send(
+    sess: SessionCtx,
+    prompt: string,
+    generation?: number,
+    attachments?: PromptAttachment[],
+  ): void | Promise<void>;
+  stop(sess: SessionCtx): void | Promise<void>;
   dispose(sess: SessionCtx): void;
   setOption(sess: SessionCtx, id: string, value: OptionValue): Promise<void>;
   refreshOptions?(sess: SessionCtx): Promise<void>;
@@ -123,6 +169,8 @@ export interface Adapter {
     content?: Record<string, string | boolean | number>,
   ): Promise<void>;
   forkSession?(source: SessionCtx, target: SessionCtx): Promise<void>;
+  /** Establish the peer connection without sending a user turn. */
+  warmup?(sess: SessionCtx, options?: { initializeOnly?: boolean }): Promise<void>;
   capabilities?: ProviderCapabilities;
 }
 

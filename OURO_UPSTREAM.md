@@ -9,11 +9,11 @@
 
 ## Product boundary
 
-cmux owns terminal rendering, panes, workspaces, browser surfaces, session layout, ordinary agent detection, and the local application shell. Ouro Workbench v1 owns the first-class Copilot/Agency Agent Chat experience, one Desk-aware boss, explicit local-versus-Hub authority, downstream policy and identity, onboarding, and release packaging.
+cmux owns terminal rendering, panes, workspaces, browser surfaces, session layout, ordinary agent detection, and the local application shell. Ouro Workbench v1 owns the first-class agent chat experience, one app-global Boss, explicit local/external/unknown authority, downstream policy and identity, onboarding, and release packaging.
 
 ## Upstream rule
 
-After the Copilot CLI integration is validated inside Workbench v1, generally useful Copilot/ACP changes are proposed upstream to cmux. Agency-specific launch profiles, Desk integration, boss semantics, Microsoft policy, Ouro branding, and release configuration stay downstream.
+After the Copilot CLI integration is validated inside Workbench v1, generally useful Copilot/ACP changes are proposed upstream to cmux. Boss semantics, Ouro branding, and release configuration stay downstream. Private launcher profiles, authority presentation, and environment-specific integration belong in separately installed private plugins; this public fork consumes only their generic contracts.
 
 ## Exclusions
 

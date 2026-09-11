@@ -2,36 +2,53 @@ import CmuxWorkspaces
 import Foundation
 
 extension Workspace {
-    func canTakeControlOfHubSession(panelId: UUID) -> Bool {
-        hubSessionLocalTakeover(panelId: panelId) != nil
+    func canTakeControlOfExternalSession(panelId: UUID) -> Bool {
+        externalSessionLocalTakeover(panelId: panelId) != nil
     }
 
     @discardableResult
-    func takeControlOfHubSession(
+    func takeControlOfExternalSession(
         panelId: UUID,
         send: (TerminalPanel, String) -> Bool
     ) -> Bool {
         guard let terminal = terminalPanel(for: panelId),
-              let takeover = hubSessionLocalTakeover(panelId: panelId),
+              let takeover = externalSessionLocalTakeover(panelId: panelId),
+              let localBinding = WorkbenchSessionAuthority.localTakeoverBinding(
+                  snapshot: takeover.snapshot,
+                  replacing: surfaceResumeBindingsByPanelId[panelId]
+              ),
               send(terminal, takeover.input) else {
             return false
         }
+        clearAgentRuntimeState(panelId: panelId)
         restoredAgentSnapshotsByPanelId[panelId] = takeover.snapshot
-        surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
+        surfaceResumeBindingsByPanelId[panelId] = localBinding
+        managedAgentResumeBindingsByPanelId[panelId] = localBinding
         restoredAgentResumeStatesByPanelId[panelId] = .awaitingAutoResumeCommand
+        restoredAgentLifecycle.registerStartupInput(takeover.input, panelId: panelId)
         invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
         return true
     }
 
-    private func hubSessionLocalTakeover(
+    private func externalSessionLocalTakeover(
         panelId: UUID
     ) -> (snapshot: SessionRestorableAgentSnapshot, input: String)? {
         let agent = restoredAgentSnapshotsByPanelId[panelId]
-        let binding = surfaceResumeBindingsByPanelId[panelId]
-        let canResume = restoredAgentResumeStatesByPanelId[panelId] == .manualResumeAvailable ||
+        let binding = managedAgentResumeBinding(panelId: panelId)
+            ?? surfaceResumeBindingsByPanelId[panelId]
+        let compatibleAgent = Workspace.restorableAgentForSessionRestore(
+            agent,
+            resumeBinding: binding
+        )
+        let bindingSupersedesAgent =
+            agent != nil && binding?.isAgentHookBinding == true && compatibleAgent == nil
+        let canResume =
             (
-                restoredAgentResumeStatesByPanelId[panelId] == nil &&
-                agent == nil &&
+                restoredAgentResumeStatesByPanelId[panelId] == .manualResumeAvailable &&
+                !bindingSupersedesAgent
+            ) ||
+            (
+                compatibleAgent == nil &&
                 binding != nil &&
                 panelShellActivityStates[panelId] == .promptIdle
             )
@@ -80,6 +97,10 @@ extension Workspace {
         panelId: UUID,
         snapshot: SessionRestorableAgentSnapshot
     ) {
+        markRestoredAgentCompleted(panelId: panelId)
+    }
+
+    func markRestoredAgentCompleted(panelId: UUID) {
         let runtimeProcessIdentities = Set((agentPIDKeysByPanelId[panelId] ?? []).compactMap {
             agentPIDProcessIdentitiesByKey[$0]
         })
@@ -109,6 +130,7 @@ extension Workspace {
             switch restoredAgentResumeStatesByPanelId[panelId] {
             case .some(.awaitingAutoResumeCommand):
                 restoredAgentResumeStatesByPanelId[panelId] = .autoResumeCommandRunning
+                restoredAgentLifecycle.clearStartupInput(panelId: panelId)
             case .some(.autoResumeCommandRunning), .some(.observedAgentCommandRunning),
                  .some(.completedAgentExit):
                 break
@@ -121,7 +143,9 @@ extension Workspace {
                 markRestoredAgentCompleted(panelId: panelId, snapshot: restoredAgent)
                 restoredResumeSessionWorkingDirectoriesByPanelId.removeValue(forKey: panelId)
                 retireAgentHookResumeBinding(panelId: panelId, matching: restoredAgent)
-            case .some(.awaitingAutoResumeCommand), .some(.manualResumeAvailable), .some(.completedAgentExit), nil:
+            case .some(.awaitingAutoResumeCommand):
+                scheduleRestoredStartupInputResend(panelId: panelId)
+            case .some(.manualResumeAvailable), .some(.completedAgentExit), nil:
                 break
             }
         case .unknown:
@@ -136,6 +160,9 @@ extension Workspace {
         switch (shellState, restoredAgentResumeStatesByPanelId[panelId]) {
         case (.commandRunning, .some(.awaitingAutoResumeCommand)):
             restoredAgentResumeStatesByPanelId[panelId] = .autoResumeCommandRunning
+            restoredAgentLifecycle.clearStartupInput(panelId: panelId)
+        case (.promptIdle, .some(.awaitingAutoResumeCommand)):
+            scheduleRestoredStartupInputResend(panelId: panelId)
         case (.promptIdle, .some(.autoResumeCommandRunning)),
              (.promptIdle, .some(.observedAgentCommandRunning)):
             restoredAgentResumeStatesByPanelId.removeValue(forKey: panelId)
@@ -144,6 +171,31 @@ extension Workspace {
         default:
             break
         }
+    }
+
+    static var restoredStartupInputResendGrace: TimeInterval = 2
+
+    func scheduleRestoredStartupInputResend(panelId: UUID) {
+        guard restoredAgentLifecycle.armStartupInputResend(panelId: panelId) else { return }
+        let grace = Self.restoredStartupInputResendGrace
+        DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.resendRestoredStartupInputIfStillIdle(panelId: panelId)
+            }
+        }
+    }
+
+    func resendRestoredStartupInputIfStillIdle(panelId: UUID) {
+        let shellState = panelShellActivityStates[panelId] ?? .unknown
+        guard let terminal = panels[panelId] as? TerminalPanel,
+              let input = restoredAgentLifecycle.takeStartupInputForResend(
+                  panelId: panelId,
+                  shellState: shellState
+              ),
+              terminal.surface.surface != nil else {
+            return
+        }
+        _ = terminal.sendInputResult(input)
     }
 
     private func invalidateRestoredAgentSnapshot(
@@ -168,7 +220,7 @@ extension Workspace {
         panelId: UUID,
         matching restoredAgent: SessionRestorableAgentSnapshot? = nil
     ) {
-        guard var binding = surfaceResumeBindingsByPanelId[panelId],
+        guard var binding = managedAgentResumeBinding(panelId: panelId),
               binding.isAgentHookBinding else {
             return
         }
@@ -182,7 +234,11 @@ extension Workspace {
             return
         }
         binding.autoResume = false
-        surfaceResumeBindingsByPanelId[panelId] = binding
+        managedAgentResumeBindingsByPanelId[panelId] = binding
+        if let effectiveBinding = surfaceResumeBindingsByPanelId[panelId],
+           effectiveBinding.isSameManagedSession(as: binding) {
+            surfaceResumeBindingsByPanelId[panelId] = binding
+        }
     }
 
     /// Keep an in-flight restored launch tied to the same structured binding
@@ -195,7 +251,8 @@ extension Workspace {
               restoredAgentLifecycle.ownsInFlightRestoredCommand(panelId: panelId) else {
             return false
         }
-        if let storedBinding = surfaceResumeBindingsByPanelId[panelId] {
+        if let storedBinding = managedAgentResumeBinding(panelId: panelId)
+            ?? surfaceResumeBindingsByPanelId[panelId] {
             return storedBinding.isSameManagedSession(as: binding)
         }
         guard let restoredAgent = restoredAgentSnapshotsByPanelId[panelId] else {
@@ -224,11 +281,13 @@ extension Workspace {
         by binding: SurfaceResumeBindingSnapshot,
         panelId: UUID
     ) {
-        guard restoredAgentLifecycle.ownsInFlightRestoredCommand(panelId: panelId) else {
+        guard restoredAgentResumeStatesByPanelId[panelId] != nil ||
+            restoredAgentSnapshotsByPanelId[panelId] != nil else {
             return
         }
         let continuesRestoredSession: Bool
-        if let storedBinding = surfaceResumeBindingsByPanelId[panelId] {
+        if let storedBinding = managedAgentResumeBinding(panelId: panelId)
+            ?? surfaceResumeBindingsByPanelId[panelId] {
             continuesRestoredSession = storedBinding == binding ||
                 storedBinding.isSameManagedSession(as: binding)
         } else if let restoredAgent = restoredAgentSnapshotsByPanelId[panelId] {
@@ -281,11 +340,51 @@ extension Workspace {
             return false
         }
         let liveIndex = restorableAgentIndex ?? SharedLiveAgentIndex.shared.index
-        return !AgentResumeLiveness.hasLiveProcess(
-            for: liveIndex?.entry(workspaceId: id, panelId: panelId),
-            kind: kind,
-            sessionId: checkpointId
-        )
+        guard let liveEntry = liveIndex?.entry(workspaceId: id, panelId: panelId),
+              liveEntry.snapshot.kind.rawValue == kind,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: kind,
+                  lhs: liveEntry.snapshot.sessionId,
+                  rhs: checkpointId
+              ) else {
+            return false
+        }
+        guard Self.sameAgentLaunchGeneration(
+            binding.launchCommand,
+            liveEntry.snapshot.launchCommand
+        ) else {
+            return false
+        }
+        if let bindingKind = RestorableAgentKind(rawValue: kind),
+           !confirmedRuntimeAgentProcessIdentities(
+               kind: bindingKind,
+               sessionId: checkpointId,
+               panelId: panelId,
+               currentProcessIdentity: { processID in
+                   guard let pid = pid_t(exactly: processID) else { return nil }
+                   return Self.agentPIDProcessIdentity(pid: pid)
+               }
+           ).isEmpty {
+            return false
+        }
+        return liveEntry.processLiveness == .exited
+    }
+
+    private nonisolated static func sameAgentLaunchGeneration(
+        _ bindingLaunch: AgentLaunchCommandSnapshot?,
+        _ observedLaunch: AgentLaunchCommandSnapshot?
+    ) -> Bool {
+        guard let bindingLaunch,
+              let observedLaunch,
+              let bindingCapturedAt = bindingLaunch.capturedAt,
+              let observedCapturedAt = observedLaunch.capturedAt,
+              bindingCapturedAt > 0,
+              bindingCapturedAt == observedCapturedAt else {
+            return false
+        }
+        return bindingLaunch.launcher == observedLaunch.launcher &&
+            bindingLaunch.executablePath == observedLaunch.executablePath &&
+            bindingLaunch.arguments == observedLaunch.arguments
     }
 
     func seedSessionRestoredAgentState(
@@ -322,8 +421,12 @@ extension Workspace {
             panelId: detached.panelId,
             snapshot: detached.restorableAgent,
             resumeState: detached.restorableAgentResumeState,
-            completedGeneration: detached.restoredAgentCompletedGeneration
+            completedGeneration: detached.restoredAgentCompletedGeneration,
+            startupInput: detached.restoredStartupInput
         )
+        if detached.shellActivityState == .promptIdle {
+            scheduleRestoredStartupInputResend(panelId: detached.panelId)
+        }
         invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: detached.panelId)
     }
 

@@ -82,7 +82,7 @@ test("Workbench MCP maps validated tools to exact native action requests", async
     method: "tools/call",
     params: {
       name: "workbench_list",
-      arguments: {},
+      arguments: { after_sequence: 12 },
     },
   }, call);
   expect(inspectResponse(list)?.result?.isError).toBe(false);
@@ -170,7 +170,7 @@ test("Workbench MCP maps validated tools to exact native action requests", async
   expect(calls).toEqual([
     {
       method: "workbench.list",
-      params: {},
+      params: { after_sequence: 12 },
     },
     {
       method: "workbench.inspect",
@@ -279,6 +279,19 @@ test("Workbench MCP rejects malformed action requests before native dispatch", a
     return {};
   });
   expect(inspectResponse(guidance)?.result?.isError).toBe(true);
+  const badList = await handleWorkbenchMCPRequest({
+    jsonrpc: "2.0",
+    id: "bad-list",
+    method: "tools/call",
+    params: {
+      name: "workbench_list",
+      arguments: { after_sequence: -1 },
+    },
+  }, async () => {
+    calls += 1;
+    return {};
+  });
+  expect(inspectResponse(badList)?.result?.isError).toBe(true);
   expect(calls).toBe(0);
 });
 

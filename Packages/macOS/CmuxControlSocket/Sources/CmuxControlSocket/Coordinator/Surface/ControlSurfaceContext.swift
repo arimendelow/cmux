@@ -266,7 +266,9 @@ public protocol ControlSurfaceContext: AnyObject {
     func controlSurfaceResumeGet(
         routing: ControlRoutingSelectors,
         explicitTargetID: UUID?,
-        hasResolvedWindowID: Bool
+        hasResolvedWindowID: Bool,
+        expectedKind: String?,
+        expectedCheckpointID: String?
     ) -> ControlSurfaceResumeResolution
 
     /// Clears the resume binding for `surface.resume.clear`, honoring the optional

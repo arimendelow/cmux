@@ -27,6 +27,7 @@ struct CmuxAgentChatConfigTests {
             sourceFilePath: #filePath
         )
         #expect(command?.contains("/agent-chat/cmux-chat") == true)
+        #expect(command?.contains("BUN_BIN=\"${BUN_BIN:-$(command -v bun)}\"") == true)
     }
 
     @Test func ouroWorkbenchPrefersThePackagedAgentChatRuntime() throws {
@@ -54,7 +55,7 @@ struct CmuxAgentChatConfigTests {
         #expect(command?.contains("/missing/agent-chat") == false)
     }
 
-    @Test func ouroWorkbenchInstallsCopilotHooksBesideAgencyHooks() throws {
+    @Test func ouroWorkbenchInstallsCopilotHooksBesideExistingHooks() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("workbench-copilot-hooks-\(UUID().uuidString)")
@@ -64,7 +65,7 @@ struct CmuxAgentChatConfigTests {
         let cli = bundle.appendingPathComponent("Contents/Resources/bin/cmux")
         let copilot = home.appendingPathComponent(".copilot-cli/1.0.82/copilot")
         let hooks = home.appendingPathComponent(".copilot/hooks")
-        let agencyHook = hooks.appendingPathComponent("agency.json")
+        let existingHook = hooks.appendingPathComponent("existing.json")
         let cmuxHook = hooks.appendingPathComponent("cmux.json")
         try fileManager.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: copilot.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -73,7 +74,7 @@ struct CmuxAgentChatConfigTests {
         #expect(fileManager.createFile(atPath: copilot.path, contents: Data()))
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copilot.path)
-        try "agency-hook".write(to: agencyHook, atomically: true, encoding: .utf8)
+        try "existing-hook".write(to: existingHook, atomically: true, encoding: .utf8)
         var calls = 0
 
         let installed = OuroWorkbenchProduct.installCopilotHooksIfNeeded(
@@ -98,7 +99,7 @@ struct CmuxAgentChatConfigTests {
 
         #expect(installed)
         #expect(calls == 1)
-        #expect(try String(contentsOf: agencyHook, encoding: .utf8) == "agency-hook")
+        #expect(try String(contentsOf: existingHook, encoding: .utf8) == "existing-hook")
         #expect(OuroWorkbenchProduct.installCopilotHooksIfNeeded(
             bundleIdentifier: "com.ourostack.workbench.v1",
             homeURL: home,
@@ -127,21 +128,23 @@ struct CmuxAgentChatConfigTests {
         ))
     }
 
-    @Test func ouroWorkbenchBossSelectionPreservesValidLegacyThenFallsBackOnlyWhenUnique() {
+    @Test func ouroWorkbenchBossSelectionPrefersTheExplicitChoiceThenTheLegacyRecord() {
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             selectedBossName: "ouroboros",
             legacyBossName: "slugger",
             usableAgentNames: ["ouroboros", "slugger"]
         ) == .selected("ouroboros"))
+        // An explicit choice that is not installed blocks; it never falls
+        // through to the legacy record or to the only other usable agent.
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             selectedBossName: "missing",
             legacyBossName: "slugger",
             usableAgentNames: ["ouroboros", "slugger"]
-        ) == .selected("slugger"))
+        ) == .unavailable("Boss agent missing is not available. Reinstall it or choose a Boss again."))
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: "missing",
             usableAgentNames: ["ouroboros"]
-        ) == .selected("ouroboros"))
+        ) == .unavailable("Boss agent missing is not available. Reinstall it or choose a Boss again."))
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: nil,
             usableAgentNames: []
@@ -160,7 +163,7 @@ struct CmuxAgentChatConfigTests {
         #expect(OuroWorkbenchProduct.resolveBossSelection(
             legacyBossName: "disabled",
             usableAgentNames: ["ouroboros"]
-        ) == .selected("ouroboros"))
+        ) == .unavailable("Boss agent disabled is not available. Reinstall it or choose a Boss again."))
     }
 
     @Test func ouroWorkbenchPersistsExplicitBossSelectionAndScopesItsSessions() throws {
@@ -289,7 +292,10 @@ struct CmuxAgentChatConfigTests {
             controlSocketReady: true,
             sourceFilePath: sourceFilePath,
             defaults: defaults,
-            environment: ["PATH": "/usr/bin"],
+            environment: [
+                "PATH": "/usr/bin",
+                "CMUX_WORKBENCH_WORKSPACE_ROOT": home.appendingPathComponent("workspace").path,
+            ],
             fileManager: fileManager
         )
         #expect(selected["CMUX_AGENT_CHAT_DEFAULT_PROVIDER"] == "ouro-boss")
@@ -297,7 +303,11 @@ struct CmuxAgentChatConfigTests {
         #expect(selected["CMUX_AGENT_CHAT_BOSS_ERROR"] == nil)
         #expect(selected["CMUX_AGENT_CHAT_OURO_COMMAND"] == ouro.path)
         #expect(selected["CMUX_AGENT_CHAT_WORKBENCH_MCP"] == workbenchMCP.path)
-        #expect(selected["CMUX_AGENT_UI_CWD"] == home.appendingPathComponent("ms-desk").path)
+        // The workspace root is host-injected; the public default is neutral.
+        #expect(selected["CMUX_AGENT_UI_CWD"] == home.appendingPathComponent("workspace").path)
+        #expect(selected["CMUX_AGENT_CHAT_ALLOWED_ROOTS"]?
+            .split(separator: ":")
+            .contains(Substring(home.appendingPathComponent("workspace").path)) == true)
         #expect(selected["CMUX_BUNDLED_CLI_PATH"] == bundledCLI.path)
         #expect(selected["CMUX_SOCKET_PATH"] == "/tmp/workbench-control.sock")
         #expect(selected["CMUX_SOCKET_CAPABILITY"] == "capability-token")
@@ -959,7 +969,8 @@ struct CmuxAgentChatConfigTests {
                 bundleIdentifier: "com.cmuxterm.app"
             ).map(\.commandId) == ["palette.newAgentChat"])
             #expect(ContentView.commandPaletteNewAgentChatContributions(
-                bundleIdentifier: "com.ourostack.workbench.v1.debug"
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                hasCanonicalBoss: false
             ).map(\.commandId) == [
                 "palette.newAgentChat",
                 "palette.chooseWorkbenchBoss",
@@ -1181,18 +1192,410 @@ struct CmuxAgentChatConfigTests {
         #expect(firstSidebar.mode == .dock)
         #expect(app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
 
+        let firstDockPanelCount = app.windowDock(forWindowId: firstWindowID).panels.count
         let reusedID = try #require(app.openWorkbenchBossPanelForTesting(
             tabManager: secondManager,
             url: secondURL
         ))
         #expect(reusedID == panelID)
         #expect(secondManager.tabs.count == secondWorkspaceCount)
-        #expect(app.existingWindowDock(forWindowId: secondWindowID) == nil)
-
-        #expect(app.rehomeWorkbenchBossPanelForTesting(closingWindowId: firstWindowID))
+        // One global viewport rehomed on demand: summoning from the second
+        // window must move the surface, never mint a per-window copy.
+        #expect(
+            app.windowDock(forWindowId: firstWindowID).panels.count
+                + app.windowDock(forWindowId: secondWindowID).panels.count
+                == firstDockPanelCount
+        )
+        #expect(WorkbenchBossViewport.snapshot()?.windowId == secondWindowID)
+        #expect(WorkbenchBossViewport.snapshot()?.surfaceId == panelID)
+        // Summoning Boss from another window rehomes the one global surface
+        // rather than duplicating it or leaving it in the previous window.
         #expect(!app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
         #expect(app.windowDock(forWindowId: secondWindowID).containsPanel(panelID))
         #expect(secondSidebar.isVisible)
         #expect(secondSidebar.mode == .dock)
+
+        #expect(app.rehomeWorkbenchBossPanelForTesting(closingWindowId: secondWindowID))
+        #expect(!app.windowDock(forWindowId: secondWindowID).containsPanel(panelID))
+        #expect(app.windowDock(forWindowId: firstWindowID).containsPanel(panelID))
+        #expect(firstSidebar.isVisible)
+        #expect(firstSidebar.mode == .dock)
+    }
+
+    @Test func workbenchBossSummonRehomesRatherThanDuplicating() {
+        let owner = UUID()
+        let other = UUID()
+        #expect(AppDelegate.workbenchBossSummonAction(
+            ownerWindowId: owner,
+            requestingWindowId: owner
+        ) == .reveal)
+        #expect(AppDelegate.workbenchBossSummonAction(
+            ownerWindowId: owner,
+            requestingWindowId: other
+        ) == .rehome)
+        #expect(AppDelegate.workbenchBossSummonAction(
+            ownerWindowId: nil,
+            requestingWindowId: other
+        ) == .create)
+    }
+
+    @Test func workbenchBossSelectionNeverSubstitutesTheOnlyOtherUsableAgent() {
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: nil,
+            legacyBossName: nil,
+            usableAgentNames: ["ouroboros"]
+        ) == .unavailable("Choose one Ouro agent as Boss: ouroboros."))
+
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: "slugger",
+            legacyBossName: nil,
+            usableAgentNames: ["ouroboros"]
+        ) == .unavailable("Boss agent slugger is not available. Reinstall it or choose a Boss again."))
+
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: nil,
+            legacyBossName: nil,
+            usableAgentNames: []
+        ) == .unavailable("No enabled Ouro agents are installed."))
+
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: "slugger",
+            legacyBossName: nil,
+            usableAgentNames: ["ouroboros", "slugger"]
+        ) == .selected("slugger"))
+
+        // A configured upgrade bypasses the chooser through its legacy record.
+        #expect(OuroWorkbenchProduct.resolveBossSelection(
+            selectedBossName: nil,
+            legacyBossName: "slugger",
+            usableAgentNames: ["ouroboros", "slugger"]
+        ) == .selected("slugger"))
+    }
+
+    @Test func unavailableBossSelectionLeavesDefaultsAndKeepsItsLastGoodSessionRoot() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-boss-unavailable-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let bundles = home.appendingPathComponent("AgentBundles", isDirectory: true)
+        let ouroboros = bundles.appendingPathComponent("ouroboros.ouro", isDirectory: true)
+        try fileManager.createDirectory(at: ouroboros, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
+            to: ouroboros.appendingPathComponent("agent.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let defaultsName = "CmuxAgentChatConfigTests.bossUnavailable.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defaults.set("slugger", forKey: OuroWorkbenchProduct.selectedBossDefaultsKey)
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+
+        let environment = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+
+        #expect(environment["CMUX_AGENT_CHAT_BOSS_AGENT"] == nil)
+        #expect(
+            environment["CMUX_AGENT_CHAT_BOSS_ERROR"]
+                == "Boss agent slugger is not available. Reinstall it or choose a Boss again."
+        )
+        #expect(
+            environment["CMUX_AGENT_CHAT_SESSION_DIR"]
+                == appSupport.appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions/slugger").path
+        )
+        #expect(
+            environment["CMUX_AGENT_CHAT_BOSS_POINTER_DIR"]
+                == appSupport.appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions").path
+        )
+        #expect(defaults.string(forKey: OuroWorkbenchProduct.selectedBossDefaultsKey) == "slugger")
+    }
+
+    @Test func bossSelectionResolutionDoesNotWriteBackDefaults() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-boss-writeback-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let bundles = home.appendingPathComponent("AgentBundles", isDirectory: true)
+        let slugger = bundles.appendingPathComponent("slugger.ouro", isDirectory: true)
+        let legacyDirectory = appSupport.appendingPathComponent("OuroWorkbench", isDirectory: true)
+        try fileManager.createDirectory(at: slugger, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        try #"{"enabled":true,"humanFacing":{"provider":"github-copilot"},"agentFacing":{"provider":"github-copilot"}}"#.write(
+            to: slugger.appendingPathComponent("agent.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try #"{"boss":{"agentName":"slugger"}}"#.write(
+            to: legacyDirectory.appendingPathComponent("workspace-state.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let defaultsName = "CmuxAgentChatConfigTests.bossWriteback.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+
+        #expect(OuroWorkbenchProduct.currentBossSelection(
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            fileManager: fileManager
+        ) == .selected("slugger"))
+        #expect(defaults.string(forKey: OuroWorkbenchProduct.selectedBossDefaultsKey) == nil)
+    }
+
+    @MainActor
+    @Test func chooseWorkbenchBossCommandDisappearsOnceCanonical() throws {
+        try withAgentChatUIFlag(true) {
+            #expect(ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                hasCanonicalBoss: false
+            ).map(\.commandId) == [
+                "palette.newAgentChat",
+                "palette.chooseWorkbenchBoss",
+            ])
+            #expect(ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                hasCanonicalBoss: true
+            ).map(\.commandId) == ["palette.newAgentChat"])
+        }
+    }
+
+    @MainActor
+    @Test func agentChatPaletteKeywordsCarryNoPrivateProductName() throws {
+        try withAgentChatUIFlag(true) {
+            for contribution in ContentView.commandPaletteNewAgentChatContributions(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                hasCanonicalBoss: false
+            ) {
+                for keyword in contribution.keywords {
+                    #expect(!keyword.lowercased().contains("ag" + "ency"))
+                }
+            }
+        }
+    }
+
+    @Test func canonicalBossPointerIsAgentIndependentAndDetected() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-boss-pointer-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let sessions = appSupport
+            .appendingPathComponent("Ouro Workbench v1/Agent Chat/Sessions", isDirectory: true)
+        try fileManager.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        #expect(OuroWorkbenchProduct.canonicalBossPointerURL(applicationSupportURL: appSupport)
+            == sessions.appendingPathComponent("canonical-boss.json"))
+        #expect(!OuroWorkbenchProduct.hasCanonicalBoss(
+            applicationSupportURL: appSupport,
+            fileManager: fileManager
+        ))
+
+        try #"{"version":1,"agent":"slugger","sessionId":"boss-1"}"#.write(
+            to: sessions.appendingPathComponent("canonical-boss.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        #expect(OuroWorkbenchProduct.hasCanonicalBoss(
+            applicationSupportURL: appSupport,
+            fileManager: fileManager
+        ))
+    }
+
+    @Test func workbenchExternalAuthorityRootFollowsNativeApplicationSupport() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-external-presentation-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let defaultsName = "CmuxAgentChatConfigTests.externalPresentation.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        for support in [appSupport, nil] {
+            let environment = OuroWorkbenchProduct.agentChatEnvironment(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                homeURL: home,
+                applicationSupportURL: support,
+                defaults: defaults,
+                environment: ["CMUX_AGENT_CHAT_APP_SUPPORT_ROOT": "/unrelated/profile"],
+                fileManager: fileManager
+            )
+            let expectedRoot = (support ?? home.appendingPathComponent("Library/Application Support"))
+                .appendingPathComponent("Ouro Workbench v1", isDirectory: true)
+            #expect(environment["CMUX_AGENT_CHAT_APP_SUPPORT_ROOT"] == expectedRoot.path)
+            #expect(environment["CMUX_AGENT_CHAT_BOSS_POINTER_DIR"] == expectedRoot
+                .appendingPathComponent("Agent Chat/Sessions").path)
+        }
+        #expect(OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.example.terminal",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        ).isEmpty)
+        #expect(!fileManager.fileExists(atPath: root.path))
+    }
+
+    @Test func workbenchWorkspaceRootFallsBackToHomeWithoutHostConfiguration() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-workspace-root-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+        let defaultsName = "CmuxAgentChatConfigTests.workspaceRoot.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+
+        let neutral = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(neutral["CMUX_AGENT_UI_CWD"] == home.path)
+
+        let configured = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: ["CMUX_WORKBENCH_WORKSPACE_ROOT": "  "],
+            fileManager: fileManager
+        )
+        #expect(configured["CMUX_AGENT_UI_CWD"] == home.path)
+    }
+
+    @Test func bossViewportTopologyEntryNamesTheOneAppGlobalSurface() {
+        let window = UUID()
+        let surface = UUID()
+        let stable = UUID()
+        let entry = try? #require(WorkbenchBossViewport.topologyEntry(
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: window,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            )
+        ))
+        #expect(entry?["scope"] as? String == "app")
+        #expect(entry?["window_id"] as? String == window.uuidString)
+        #expect(entry?["surface_id"] as? String == surface.uuidString)
+        #expect(entry?["stable_surface_id"] as? String == stable.uuidString)
+        // One global viewport rehomed on demand: the entry is a single object,
+        // never a per-window collection.
+        #expect(entry?["per_window"] == nil)
+        #expect(WorkbenchBossViewport.topologyEntry(snapshot: nil) == nil)
+    }
+
+    @Test func bossViewportPublishesOpenAndRehomeOntoTheSharedEventBus() {
+        let first = UUID()
+        let second = UUID()
+        let surface = UUID()
+        let stable = UUID()
+        var published: [(name: String, category: String, windowId: String?, surfaceId: String?, payload: [String: Any])] = []
+        let record: WorkbenchBossViewport.Publish = { name, category, windowId, surfaceId, payload in
+            published.append((name, category, windowId, surfaceId, payload))
+        }
+
+        WorkbenchBossViewport.publishOpened(
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: first,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            ),
+            publish: record
+        )
+        WorkbenchBossViewport.publishRehomed(
+            from: first,
+            snapshot: WorkbenchBossViewportSnapshot(
+                windowId: second,
+                surfaceId: surface,
+                stableSurfaceId: stable
+            ),
+            publish: record
+        )
+
+        #expect(published.map(\.name) == [
+            "workbench.boss.viewport.opened",
+            "workbench.boss.viewport.rehomed",
+        ])
+        // The world model already filters deltas by category; ride its
+        // `surface` channel rather than inventing a Boss-only one.
+        #expect(published.allSatisfy { $0.category == "surface" })
+        #expect(published.allSatisfy { $0.surfaceId == surface.uuidString })
+        #expect(published[0].windowId == first.uuidString)
+        #expect(published[1].windowId == second.uuidString)
+        #expect(published[1].payload["from_window_id"] as? String == first.uuidString)
+        #expect(published[1].payload["to_window_id"] as? String == second.uuidString)
+        #expect(published.allSatisfy { $0.payload["scope"] as? String == "app" })
+    }
+
+    @Test func agentChatEnvironmentForwardsHostAppContinuityWithoutOwningIt() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-continuity-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        try fileManager.createDirectory(at: home, withIntermediateDirectories: true)
+        let defaultsName = "CmuxAgentChatConfigTests.continuity.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer {
+            defaults.removePersistentDomain(forName: defaultsName)
+            try? fileManager.removeItem(at: root)
+        }
+        let instance = UUID()
+        let started = Date(timeIntervalSince1970: 1_725_000_000)
+
+        let forwarded = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            appContinuity: WorkbenchAgentChatContinuity(
+                appInstanceId: instance,
+                startedAt: started,
+                previousExitClean: false
+            ),
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(forwarded["CMUX_WORKBENCH_APP_INSTANCE_ID"] == instance.uuidString)
+        #expect(forwarded["CMUX_WORKBENCH_APP_STARTED_AT"] == ISO8601DateFormatter().string(from: started))
+        #expect(forwarded["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] == "0")
+
+        // Absent host continuity stays absent rather than being invented here.
+        let neutral = OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.ourostack.workbench.v1.debug",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            appContinuity: nil,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        )
+        #expect(neutral["CMUX_WORKBENCH_APP_INSTANCE_ID"] == nil)
+        #expect(neutral["CMUX_WORKBENCH_APP_STARTED_AT"] == nil)
+        #expect(neutral["CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN"] == nil)
     }
 }

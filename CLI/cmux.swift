@@ -6968,44 +6968,69 @@ struct CMUXCLI {
             let (kind, rem2) = parseOption(rem1, name: "--kind")
             let (checkpoint, rem3) = parseOption(rem2, name: "--checkpoint")
             let (checkpointID, rem4) = parseOption(rem3, name: "--checkpoint-id")
-            let (source, rem5) = parseOption(rem4, name: "--source")
-            let (cwd, rem6) = parseOption(rem5, name: "--cwd")
-            let (shellCommand, rem7) = parseOption(rem6, name: "--shell")
+            let (agentSessionID, rem5) = parseOption(rem4, name: "--agent-session-id")
+            let (authority, rem6) = parseOption(rem5, name: "--authority")
+            let (source, rem7) = parseOption(rem6, name: "--source")
+            let (cwd, rem8) = parseOption(rem7, name: "--cwd")
+            let (shellCommand, rem9) = parseOption(rem8, name: "--shell")
 
             if let name { params["name"] = name }
             if let kind { params["kind"] = kind }
             if let checkpoint = checkpointID ?? checkpoint { params["checkpoint_id"] = checkpoint }
+            if (agentSessionID == nil) != (authority == nil) {
+                throw CLIError(message: "surface resume set requires --agent-session-id and --authority together")
+            }
+            if let agentSessionID { params["agent_session_id"] = agentSessionID }
+            if let authority {
+                guard ["local", "external", "unknown"].contains(authority) else {
+                    throw CLIError(message: "surface resume set: --authority must be local, external, or unknown")
+                }
+                params["authority"] = authority
+            }
             params["source"] = source ?? "cli"
             params["cwd"] = cwd ?? ProcessInfo.processInfo.environment["PWD"] ?? FileManager.default.currentDirectoryPath
 
-            let commandText: String
+            let nonLocalAuthority = authority == "external" || authority == "unknown"
+            let commandText: String?
             if let shellCommand {
-                if let unexpected = (rem7 + (splitRemaining.argv ?? [])).first {
+                if nonLocalAuthority {
+                    throw CLIError(message: "surface resume set: non-local authority must not include --shell or a launch command")
+                }
+                if let unexpected = (rem9 + (splitRemaining.argv ?? [])).first {
                     throw CLIError(message: "surface resume set: unexpected argument '\(unexpected)' after --shell. Quote the full shell command or use -- <argv...>")
                 }
                 commandText = shellCommand.trimmingCharacters(in: .whitespacesAndNewlines)
             } else {
-                if splitRemaining.argv != nil, let unexpected = rem7.first {
+                if splitRemaining.argv != nil, let unexpected = rem9.first {
                     throw CLIError(message: "surface resume set: unexpected argument '\(unexpected)' before --")
                 }
-                let argv = splitRemaining.argv ?? rem7
-                guard !argv.isEmpty else {
+                let argv = splitRemaining.argv ?? rem9
+                if nonLocalAuthority {
+                    guard splitRemaining.argv == nil, argv.isEmpty else {
+                        throw CLIError(message: "surface resume set: non-local authority must not include a launch command")
+                    }
+                    commandText = nil
+                } else {
+                    guard !argv.isEmpty else {
+                        throw CLIError(message: "surface resume set requires --shell <command> or -- <argv...>")
+                    }
+                    commandText = argv.map(cliShellQuote).joined(separator: " ")
+                    params["launch_command"] = controlAgentLaunchCommandPayload(
+                        AgentLaunchCommand(
+                            executablePath: argv[0],
+                            arguments: argv,
+                            workingDirectory: params["cwd"] as? String,
+                            source: "cli"
+                        )
+                    )
+                }
+            }
+            if let commandText {
+                guard !commandText.isEmpty else {
                     throw CLIError(message: "surface resume set requires --shell <command> or -- <argv...>")
                 }
-                commandText = argv.map(cliShellQuote).joined(separator: " ")
-                params["launch_command"] = controlAgentLaunchCommandPayload(
-                    AgentLaunchCommand(
-                        executablePath: argv[0],
-                        arguments: argv,
-                        workingDirectory: params["cwd"] as? String,
-                        source: "cli"
-                    )
-                )
+                params["command"] = commandText
             }
-            guard !commandText.isEmpty else {
-                throw CLIError(message: "surface resume set requires a non-empty command")
-            }
-            params["command"] = commandText
 
             let payload = try client.sendV2(method: "surface.resume.set", params: params)
             printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: "OK")
@@ -7096,6 +7121,14 @@ struct CMUXCLI {
 
     private func validateSurfaceResumeSetCommandTokensBeforeSocket(_ args: [String]) throws {
         let splitArgs = splitAtArgumentTerminator(args)
+        for token in splitArgs.options where token.hasPrefix("--") {
+            let name = token.split(separator: "=", maxSplits: 1).first.map(String.init) ?? token
+            if Self.surfaceResumeDerivedTrustOptions.contains(name) {
+                throw CLIError(
+                    message: "surface resume set: \(name) is derived by Workbench and must not be sent"
+                )
+            }
+        }
         let (_, rem1) = parseOption(splitArgs.options, name: "--workspace")
         let (_, rem2) = parseOption(rem1, name: "--surface")
         let (_, rem3) = parseOption(rem2, name: "--window")
@@ -7103,21 +7136,48 @@ struct CMUXCLI {
         let (_, rem5) = parseOption(rem4, name: "--kind")
         let (_, rem6) = parseOption(rem5, name: "--checkpoint")
         let (_, rem7) = parseOption(rem6, name: "--checkpoint-id")
-        let (_, rem8) = parseOption(rem7, name: "--source")
-        let (_, rem9) = parseOption(rem8, name: "--cwd")
-        let (shellCommand, remaining) = parseOption(rem9, name: "--shell")
+        let (agentSessionID, rem8) = parseOption(rem7, name: "--agent-session-id")
+        let (authority, rem9) = parseOption(rem8, name: "--authority")
+        let (_, rem10) = parseOption(rem9, name: "--source")
+        let (_, rem11) = parseOption(rem10, name: "--cwd")
+        let (shellCommand, remaining) = parseOption(rem11, name: "--shell")
 
+        if (agentSessionID == nil) != (authority == nil) {
+            throw CLIError(message: "surface resume set requires --agent-session-id and --authority together")
+        }
+        if let authority,
+           !["local", "external", "unknown"].contains(authority) {
+            throw CLIError(message: "surface resume set: --authority must be local, external, or unknown")
+        }
+        let nonLocalAuthority = authority == "external" || authority == "unknown"
+        if nonLocalAuthority, shellCommand != nil {
+            throw CLIError(message: "surface resume set: non-local authority must not include --shell or a launch command")
+        }
         if shellCommand != nil, let unexpected = (remaining + (splitArgs.argv ?? [])).first {
             throw CLIError(message: "surface resume set: unexpected argument '\(unexpected)' after --shell. Quote the full shell command or use -- <argv...>")
         }
         if splitArgs.argv != nil, let unexpected = remaining.first {
             throw CLIError(message: "surface resume set: unexpected argument '\(unexpected)' before --")
         }
+        if nonLocalAuthority,
+           let unexpected = (splitArgs.argv ?? remaining).first {
+            throw CLIError(message: "surface resume set: non-local authority must not include a launch command")
+        }
     }
 
     private static let surfaceResumeTargetValueOptions: Set<String> = ["--workspace", "--surface", "--window"]
+    private static let surfaceResumeDerivedTrustOptions: Set<String> = [
+        "--priority",
+        "--rank",
+        "--trusted",
+        "--launcher-owned",
+        "--approve",
+        "--approved",
+        "--auto-approve",
+    ]
     private static let surfaceResumeSetValueOptions: Set<String> = surfaceResumeTargetValueOptions.union([
-        "--name", "--kind", "--checkpoint", "--checkpoint-id", "--source", "--cwd", "--shell",
+        "--name", "--kind", "--checkpoint", "--checkpoint-id", "--agent-session-id", "--authority",
+        "--source", "--cwd", "--shell",
     ])
     private static let surfaceResumeClearValueOptions: Set<String> = surfaceResumeTargetValueOptions.union([
         "--checkpoint", "--checkpoint-id", "--source",
@@ -16750,11 +16810,14 @@ struct CMUXCLI {
               --kind <kind>            Binding kind, for example agent or tmux
               --checkpoint <id>        Provider checkpoint or session id
               --checkpoint-id <id>     Same as --checkpoint and takes precedence
+              --agent-session-id <id>  Runtime-attested agent session id
+              --authority <value>      local, external, or unknown
               --source <source>        Binding source label
 
             Examples:
               cmux surface resume set --kind tmux --shell "tmux attach -t work"
               cmux surface resume set --kind opencode --checkpoint ses_123 -- opencode --session ses_123
+              cmux surface resume set --agent-session-id ses_123 --authority external
               cmux surface resume show --json
             """
         case "debug-terminals":
@@ -28279,12 +28342,7 @@ struct CMUXCLI {
         let workingDirectory = (envCaptureIsTrusted ? normalizedHookValue(env["CMUX_AGENT_LAUNCH_CWD"]) : nil)
             ?? normalizedHookValue(cwd)
             ?? normalizedHookValue(env["PWD"])
-        var environment = selectedAgentLaunchEnvironment(from: env, kind: launcher)
-        if fallbackKind == "copilot",
-           normalizedHookValue(env["MSFT_AGENCY"])?.lowercased() == "true",
-           arguments?.contains("--ui-server") == true {
-            environment["CMUX_AGENT_LAUNCH_AUTHORITY"] = "agency-hub"
-        }
+        let environment = selectedAgentLaunchEnvironment(from: env, kind: launcher)
 
         // Fallback when the launch argv is genuinely UNAVAILABLE: plain `codex` with no cmux launcher
         // (no CMUX_AGENT_LAUNCH_ARGV_B64) and an unresolved/exited PID, so processArguments returns nil.
@@ -35746,6 +35804,28 @@ export default CMUXSessionRestore;
         switch first {
         case "help", "--help", "-h":
             print(subcommandUsage("hooks") ?? "Usage: cmux hooks <setup|uninstall|agent>")
+            return true
+
+        case "process-argv":
+            // Hidden: launcher hooks need native argv boundaries, not flattened process titles.
+            let requested = commandArgs.dropFirst()
+            guard (1...16).contains(requested.count) else {
+                throw CLIError(message: "invalid_process_ids")
+            }
+            let pids = try requested.map { value -> Int in
+                guard let pid = Int32(value), pid > 0 else {
+                    throw CLIError(message: "invalid_process_ids")
+                }
+                return Int(pid)
+            }
+            let payload: [[String: Any]] = pids.map { pid in
+                guard let identity = sessionsListProcessIdentity(for: pid),
+                      !identity.arguments.isEmpty else {
+                    return ["pid": pid, "argv": NSNull()]
+                }
+                return ["pid": pid, "argv": identity.arguments]
+            }
+            print(jsonString(payload))
             return true
 
         case "setup":

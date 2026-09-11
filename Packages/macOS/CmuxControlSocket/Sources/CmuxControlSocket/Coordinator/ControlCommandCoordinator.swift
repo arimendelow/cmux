@@ -65,9 +65,14 @@ public final class ControlCommandCoordinator {
     /// owns, returning the typed result; returns `nil` for methods still served
     /// by the legacy app-side dispatcher so the caller can fall through.
     ///
-    /// - Parameter request: The decoded request envelope.
+    /// - Parameters:
+    ///   - request: The decoded request envelope.
+    ///   - callerEvidence: Transport-owned evidence about the accepted peer.
     /// - Returns: The command result, or `nil` if not owned here.
-    public func handle(_ request: ControlRequest) -> ControlCallResult? {
+    public func handle(
+        _ request: ControlRequest,
+        callerEvidence: ControlCommandCallerEvidence? = nil
+    ) -> ControlCallResult? {
         // Each domain's handler (in its own `+<Domain>.swift` extension) owns its
         // methods and returns `nil` for anything else, so the chain falls through
         // to the next domain and finally to the legacy app-side dispatcher.
@@ -82,7 +87,7 @@ public final class ControlCommandCoordinator {
         if let result = handleCanvas(request) { return result }
         if let result = handleMobileHost(request) { return result }
         if let result = handleWorkspace(request) { return result }
-        if let result = handleSurface(request) { return result }
+        if let result = handleSurface(request, callerEvidence: callerEvidence) { return result }
         if let result = handleSystem(request) { return result }
         if let result = handleProject(request) { return result }
         if let result = handleDebug(request) { return result }

@@ -19,6 +19,7 @@ function record(id = "session-1"): PersistedAgentChatSession {
     autoApprove: false,
     startOptions: { mode: "agent" },
     createdAt: 1_725_000_000_000,
+    startRequestId: "request-1",
   };
 }
 
@@ -40,6 +41,7 @@ test("session store rejects unsafe ids and reports corrupt records", async () =>
   const directory = await mkdtemp(join(tmpdir(), "agent-chat-session-store-"));
   try {
     await expect(writePersistedSession(directory, record("../escape"))).rejects.toThrow("invalid session id");
+    await expect(writePersistedSession(directory, { ...record("bad-request"), startRequestId: "../escape" })).rejects.toThrow("invalid startRequestId");
     await writePersistedSession(directory, record("healthy"));
     await writeFile(join(directory, "corrupt.json"), "{not-json", { mode: 0o600 });
     const result = await readPersistedSessions(directory);

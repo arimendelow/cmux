@@ -8,8 +8,21 @@ extension DockSplitStore {
               !startupInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
+        guard !WorkbenchSessionAuthority.lowerTrustBindingCannotReplace(
+            current: managedAgentResumeBinding(panelId: panelId)
+                ?? surfaceResumeBindingsByPanelId[panelId],
+            incoming: binding
+        ) else {
+            return false
+        }
         let cachedManagedBinding =
             detachedSurfaceTransfersByPanelId[panelId]?.resolvedManagedAgentResumeBinding
+        if binding.isAgentHookBinding,
+           restoredAgentLifecycle.snapshotsByPanelId[panelId] == nil,
+           restoredAgentLifecycle.resumeStatesByPanelId[panelId] != nil,
+           managedAgentResumeBinding(panelId: panelId)?.isSameManagedSession(as: binding) != true {
+            clearRestoredAgentContinuationState(panelId: panelId)
+        }
         if binding.isAgentHookBinding,
            let cachedTransfer = detachedSurfaceTransfersByPanelId[panelId] {
             let cachedSessionMetadataExists =
@@ -56,7 +69,11 @@ extension DockSplitStore {
             )
         }
         if binding.hasCompleteManagedSessionIdentity {
-            managedAgentResumeBindingsByPanelId[panelId] = binding
+            managedAgentResumeBindingsByPanelId[panelId] =
+                WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                    observed: binding,
+                    current: managedAgentResumeBindingsByPanelId[panelId]
+                )
         } else if binding.isAgentHookBinding {
             managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
         }
@@ -148,10 +165,15 @@ extension DockSplitStore {
               effectiveBinding.hasCompleteManagedSessionIdentity else {
             return managedBinding
         }
-        if managedBinding != effectiveBinding {
-            managedAgentResumeBindingsByPanelId[panelId] = effectiveBinding
+        let resolvedBinding =
+            WorkbenchSessionAuthority.preservingExplicitLocalBindingAuthority(
+                observed: effectiveBinding,
+                current: managedBinding
+            )
+        if managedBinding != resolvedBinding {
+            managedAgentResumeBindingsByPanelId[panelId] = resolvedBinding
         }
-        return effectiveBinding
+        return resolvedBinding
     }
 
     private static func dockResumeBindingsRepresentSameManagedSession(

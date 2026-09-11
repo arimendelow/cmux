@@ -92,6 +92,7 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     let sessionPortRangeSize: Int
     let scrollbackReplayEnvironmentKey: String
     let globalFontMagnificationPercent: @Sendable () -> Int
+    public var onExplicitInput: (() -> Void)?
 
     /// Presentation state for the current runtime renderer. This distinguishes a
     /// renderer Ghostty created from one cmux has actually presented in a real

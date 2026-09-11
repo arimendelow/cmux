@@ -178,8 +178,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 ],
                 extraEnvironment: [
                     "COPILOT_HOME": "/tmp/copilot home",
-                    "COPILOT_GITHUB_TOKEN": "secret",
-                    "MSFT_AGENCY": "true"
+                    "COPILOT_GITHUB_TOKEN": "secret"
                 ],
                 expectedArguments: [
                     "/tmp/cmux-agent-upstreams/copilot-install/bin/copilot",
@@ -188,7 +187,6 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "--allow-all-tools"
                 ],
                 expectedEnvironment: [
-                    "CMUX_AGENT_LAUNCH_AUTHORITY": "agency-hub",
                     "COPILOT_HOME": "/tmp/copilot home"
                 ]
             ),

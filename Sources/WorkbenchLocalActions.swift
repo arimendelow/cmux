@@ -40,6 +40,47 @@ struct WorkbenchLocalActionReceipt: Codable, Equatable {
     var observedInputEpoch: UInt64? = nil
 }
 
+struct WorkbenchAppContinuitySnapshot: Codable, Equatable {
+    var launchID: UUID
+    var startedAt: Date
+    var previousExitWasClean: Bool
+}
+
+enum WorkbenchAppContinuity {
+    private static let cleanExitKey = "workbench.lifecycle.clean-exit"
+    private static let snapshotKey = "workbench.lifecycle.current"
+
+    static func beginLaunch(
+        launchID: UUID = UUID(),
+        startedAt: Date = Date(),
+        defaults: UserDefaults = .standard
+    ) -> WorkbenchAppContinuitySnapshot {
+        let previousExitWasClean = defaults.object(forKey: cleanExitKey) == nil
+            || defaults.bool(forKey: cleanExitKey)
+        let snapshot = WorkbenchAppContinuitySnapshot(
+            launchID: launchID,
+            startedAt: startedAt,
+            previousExitWasClean: previousExitWasClean
+        )
+        if let data = try? JSONEncoder().encode(snapshot) {
+            defaults.set(data, forKey: snapshotKey)
+        }
+        defaults.set(false, forKey: cleanExitKey)
+        return snapshot
+    }
+
+    static func markCleanExit(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: cleanExitKey)
+    }
+
+    static func snapshot(
+        defaults: UserDefaults = .standard
+    ) -> WorkbenchAppContinuitySnapshot? {
+        guard let data = defaults.data(forKey: snapshotKey) else { return nil }
+        return try? JSONDecoder().decode(WorkbenchAppContinuitySnapshot.self, from: data)
+    }
+}
+
 @MainActor
 enum WorkbenchLocalActionRouter {
     typealias FocusEffect = @MainActor (_ workspaceId: UUID, _ surfaceId: UUID) -> Bool
@@ -56,6 +97,8 @@ enum WorkbenchLocalActionRouter {
         _ surfaceId: UUID,
         _ sessionId: String
     ) -> Set<AgentPIDProcessIdentity>?
+    typealias TopologyResolver = @MainActor () -> [String: Any]
+    typealias ChangesResolver = @MainActor (_ afterSequence: Int64?) -> [String: Any]
 
     static let receiptDefaultsKey = "workbench.local-actions.v1"
     private static let requestIdPattern = #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"#
@@ -66,13 +109,16 @@ enum WorkbenchLocalActionRouter {
         stateStore: WorkbenchLocalSessionStateStore = .shared,
         enabled: Bool = OuroWorkbenchProduct.isCurrentBundle,
         authority: AuthorityResolver? = nil,
-        resumeAuthority: AuthorityResolver? = nil
+        resumeAuthority: AuthorityResolver? = nil,
+        topology: TopologyResolver? = nil,
+        changes: ChangesResolver? = nil
     ) -> TerminalController.V2CallResult {
         guard enabled else {
             return .err(code: "unsupported", message: "Workbench actions are unavailable outside Ouro Workbench", data: nil)
         }
-        guard params.isEmpty else {
-            return .err(code: "invalid_params", message: "list accepts no parameters", data: nil)
+        guard hasOnlyKeys(params, allowed: ["after_sequence"]),
+              let afterSequence = optionalSequence(params["after_sequence"]) else {
+            return .err(code: "invalid_params", message: "after_sequence must be a non-negative integer", data: nil)
         }
         let resolveAuthority = authority ?? liveAuthority
         let resolveResumeAuthority = resumeAuthority ?? liveResumeAuthority
@@ -84,7 +130,13 @@ enum WorkbenchLocalActionRouter {
                 includeEvidence: false
             )
         }
-        return .ok(["sessions": Array(sessions)])
+        let resolveTopology = topology ?? liveTopology
+        let resolveChanges = changes ?? liveChanges
+        return .ok([
+            "topology": resolveTopology(),
+            "changes": resolveChanges(afterSequence),
+            "sessions": Array(sessions),
+        ])
     }
 
     static func inspect(
@@ -610,6 +662,301 @@ enum WorkbenchLocalActionRouter {
         return UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    private static func optionalSequence(_ value: Any?) -> Int64?? {
+        guard let value else { return .some(nil) }
+        if let number = value as? NSNumber,
+           CFGetTypeID(number) != CFBooleanGetTypeID() {
+            let sequence = number.int64Value
+            guard sequence >= 0, number.compare(NSNumber(value: sequence)) == .orderedSame else {
+                return nil
+            }
+            return .some(sequence)
+        }
+        if let sequence = value as? Int, sequence >= 0 {
+            return .some(Int64(sequence))
+        }
+        if let sequence = value as? Int64, sequence >= 0 {
+            return .some(sequence)
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func liveTopology() -> [String: Any] {
+        let tree = TerminalController.shared.controlSystemTreeWindows(
+            requestedWindowID: nil,
+            includeAllWindows: true,
+            focusedWindowID: nil,
+            workspaceFilter: nil
+        )
+        let continuity = WorkbenchAppContinuity.snapshot()
+        let appDelegate = AppDelegate.shared
+        let restoreState: String = if appDelegate?.isApplyingSessionRestore == true {
+            "restoring"
+        } else if appDelegate?.didAttemptStartupSessionRestore == true {
+            "ready"
+        } else {
+            "pending"
+        }
+        return [
+            "app_instance_id": continuity?.launchID.uuidString ?? NSNull(),
+            "app_started_at": continuity.map {
+                ISO8601DateFormatter().string(from: $0.startedAt)
+            } ?? NSNull(),
+            "previous_exit_clean": continuity?.previousExitWasClean ?? NSNull(),
+            "restore_state": restoreState,
+            "revision": CmuxEventBus.shared.latestSequence,
+            "boss": WorkbenchBossViewport.topologyEntry() ?? NSNull(),
+            "windows": tree.windows.map(topologyWindow),
+        ]
+    }
+
+    private static func topologyWindow(_ node: ControlSystemTreeWindowNode) -> [String: Any] {
+        [
+            "window_id": node.summary.windowID.uuidString,
+            "index": node.index,
+            "is_key": node.summary.isKeyWindow,
+            "is_visible": node.summary.isVisible,
+            "selected_workspace_id": node.summary.selectedWorkspaceID?.uuidString ?? NSNull(),
+            "workspaces": node.workspaces.map(topologyWorkspace),
+        ]
+    }
+
+    private static func topologyWorkspace(_ node: ControlSystemTreeWorkspaceNode) -> [String: Any] {
+        [
+            "workspace_id": node.workspaceID.uuidString,
+            "index": node.index,
+            "title": node.title,
+            "description": node.description ?? NSNull(),
+            "selected": node.isSelected,
+            "pinned": node.isPinned,
+            "panes": node.panes.map(topologyPane),
+        ]
+    }
+
+    private static func topologyPane(_ node: ControlSystemTreePaneNode) -> [String: Any] {
+        [
+            "pane_id": node.paneID.uuidString,
+            "index": node.index,
+            "focused": node.isFocused,
+            "selected_surface_id": node.selectedSurfaceID?.uuidString ?? NSNull(),
+            "dock_scope": node.dockScopeRawValue ?? NSNull(),
+            "surfaces": node.surfaces.map(topologySurface),
+        ]
+    }
+
+    private static func topologySurface(_ node: ControlSystemTreeSurfaceNode) -> [String: Any] {
+        var response: [String: Any] = [
+            "surface_id": node.surfaceID.uuidString,
+            "index": node.index,
+            "index_in_pane": node.indexInPane ?? NSNull(),
+            "type": node.typeRawValue,
+            "title": node.title,
+            "focused": node.isFocused,
+            "selected": node.isSelected,
+            "tty": node.tty ?? NSNull(),
+            "url": node.isBrowser ? node.url ?? "" : NSNull(),
+            "dock_scope": node.dockScopeRawValue ?? NSNull(),
+        ]
+        response["resume"] = liveResumeContext(surfaceID: node.surfaceID)
+        return response
+    }
+
+    private static func liveResumeContext(surfaceID: UUID) -> [String: Any] {
+        if let dock = DockSplitStore.liveStores.first(where: {
+            $0.containsPanel(surfaceID)
+        }) {
+            let binding = dock.managedAgentResumeBinding(panelId: surfaceID)
+                ?? dock.surfaceResumeBinding(panelId: surfaceID)
+            return resumeContextResponse(
+                agent: dock.restoredAgentLifecycle.snapshotsByPanelId[surfaceID],
+                binding: binding,
+                state: dock.restoredAgentLifecycle.resumeStatesByPanelId[surfaceID],
+                canTakeOver: dock.canTakeControlOfExternalSession(panelId: surfaceID),
+                autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled(
+                    defaults: dock.agentSessionAutoResumeDefaults
+                )
+            )
+        }
+        guard let owner = AppDelegate.shared?.workspaceContainingPanel(panelId: surfaceID) else {
+            return resumeContextResponse(
+                agent: nil,
+                binding: nil,
+                state: nil,
+                canTakeOver: false,
+                autoResumeAgentSessions: false
+            )
+        }
+        return resumeContextResponse(
+            agent: owner.workspace.restoredAgentSnapshotsByPanelId[surfaceID],
+            binding: owner.workspace.managedAgentResumeBinding(panelId: surfaceID)
+                ?? owner.workspace.surfaceResumeBinding(panelId: surfaceID),
+            state: owner.workspace.restoredAgentResumeStatesByPanelId[surfaceID],
+            canTakeOver: owner.workspace.canTakeControlOfExternalSession(panelId: surfaceID),
+            autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled(
+                defaults: owner.workspace.agentSessionAutoResumeDefaults
+            )
+        )
+    }
+
+    private nonisolated static func resumeContextResponse(
+        agent: SessionRestorableAgentSnapshot?,
+        binding: SurfaceResumeBindingSnapshot?,
+        state: Workspace.RestoredAgentResumeState?,
+        canTakeOver: Bool,
+        autoResumeAgentSessions: Bool
+    ) -> [String: Any] {
+        let managedBinding = binding?.isAgentHookBinding == true ? binding : nil
+        let compatibleAgent = managedBinding.map {
+            Workspace.restorableAgentForSessionRestore(
+                agent,
+                resumeBinding: $0
+            )
+        } ?? agent
+        let bindingSupersedesAgent =
+            agent != nil && managedBinding != nil && compatibleAgent == nil
+        let snapshotlessCompletedBinding =
+            agent == nil && managedBinding != nil && state == .completedAgentExit
+        let effectiveState =
+            bindingSupersedesAgent || snapshotlessCompletedBinding ? nil : state
+        let hasManagedResume = compatibleAgent != nil || managedBinding != nil
+        guard hasManagedResume else {
+            return [
+                "state": "none",
+                "workbench_authority": NSNull(),
+                "kind": NSNull(),
+                "session_id": NSNull(),
+                "binding_present": false,
+                "blocked_reason": NSNull(),
+                "can_take_over": false,
+            ]
+        }
+
+        let authority = WorkbenchSessionAuthority.resolved(
+            agent: compatibleAgent,
+            binding: managedBinding
+        )
+        let stateLabel: String
+        switch effectiveState {
+        case .awaitingAutoResumeCommand:
+            stateLabel = "resuming"
+        case .autoResumeCommandRunning, .observedAgentCommandRunning:
+            stateLabel = "running"
+        case .completedAgentExit:
+            stateLabel = "ended"
+        case .manualResumeAvailable, nil:
+            stateLabel = switch authority {
+            case .controlledHere:
+                effectiveState == .manualResumeAvailable
+                    ? "manual_resume_available"
+                    : "resume_available"
+            case .controlledExternally:
+                "waiting_for_supervisor"
+            case .unknown:
+                "blocked_unverified"
+            }
+        }
+        let blockedReason: Any = switch stateLabel {
+        case "waiting_for_supervisor":
+            "externally_controlled"
+        case "blocked_unverified":
+            "authority_unverified"
+        case "manual_resume_available" where !autoResumeAgentSessions:
+            "auto_resume_disabled"
+        default:
+            NSNull()
+        }
+        return [
+            "state": stateLabel,
+            "workbench_authority": authority.rawValue,
+            "kind": managedBinding?.kind ?? compatibleAgent?.kind.rawValue ?? NSNull(),
+            "session_id": managedBinding?.checkpointId ?? compatibleAgent?.sessionId ?? NSNull(),
+            "binding_present": managedBinding != nil,
+            "blocked_reason": blockedReason,
+            "can_take_over": canTakeOver,
+        ]
+    }
+
+    private static func liveChanges(afterSequence: Int64?) -> [String: Any] {
+        let snapshot = CmuxEventBus.shared.retainedSnapshotWithLatestSequence()
+        return changesPayload(
+            events: snapshot.events,
+            latestSequence: snapshot.latestSequence,
+            afterSequence: afterSequence,
+            limit: 200
+        )
+    }
+
+    private static func changesPayload(
+        events retained: [[String: Any]],
+        latestSequence latest: Int64,
+        afterSequence: Int64?,
+        limit: Int
+    ) -> [String: Any] {
+        let oldest = retained.first.flatMap { CmuxEventBus.int64($0["seq"]) } ?? latest + 1
+        let requested = afterSequence ?? latest
+        let gap = afterSequence.map { $0 < oldest - 1 || $0 > latest } ?? false
+        let allowedCategories: Set<String> = [
+            "app",
+            "window",
+            "workspace",
+            "pane",
+            "surface",
+            "agent",
+        ]
+        let matchingEvents = retained.filter { event in
+            guard let sequence = CmuxEventBus.int64(event["seq"]),
+                  sequence > requested,
+                  let category = event["category"] as? String else {
+                return false
+            }
+            return allowedCategories.contains(category)
+        }
+        let page = Array(matchingEvents.prefix(max(1, limit)))
+        let returnedThrough = page.last.flatMap { CmuxEventBus.int64($0["seq"]) }
+            ?? min(requested, latest)
+        return [
+            "after_sequence": afterSequence.map { NSNumber(value: $0) } ?? NSNull(),
+            "oldest_sequence": oldest,
+            "latest_sequence": latest,
+            "returned_through_sequence": returnedThrough,
+            "has_more": matchingEvents.count > page.count,
+            "gap": gap,
+            "events": page,
+        ]
+    }
+
+    #if DEBUG
+    static func resumeContextForTesting(
+        agent: SessionRestorableAgentSnapshot?,
+        binding: SurfaceResumeBindingSnapshot?,
+        state: Workspace.RestoredAgentResumeState?,
+        canTakeOver: Bool = false
+    ) -> [String: Any] {
+        resumeContextResponse(
+            agent: agent,
+            binding: binding,
+            state: state,
+            canTakeOver: canTakeOver,
+            autoResumeAgentSessions: AgentSessionAutoResumeSettings.isEnabled()
+        )
+    }
+
+    static func changesForTesting(
+        events: [[String: Any]],
+        latestSequence: Int64,
+        afterSequence: Int64?,
+        limit: Int
+    ) -> [String: Any] {
+        changesPayload(
+            events: events,
+            latestSequence: latestSequence,
+            afterSequence: afterSequence,
+            limit: limit
+        )
+    }
+    #endif
+
     private static func boundedSummary(_ value: Any?) -> String? {
         guard let raw = value as? String else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -675,8 +1022,8 @@ enum WorkbenchLocalActionRouter {
             "phase": projection.phase.rawValue,
             "input_epoch": projection.inputEpoch,
             "mutation_eligible": projection.mutationEligible,
-            "authority": authority?.rawValue ?? "unadopted",
-            "resume_authority": resumeAuthority?.rawValue ?? "unavailable",
+            "authority": authority?.rawValue ?? WorkbenchSessionAuthority.unknown.rawValue,
+            "resume_authority": resumeAuthority?.rawValue ?? WorkbenchSessionAuthority.unknown.rawValue,
         ]
         if includeEvidence {
             response["pending_guidance"] = projection.pendingGuidance?.text ?? NSNull()
@@ -871,8 +1218,12 @@ enum WorkbenchLocalActionRouter {
               workspace.panels[surfaceId] is TerminalPanel else {
             return nil
         }
-        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
-        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let binding = workspace.managedAgentResumeBinding(panelId: surfaceId)
+            ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let agent = Workspace.restorableAgentForSessionRestore(
+            workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+            resumeBinding: binding
+        )
         guard workspace.restoredAgentResumeStatesByPanelId[surfaceId] != .completedAgentExit else {
             return nil
         }
@@ -896,8 +1247,12 @@ enum WorkbenchLocalActionRouter {
               terminal.surface.hasLiveSurface else {
             return nil
         }
-        let agent = workspace.restoredAgentSnapshotsByPanelId[surfaceId]
-        let binding = workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let binding = workspace.managedAgentResumeBinding(panelId: surfaceId)
+            ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
+        let agent = Workspace.restorableAgentForSessionRestore(
+            workspace.restoredAgentSnapshotsByPanelId[surfaceId],
+            resumeBinding: binding
+        )
         let kind: String
         let expectedSessionId: String
         if let agent {
@@ -918,6 +1273,20 @@ enum WorkbenchLocalActionRouter {
             rhs: sessionId
         ) else {
             return nil
+        }
+        if let agentKind = RestorableAgentKind(rawValue: kind) {
+            let runtimeIdentities = workspace.confirmedRuntimeAgentProcessIdentities(
+                kind: agentKind,
+                sessionId: expectedSessionId,
+                panelId: surfaceId,
+                currentProcessIdentity: {
+                    guard let pid = pid_t(exactly: $0) else { return nil }
+                    return Workspace.agentPIDProcessIdentity(pid: pid)
+                }
+            )
+            if !runtimeIdentities.isEmpty {
+                return runtimeIdentities
+            }
         }
         return AgentResumeLiveness.exactProcessGeneration(
             for: SharedLiveAgentIndex.shared.index?.entry(
@@ -953,7 +1322,8 @@ enum WorkbenchLocalActionRouter {
         }
         return WorkbenchSessionAuthority.resolved(
             agent: agent,
-            binding: workspace.surfaceResumeBindingsByPanelId[surfaceId]
+            binding: workspace.managedAgentResumeBinding(panelId: surfaceId)
+                ?? workspace.surfaceResumeBindingsByPanelId[surfaceId]
         )
     }
 

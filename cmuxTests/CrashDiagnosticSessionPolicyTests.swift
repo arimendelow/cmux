@@ -159,6 +159,62 @@ struct CrashDiagnosticSessionPolicyTests {
     }
 
     @Test
+    func sessionSnapshotKeepsCrashWorkspaceWithManagedResumeBinding() {
+        let projectDirectory = "/tmp/cmux-project"
+        let crashDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/cmux/crash", isDirectory: true)
+            .path
+        let snapshot = AppSessionSnapshot(
+            version: SessionSnapshotSchema.currentVersion,
+            createdAt: 10,
+            windows: [
+                SessionWindowSnapshot(
+                    frame: nil,
+                    display: nil,
+                    tabManager: SessionTabManagerSnapshot(
+                        selectedWorkspaceIndex: 0,
+                        workspaces: [
+                            terminalWorkspaceSnapshot(
+                                currentDirectory: crashDirectory,
+                                terminal: SessionTerminalPanelSnapshot(
+                                    workingDirectory: crashDirectory,
+                                    managedAgentResumeBinding:
+                                        SurfaceResumeBindingSnapshot(
+                                            kind: "copilot",
+                                            command: "copilot --resume managed-session",
+                                            checkpointId: "managed-session",
+                                            source: "agent-hook",
+                                            workbenchAuthority: .controlledHere
+                                        )
+                                )
+                            ),
+                            emptyWorkspaceSnapshot(
+                                currentDirectory: projectDirectory
+                            ),
+                        ]
+                    ),
+                    sidebar: SessionSidebarSnapshot(
+                        isVisible: true,
+                        selection: .tabs,
+                        width: nil
+                    )
+                ),
+            ]
+        )
+
+        let pruned = SessionPersistencePolicy.pruningCmuxCrashDiagnosticWindows(
+            from: snapshot
+        )
+
+        #expect(!pruned.removedAny)
+        #expect(
+            pruned.snapshot?.windows.first?.tabManager.workspaces.map(
+                \.currentDirectory
+            ) == [crashDirectory, projectDirectory]
+        )
+    }
+
+    @Test
     func sessionSnapshotKeepsCrashWorkspaceWithTextBoxDraft() {
         let projectDirectory = "/tmp/cmux-project"
         let crashDirectory = FileManager.default.homeDirectoryForCurrentUser

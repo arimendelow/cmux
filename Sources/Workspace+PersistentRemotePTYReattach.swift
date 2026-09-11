@@ -52,6 +52,7 @@ extension Workspace {
             }
             let sessionID = persistentRemotePTYSessionIDForRestart(panelId: panelId)
             let resumeBinding = surfaceResumeBindingsByPanelId[panelId]
+            let managedResumeBinding = managedAgentResumeBinding(panelId: panelId)
             let sessionEnded = endedPersistentRemotePTYAttachSurfaceIds.contains(panelId)
             guard restartEndedSessions || !sessionEnded else { continue }
             let command: String
@@ -93,9 +94,11 @@ extension Workspace {
 
             remotePTYSessionIDsByPanelId[panelId] = sessionID
             registerRemoteRelayIDAliases(remotePTYSessionID: sessionID, restoredPanelId: panelId)
-            if let resumeBinding {
-                surfaceResumeBindingsByPanelId[panelId] = resumeBinding
-            }
+            restorePersistentReattachResumeBindings(
+                panelId: panelId,
+                effectiveBinding: resumeBinding,
+                managedBinding: managedResumeBinding
+            )
             remoteDisconnectPlaceholderPanelIds.remove(panelId)
             pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
             pendingRemoteDisconnectReplacementsBySurfaceId.removeValue(forKey: panelId)
@@ -104,6 +107,19 @@ extension Workspace {
             reattached.insert(panelId)
         }
         return reattached
+    }
+
+    func restorePersistentReattachResumeBindings(
+        panelId: UUID,
+        effectiveBinding: SurfaceResumeBindingSnapshot?,
+        managedBinding: SurfaceResumeBindingSnapshot?
+    ) {
+        if let effectiveBinding {
+            surfaceResumeBindingsByPanelId[panelId] = effectiveBinding
+        }
+        if let managedBinding {
+            managedAgentResumeBindingsByPanelId[panelId] = managedBinding
+        }
     }
 
     private func persistentRemotePTYSessionIDForRestart(panelId: UUID) -> String {

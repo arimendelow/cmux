@@ -504,6 +504,7 @@ export function StatusRow({
   setOpenOptionId,
   trailing,
   running = false,
+  disabled = false,
 }: {
   provider: string;
   providers?: Provider[];
@@ -518,6 +519,7 @@ export function StatusRow({
   setOpenOptionId: (id: string | null) => void;
   trailing?: ReactNode;
   running?: boolean;
+  disabled?: boolean;
 }) {
   const effortLike = options.filter((o) => o.role === "effort" && o.kind === "select" && !isOffLikeValue(String(o.value)));
   const context = options.find((o) => o.id === "context" && o.kind === "select");
@@ -529,7 +531,8 @@ export function StatusRow({
   const providerInfo = providerInfoForStatusRow(provider, providers);
   return (
     <div className="status-row">
-      {providers && onProviderModelChange
+      <div className="status-row-controls" inert={disabled ? true : undefined} aria-disabled={disabled || undefined}>
+        {providers && onProviderModelChange
         ? (
           <HarnessModelPicker
             provider={provider}
@@ -543,7 +546,7 @@ export function StatusRow({
           />
         )
         : <StaticProvider provider={providerInfo} running={running} />}
-      {fast ? (
+        {fast ? (
         <HintTooltip label={optionTooltip(fast)} action="toggle-fast">
           <button
             type="button"
@@ -555,8 +558,8 @@ export function StatusRow({
             <BoltIcon />
           </button>
         </HintTooltip>
-      ) : null}
-      {effortLike.map((option) => (
+        ) : null}
+        {effortLike.map((option) => (
         <InlineSelect
           key={option.id}
           option={option}
@@ -567,8 +570,8 @@ export function StatusRow({
           open={openOptionId === option.id}
           onOpenChange={(open) => setOpenOptionId(open ? option.id : null)}
         />
-      ))}
-      {context ? (
+        ))}
+        {context ? (
         <InlineSelect
           option={context}
           icon={<SparkIcon />}
@@ -577,17 +580,17 @@ export function StatusRow({
           open={openOptionId === context.id}
           onOpenChange={(open) => setOpenOptionId(open ? context.id : null)}
         />
-      ) : null}
-      {mode && modeLabel ? (
+        ) : null}
+        {mode && modeLabel ? (
         <HintTooltip label={optionTooltip(mode)} action="cycle-mode">
           <button type="button" className="row-control" onClick={() => cycleSelect(mode, onChange)}>
             <PlanIcon />
             <span className="row-value">{modeLabel}</span>
           </button>
         </HintTooltip>
-      ) : null}
-      {onCwdChange && onCwdCommit ? <CwdPopover cwd={cwd} onChange={onCwdChange} onCommit={onCwdCommit} /> : <StaticCwd cwd={cwd} />}
-      {approval ? (
+        ) : null}
+        {onCwdChange && onCwdCommit ? <CwdPopover cwd={cwd} onChange={onCwdChange} onCommit={onCwdCommit} /> : <StaticCwd cwd={cwd} />}
+        {approval ? (
         <HintTooltip label={optionTooltip(approval)}>
           <button
             type="button"
@@ -599,8 +602,9 @@ export function StatusRow({
             <ShieldIcon />
           </button>
         </HintTooltip>
-      ) : null}
-      <OverflowMenu options={overflow} onChange={onChange} />
+        ) : null}
+        <OverflowMenu options={overflow} onChange={onChange} />
+      </div>
       <div className="status-row-spacer" />
       {trailing}
     </div>

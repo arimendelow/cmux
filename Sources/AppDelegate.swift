@@ -1338,6 +1338,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
+        if OuroWorkbenchProduct.isCurrentBundle {
+            let continuity = WorkbenchAppContinuity.beginLaunch()
+            CmuxEventBus.shared.publish(
+                name: "app.launched",
+                category: "app",
+                source: "workbench",
+                payload: [
+                    "app_instance_id": continuity.launchID.uuidString,
+                    "started_at": ISO8601DateFormatter().string(
+                        from: continuity.startedAt
+                    ),
+                    "previous_exit_clean": continuity.previousExitWasClean,
+                ]
+            )
+        }
         let telemetryEnabled = TelemetrySettings.enabledForCurrentLaunch
         let sentryStartupPolicy = MacSentryStartupPolicy(
             environment: env,
@@ -2188,6 +2203,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // widens coverage to other entrypoints.
         isTerminatingApp = true
         _ = saveSessionSnapshotIncludingProcessDetectedIndexes(includeScrollback: true, removeWhenEmpty: false)
+        if OuroWorkbenchProduct.isCurrentBundle {
+            CmuxEventBus.shared.publish(
+                name: "app.terminating",
+                category: "app",
+                source: "workbench",
+                payload: [
+                    "window_count": mainWindowContexts.count,
+                ]
+            )
+        }
         ClosedItemHistoryStore.shared.flushPendingSaves()
         terminationWatchdog.arm()
         sentryStopMemoryContextRefresh()
@@ -2211,6 +2236,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ghosttyCrashBreadcrumbTask = nil
         notificationStore?.clearAll()
         GhosttyCrashBreadcrumb.markCleanExit()
+        if OuroWorkbenchProduct.isCurrentBundle {
+            WorkbenchAppContinuity.markCleanExit()
+        }
         unregisterDisplayReconfigurationCallbackIfNeeded()
         StartupBreadcrumbLog.append("appDelegate.willTerminate.complete")
         enableSuddenTerminationIfNeeded()
@@ -3555,6 +3583,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 SurfaceResumeRunPromptBatch.shared.beginRestorePass()
             }
             isApplyingSessionRestore = true
+            if OuroWorkbenchProduct.isCurrentBundle {
+                CmuxEventBus.shared.publish(
+                    name: "app.restore.started",
+                    category: "app",
+                    source: "workbench",
+                    payload: [
+                        "mode": "startup",
+                        "window_count": startupSnapshot?.windows.count ?? 0,
+                    ]
+                )
+            }
 #if DEBUG
             cmuxDebugLog(
                 "session.restore.start windows=\(startupSnapshot?.windows.count ?? 0) " +
@@ -3581,7 +3620,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        guard let startupSnapshot else { return false }
+        guard let startupSnapshot else {
+            if OuroWorkbenchProduct.isCurrentBundle {
+                CmuxEventBus.shared.publish(
+                    name: "app.restore.completed",
+                    category: "app",
+                    source: "workbench",
+                    payload: [
+                        "mode": "startup",
+                        "restored": false,
+                        "reason": "no_snapshot",
+                        "window_count": 0,
+                    ]
+                )
+            }
+            return false
+        }
 
         let additionalWindows = Array(startupSnapshot
             .windows
@@ -3626,6 +3680,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isApplyingSessionRestore = false
         if wasApplyingSessionRestore {
             SurfaceResumeRunPromptBatch.shared.endRestorePass()
+            if OuroWorkbenchProduct.isCurrentBundle {
+                CmuxEventBus.shared.publish(
+                    name: "app.restore.completed",
+                    category: "app",
+                    source: "workbench",
+                    payload: [
+                        "mode": isManualReopen ? "manual" : "startup",
+                        "restored": true,
+                        "window_count": mainWindowContexts.count,
+                    ]
+                )
+            }
         }
         if isScreenChangeCaptureSuppressed {
             // A display change arrived mid-restore and its reconcile pass was
@@ -3663,15 +3729,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             snapshot.windows.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot)
         )
         guard !snapshotWindows.isEmpty else { return false }
+        guard !isApplyingSessionRestore else {
+            if OuroWorkbenchProduct.isCurrentBundle {
+                CmuxEventBus.shared.publish(
+                    name: "app.restore.rejected",
+                    category: "app",
+                    source: "workbench",
+                    payload: [
+                        "mode": "manual",
+                        "reason": "restore_in_progress",
+                    ]
+                )
+            }
+            return false
+        }
 
         (tabManager ?? mainWindowContexts.values.first?.tabManager)?
             .prepareLegacyWorkspaceCustomizationMigration(
                 afterRestoring: snapshotWindows.flatMap(\.tabManager.workspaces)
             )
-        if !isApplyingSessionRestore {
-            SurfaceResumeRunPromptBatch.shared.beginRestorePass()
-        }
+        SurfaceResumeRunPromptBatch.shared.beginRestorePass()
         isApplyingSessionRestore = true
+        if OuroWorkbenchProduct.isCurrentBundle {
+            CmuxEventBus.shared.publish(
+                name: "app.restore.started",
+                category: "app",
+                source: "workbench",
+                payload: [
+                    "mode": "manual",
+                    "window_count": snapshotWindows.count,
+                ]
+            )
+        }
         startupSessionSnapshot = nil
         didAttemptStartupSessionRestore = true
         var createdWindowIds: [UUID] = []

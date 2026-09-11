@@ -481,6 +481,80 @@ final class AgentSessionAutoResumeSettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testDisabledAutoResumeDoesNotRunLauncherOwnedAgentBinding() throws {
+        let defaults = UserDefaults.standard
+        let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let source = Workspace()
+        let sourcePanelId = try XCTUnwrap(source.focusedPanelId)
+        let sessionId = "codex-launcher-auto-resume-disabled-session"
+        let sourceIndex = try makeRestorableAgentIndex(
+            workspaceId: source.id,
+            panelId: sourcePanelId,
+            sessionId: sessionId
+        )
+        let arguments = [
+            "/opt/company/launcher",
+            "cp",
+            "-a",
+            "worker",
+            "--",
+            "--resume=\(sessionId)",
+        ]
+        let bindingIndex = SurfaceResumeBindingIndex(bindingsByPanel: [
+            SurfaceResumeBindingIndex.PanelKey(workspaceId: source.id, panelId: sourcePanelId): SurfaceResumeBindingSnapshot(
+                name: "worker",
+                kind: "codex",
+                command: arguments.map(SurfaceResumeCommandCanonicalizer.shellQuoted).joined(separator: " "),
+                cwd: "/tmp/repo",
+                checkpointId: sessionId,
+                source: "private-launcher-hook",
+                launchCommand: AgentLaunchCommandSnapshot(
+                    executablePath: arguments[0],
+                    arguments: arguments,
+                    workingDirectory: "/tmp/repo",
+                    source: "cli"
+                ),
+                autoResume: true,
+                workbenchAuthority: .controlledHere,
+                workbenchAuthorityEvidence: .launcherOwned,
+                launchFlavor: .local
+            ),
+        ])
+        let snapshot = source.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: sourceIndex,
+            surfaceResumeBindingIndex: bindingIndex
+        )
+
+        defaults.set(false, forKey: key)
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.terminalPanel(for: restoredPanelId))
+        let input = restoredPanel.surface.debugInitialInputMetadata()
+
+        XCTAssertFalse(input.hasInitialInput)
+        XCTAssertEqual(input.byteCount, 0)
+        XCTAssertNil(restoredPanel.surface.debugInitialCommand())
+        let retainedBinding = try XCTUnwrap(
+            restored.sessionSnapshot(includeScrollback: false)
+                .panels.first?.terminal?.resumeBinding
+        )
+        XCTAssertEqual(retainedBinding.source, "private-launcher-hook")
+        XCTAssertEqual(retainedBinding.workbenchAuthorityEvidence, .launcherOwned)
+        XCTAssertTrue(retainedBinding.allowsAutomaticResume)
+    }
+
+    @MainActor
     func testDisabledAutoResumeKeepsScrollbackForSuppressedAgentHookBinding() throws {
         let defaults = UserDefaults.standard
         let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey

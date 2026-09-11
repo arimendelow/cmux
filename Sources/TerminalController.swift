@@ -1553,6 +1553,18 @@ class TerminalController {
                 )
                 return
             }
+            let capabilityEnvelope = SocketClientCapabilityCommand(receivedCommand)
+            let hasVerifiedSocketCapability = capabilityEnvelope.map {
+                socketClientCapabilityAuthority.verifies($0.capability)
+            } ?? false
+            let callerEvidence = ControlCommandCallerEvidence(
+                processID: pid,
+                hasSameUserID: peerHasSameUID,
+                hasVerifiedSocketCapability: hasVerifiedSocketCapability,
+                agentSession: peerHasSameUID && hasVerifiedSocketCapability
+                    ? freshLauncherSessionEvidence(for: trimmed)
+                    : nil
+            )
             lineReader.clearLimits()
             if holdsPreauthorizationSlot {
                 holdsPreauthorizationSlot = false
@@ -1584,7 +1596,8 @@ class TerminalController {
 
                 let result = processSocketLine(
                     trimmed,
-                    passwordAuthorization: passwordAuthorization
+                    passwordAuthorization: passwordAuthorization,
+                    callerEvidence: callerEvidence
                 )
                 passwordAuthorization = result.passwordAuthorization
                 if let response = result.response {
@@ -1604,7 +1617,8 @@ class TerminalController {
 
     private nonisolated func processSocketLine(
         _ command: String,
-        passwordAuthorization: SocketPasswordAuthorization
+        passwordAuthorization: SocketPasswordAuthorization,
+        callerEvidence: ControlCommandCallerEvidence?
     ) -> SocketLineProcessingResult {
 #if DEBUG
         let debugInfo = Self.socketCommandDebugInfo(command)
@@ -1636,7 +1650,10 @@ class TerminalController {
             )
         }
 
-        let response = processCommandUsingSocketExecutionPolicy(command)
+        let response = processCommandUsingSocketExecutionPolicy(
+            command,
+            callerEvidence: callerEvidence
+        )
 #if DEBUG
         if let response {
             Self.debugLogSocketCommandEndIfNeeded(
@@ -1650,6 +1667,68 @@ class TerminalController {
         return SocketLineProcessingResult(
             response: response,
             passwordAuthorization: nextPasswordAuthorization
+        )
+    }
+
+    private nonisolated func freshLauncherSessionEvidence(
+        for command: String
+    ) -> ControlAgentSessionCallerEvidence? {
+        guard case .success(let request) = Self.v2Parser.request(fromLine: command),
+              request.method == "surface.resume.set" else {
+            return nil
+        }
+        func string(_ key: String) -> String? {
+            guard case .string(let value)? = request.params[key] else {
+                return nil
+            }
+            let trimmed = value.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard let authority = string("authority"),
+              ["local", "external", "unknown"].contains(authority),
+              let agentSessionID = string("agent_session_id")
+                ?? string("agentSessionId"),
+              let rawSurfaceID = string("surface_id")
+                ?? string("terminal_id")
+                ?? string("tab_id"),
+              let surfaceID = UUID(uuidString: rawSurfaceID) else {
+            return nil
+        }
+
+        let index = ProcessDetectedResumeIndexes.loadSynchronously(
+            maximumSnapshotAge: 0
+        ).restorableAgentIndex
+        guard let entry = index.entry(panelId: surfaceID),
+              entry.processLiveness == .running,
+              entry.snapshot.kind != .claude,
+              ManagedAgentSessionIdentity.sessionIDsMatch(
+                  kind: entry.snapshot.kind.rawValue,
+                  lhs: entry.snapshot.sessionId,
+                  rhs: agentSessionID
+              ) else {
+            return nil
+        }
+        let currentAgentProcessIDs = Set(entry.agentProcessIDs.compactMap {
+            processID -> Int32? in
+            guard processID > 0,
+                  processID <= Int(Int32.max),
+                  let expectedIdentity =
+                    entry.agentProcessIdentities[processID],
+                  AgentPIDProcessIdentity(pid: pid_t(processID)) ==
+                    expectedIdentity else {
+                return nil
+            }
+            return Int32(processID)
+        })
+        guard !currentAgentProcessIDs.isEmpty else { return nil }
+        return ControlAgentSessionCallerEvidence(
+            surfaceID: surfaceID,
+            kind: entry.snapshot.kind.rawValue,
+            sessionID: entry.snapshot.sessionId,
+            agentProcessIDs: currentAgentProcessIDs,
+            workingDirectory: entry.snapshot.workingDirectory
         )
     }
 
@@ -1898,7 +1977,10 @@ class TerminalController {
     }
 #endif
 
-    private nonisolated func processCommandUsingSocketExecutionPolicy(_ command: String) -> String? {
+    private nonisolated func processCommandUsingSocketExecutionPolicy(
+        _ command: String,
+        callerEvidence: ControlCommandCallerEvidence? = nil
+    ) -> String? {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.hasPrefix("{") {
@@ -1925,7 +2007,7 @@ class TerminalController {
             if policy.runsOnSocketWorker {
                 return socketWorkerV2Response(handling: request)
             }
-            return processParsedV2Command(request)
+            return processParsedV2Command(request, callerEvidence: callerEvidence)
         }
 
         let parts = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
@@ -2208,7 +2290,10 @@ class TerminalController {
     /// for in-process callers). Policy checks and response encoding stay on
     /// the calling thread; only the command body crosses to the main actor,
     /// via a single `v2MainSync` hop.
-    private nonisolated func processParsedV2Command(_ request: ControlRequest) -> String {
+    private nonisolated func processParsedV2Command(
+        _ request: ControlRequest,
+        callerEvidence: ControlCommandCallerEvidence? = nil
+    ) -> String {
         let bridged = V2SocketRequest(bridging: request)
         let id: Any? = bridged.id
         let method = bridged.method
@@ -2228,7 +2313,13 @@ class TerminalController {
             }
 
             let outcome = v2MainSync {
-                self.v2MainActorResponse(request: request, id: id, method: method, params: params)
+                self.v2MainActorResponse(
+                    request: request,
+                    id: id,
+                    method: method,
+                    params: params,
+                    callerEvidence: callerEvidence
+                )
             }
             switch outcome {
             case .callResult(let result):
@@ -2249,14 +2340,23 @@ class TerminalController {
     /// before `controlCommandCoordinator.handle` here must also be added
     /// there, or the tranche-D worker-lane verbs silently fork from the
     /// main lane.
-    private func v2MainActorResponse(request: ControlRequest, id: Any?, method: String, params: [String: Any]) -> V2MainHopOutcome {
+    private func v2MainActorResponse(
+        request: ControlRequest,
+        id: Any?,
+        method: String,
+        params: [String: Any],
+        callerEvidence: ControlCommandCallerEvidence? = nil
+    ) -> V2MainHopOutcome {
         v2RefreshKnownRefs()
 
         // Domains migrated into CmuxControlSocket's ControlCommandCoordinator
         // answer here, on the main actor, through the same encoder/id as the
         // legacy switch (the worker encodes the typed result after the hop);
         // everything else falls through to the legacy switch below.
-        if let coordinatorResult = controlCommandCoordinator.handle(request) {
+        if let coordinatorResult = controlCommandCoordinator.handle(
+            request,
+            callerEvidence: callerEvidence
+        ) {
             return .callResult(coordinatorResult)
         }
         return .encoded(v2LegacyMainActorResponse(id: id, method: method, params: params))

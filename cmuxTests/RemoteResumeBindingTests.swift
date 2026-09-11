@@ -652,13 +652,23 @@ struct RemoteResumeBindingTests {
             restoredWorkspace.sessionSnapshot(includeScrollback: false)
                 .panels.first { $0.id == restoredSurfaceID }?.terminal?.resumeBinding
         )
+        let roundTripManagedBinding = try #require(
+            restoredWorkspace.sessionSnapshot(includeScrollback: false)
+                .panels.first { $0.id == restoredSurfaceID }?
+                .terminal?.managedAgentResumeBinding
+        )
         guard case .persistentSSH(let context) = roundTripBinding.launchFlavor else {
             Issue.record("Legacy remote binding was not migrated to persistent SSH")
+            return
+        }
+        guard case .persistentSSH(let managedContext) = roundTripManagedBinding.launchFlavor else {
+            Issue.record("Legacy remote managed binding was not migrated to persistent SSH")
             return
         }
         #expect(context.workspaceID == restoredWorkspace.id)
         #expect(context.surfaceID == restoredSurfaceID)
         #expect(context.persistentPTYSessionID == fixture.remotePTYSessionID)
+        #expect(managedContext == context)
     }
 
     @Test

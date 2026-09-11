@@ -12,12 +12,16 @@ public struct ControlSurfaceResumeSetInputs: Sendable, Equatable {
     public let name: String?
     /// The binding's kind (trimmed non-empty), if any.
     public let kind: String?
-    /// The resume command (trimmed, guaranteed non-empty by the coordinator).
-    public let command: String
+    /// The resume command, absent only for a non-local authority attestation.
+    public let command: String?
     /// The working directory (trimmed non-empty), if any.
     public let cwd: String?
     /// The checkpoint identifier (trimmed non-empty), if any.
     public let checkpointID: String?
+    /// The authoritative agent session identifier reported by its runtime hook.
+    public let agentSessionID: String?
+    /// The generic control-location attestation paired with ``agentSessionID``.
+    public let authority: ControlSurfaceResumeAuthority?
     /// The binding source (already mapped: `process-detected` → `manual`), if any.
     public let source: String?
     /// The environment overrides (the legacy `v2StringMap`, or `nil`).
@@ -33,6 +37,8 @@ public struct ControlSurfaceResumeSetInputs: Sendable, Equatable {
     public let remoteWorkspaceID: UUID?
     /// Raw relay parameters retained to authenticate their provenance.
     public let remoteRelayParameters: [String: JSONValue]?
+    /// Transport-owned evidence about the process that issued the request.
+    public let callerEvidence: ControlCommandCallerEvidence?
 
     /// Creates resume-set inputs.
     ///
@@ -50,22 +56,27 @@ public struct ControlSurfaceResumeSetInputs: Sendable, Equatable {
     public init(
         name: String?,
         kind: String?,
-        command: String,
+        command: String?,
         cwd: String?,
         checkpointID: String?,
+        agentSessionID: String?,
+        authority: ControlSurfaceResumeAuthority?,
         source: String?,
         environment: [String: String]?,
         launchCommand: ControlAgentLaunchCommand?,
         permissionMode: String?,
         autoResume: Bool,
         remoteWorkspaceID: UUID?,
-        remoteRelayParameters: [String: JSONValue]?
+        remoteRelayParameters: [String: JSONValue]?,
+        callerEvidence: ControlCommandCallerEvidence?
     ) {
         self.name = name
         self.kind = kind
         self.command = command
         self.cwd = cwd
         self.checkpointID = checkpointID
+        self.agentSessionID = agentSessionID
+        self.authority = authority
         self.source = source
         self.environment = environment
         self.launchCommand = launchCommand
@@ -73,5 +84,6 @@ public struct ControlSurfaceResumeSetInputs: Sendable, Equatable {
         self.autoResume = autoResume
         self.remoteWorkspaceID = remoteWorkspaceID
         self.remoteRelayParameters = remoteRelayParameters
+        self.callerEvidence = callerEvidence
     }
 }

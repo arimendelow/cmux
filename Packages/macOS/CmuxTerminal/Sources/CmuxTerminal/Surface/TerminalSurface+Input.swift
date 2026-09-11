@@ -35,6 +35,7 @@ extension TerminalSurface {
     /// Notifies the pane host that user-initiated terminal input is about to be sent.
     @MainActor
     public func didReceiveExplicitInput() {
+        onExplicitInput?()
         paneHost.terminalSurfaceDidReceiveExplicitInput()
     }
 

@@ -9,14 +9,22 @@ final class RestoredAgentLifecycleCoordinator {
     @ObservationIgnored
     private let dateProvider: @MainActor () -> TimeInterval
 
-    init(dateProvider: @escaping @MainActor () -> TimeInterval = { Date.now.timeIntervalSince1970 }) {
+    @ObservationIgnored
+    private let eventBus: CmuxEventBus?
+
+    init(
+        dateProvider: @escaping @MainActor () -> TimeInterval = { Date.now.timeIntervalSince1970 },
+        eventBus: CmuxEventBus? = OuroWorkbenchProduct.isCurrentBundle ? .shared : nil
+    ) {
         self.dateProvider = dateProvider
+        self.eventBus = eventBus
     }
 
     var snapshotsByPanelId: [UUID: SessionRestorableAgentSnapshot] = [:] {
         didSet {
             completedGenerationsByPanelId = completedGenerationsByPanelId.filter { panelId, _ in
-                snapshotsByPanelId[panelId] != nil
+                snapshotsByPanelId[panelId] != nil ||
+                    resumeStatesByPanelId[panelId] == .completedAgentExit
             }
         }
     }
@@ -35,17 +43,30 @@ final class RestoredAgentLifecycleCoordinator {
                     processIdentities: []
                 )
             }
+            // Shell integration can settle a restore without an agent hook; wake the native-facts reader.
+            for panelId in Set(oldValue.keys).union(resumeStatesByPanelId.keys)
+                where oldValue[panelId] != resumeStatesByPanelId[panelId] {
+                eventBus?.publish(
+                    name: "agent.restore.changed",
+                    category: "agent",
+                    source: "workbench",
+                    surfaceId: panelId.uuidString
+                )
+            }
         }
     }
     var invalidatedFingerprintsByPanelId: [UUID: Int] = [:]
 
     private var completedGenerationsByPanelId: [UUID: RestoredAgentCompletedGeneration] = [:]
+    private var pendingStartupInputsByPanelId: [UUID: String] = [:]
+    private var armedStartupInputResendPanelIds: Set<UUID> = []
 
     func markCompleted(
         panelId: UUID,
         observation: RestorableAgentSessionIndex.Entry?,
         runtimeProcessIdentities: Set<AgentPIDProcessIdentity>
     ) {
+        clearStartupInput(panelId: panelId)
         let observedProcessIdentities = Set(
             observation.map { Array($0.agentProcessIdentities.values) } ?? []
         )
@@ -93,6 +114,7 @@ final class RestoredAgentLifecycleCoordinator {
         resumeStatesByPanelId[panelId] = .observedAgentCommandRunning
         invalidatedFingerprintsByPanelId.removeValue(forKey: panelId)
         completedGenerationsByPanelId.removeValue(forKey: panelId)
+        clearStartupInput(panelId: panelId)
         return true
     }
 
@@ -122,12 +144,65 @@ final class RestoredAgentLifecycleCoordinator {
         }
     }
 
+    func registerStartupInput(_ input: String?, panelId: UUID) {
+        armedStartupInputResendPanelIds.remove(panelId)
+        guard let input, !input.isEmpty else {
+            pendingStartupInputsByPanelId.removeValue(forKey: panelId)
+            return
+        }
+        pendingStartupInputsByPanelId[panelId] = input
+    }
+
+    func clearStartupInput(panelId: UUID) {
+        pendingStartupInputsByPanelId.removeValue(forKey: panelId)
+        armedStartupInputResendPanelIds.remove(panelId)
+    }
+
+    func clearAllStartupInputs() {
+        pendingStartupInputsByPanelId.removeAll(keepingCapacity: false)
+        armedStartupInputResendPanelIds.removeAll(keepingCapacity: false)
+    }
+
+    func startupInput(panelId: UUID) -> String? {
+        pendingStartupInputsByPanelId[panelId]
+    }
+
+    func awaitsStartupInput(panelId: UUID) -> Bool {
+        resumeStatesByPanelId[panelId] == .awaitingAutoResumeCommand &&
+            pendingStartupInputsByPanelId[panelId] != nil
+    }
+
+    func armStartupInputResend(panelId: UUID) -> Bool {
+        guard awaitsStartupInput(panelId: panelId),
+              !armedStartupInputResendPanelIds.contains(panelId) else {
+            return false
+        }
+        armedStartupInputResendPanelIds.insert(panelId)
+        return true
+    }
+
+    func takeStartupInputForResend(
+        panelId: UUID,
+        shellState: PanelShellActivityState
+    ) -> String? {
+        armedStartupInputResendPanelIds.remove(panelId)
+        guard shellState == .promptIdle, awaitsStartupInput(panelId: panelId) else {
+            return nil
+        }
+        return pendingStartupInputsByPanelId.removeValue(forKey: panelId)
+    }
+
     func seedTransferredState(
         panelId: UUID,
         snapshot: SessionRestorableAgentSnapshot?,
         resumeState: Workspace.RestoredAgentResumeState?,
-        completedGeneration: RestoredAgentCompletedGeneration?
+        completedGeneration: RestoredAgentCompletedGeneration?,
+        startupInput: String? = nil
     ) {
+        registerStartupInput(
+            resumeState == .awaitingAutoResumeCommand ? startupInput : nil,
+            panelId: panelId
+        )
         if let snapshot {
             snapshotsByPanelId[panelId] = snapshot
         } else {

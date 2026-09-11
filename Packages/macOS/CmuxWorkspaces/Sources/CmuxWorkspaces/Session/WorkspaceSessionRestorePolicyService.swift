@@ -154,7 +154,7 @@ public struct WorkspaceSessionRestorePolicyService<Binding: WorkspaceSurfaceResu
         if !effectiveBinding.usesLocalRestoreVerb {
             effectiveBinding = bindingForCompatibilityShellRestore(effectiveBinding)
         }
-        if effectiveBinding.source == "agent-hook", !autoResumeAgentSessions {
+        if effectiveBinding.isAgentHookBinding, !autoResumeAgentSessions {
             return nil
         }
         if effectiveBinding.requiresPromptApproval {

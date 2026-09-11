@@ -343,6 +343,7 @@ extension Workspace {
         restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
         restoredAgentResumeStatesByPanelId.removeValue(forKey: panelId)
         restoredResumeSessionWorkingDirectoriesByPanelId.removeValue(forKey: panelId)
+        restoredAgentLifecycle.clearStartupInput(panelId: panelId)
     }
 
     func refreshTrackedAgentPorts() {
@@ -406,6 +407,11 @@ extension Workspace {
         if didAdoptAgentPID {
             refreshTrackedAgentPorts()
         }
+    }
+
+    func clearAgentRuntimeState(panelId: UUID) {
+        _ = discardAgentRuntimeState(agentRuntimeState(forPanelId: panelId))
+        clearAgentLifecycleStates(panelId: panelId)
     }
 
     /// Discard every Workspace-owned contribution for a surface whose tab,
@@ -505,6 +511,7 @@ extension Workspace {
         surfaceTTYNames.removeValue(forKey: panelId)
         discardRemotePTYSessionID(panelId: panelId)
         surfaceResumeBindingsByPanelId.removeValue(forKey: panelId)
+        managedAgentResumeBindingsByPanelId.removeValue(forKey: panelId)
         surfaceListeningPorts.removeValue(forKey: panelId)
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
 #if DEBUG

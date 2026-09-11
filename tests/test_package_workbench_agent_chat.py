@@ -16,6 +16,8 @@ def main() -> None:
             (source / directory).mkdir(parents=True)
         for filename in (
             "OuroWorkbenchMCP",
+            "boss-repair.ts",
+            "canonical-boss.ts",
             "catalog.ts",
             "cmux-chat",
             "server.ts",
@@ -33,21 +35,20 @@ def main() -> None:
         os.chmod(source / "OuroWorkbenchMCP", 0o755)
         os.chmod(source / "cmux-chat", 0o755)
 
-        result = subprocess.run(
-            [
-                str(packager),
-                str(source),
-                str(destination),
-                "com.ourostack.workbench.v1.debug",
-            ],
-            text=True,
-            capture_output=True,
-        )
+        command = [
+            str(packager),
+            str(source),
+            str(destination),
+            "com.ourostack.workbench.v1.debug",
+        ]
+        result = subprocess.run(command, text=True, capture_output=True)
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
         for relative in (
             "OuroWorkbenchMCP",
             "adapters/acp.ts",
+            "boss-repair.ts",
+            "canonical-boss.ts",
             "cmux-chat",
             "node_modules/example/index.js",
             "public/app.css",
@@ -61,6 +62,15 @@ def main() -> None:
             raise AssertionError("test sources must not ship in the app bundle")
         if not os.access(destination / "cmux-chat", os.X_OK):
             raise AssertionError("packaged launcher lost executable permission")
+        repair_payload = (source / "boss-repair.ts").read_bytes()
+        if (destination / "boss-repair.ts").read_bytes() != repair_payload:
+            raise AssertionError("packaged Boss repair CLI differs from its source")
+        (source / "boss-repair.ts").unlink()
+        missing = subprocess.run(command, text=True, capture_output=True)
+        if missing.returncode == 0 or "boss-repair.ts" not in missing.stderr:
+            raise AssertionError("missing Boss repair CLI must fail packaging explicitly")
+        if (destination / "boss-repair.ts").read_bytes() != repair_payload:
+            raise AssertionError("failed packaging replaced the previous complete payload")
 
 
 if __name__ == "__main__":

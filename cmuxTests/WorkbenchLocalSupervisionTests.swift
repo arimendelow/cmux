@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Darwin
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -1444,7 +1445,7 @@ struct WorkbenchLocalActionTests {
             defaults: defaults,
             stateStore: store,
             enabled: true,
-            authority: { _, _, _ in .controlledInAgencyHub },
+            authority: { _, _, _ in .controlledExternally },
             processGeneration: stableProcessGeneration,
             effect: { _, _, _ in false }
         )
@@ -1484,7 +1485,7 @@ struct WorkbenchLocalActionTests {
         observe(phase: .silenceThresholdCrossed, revision: "active-hub", epoch: 3)
         var authorities: [WorkbenchSessionAuthority?] = [
             .controlledHere,
-            .controlledInAgencyHub,
+            .controlledExternally,
         ]
         let transferred = WorkbenchLocalActionRouter.stop(
             params: params(requestId: "stop-transferred", revision: "active-hub", epoch: 3),
@@ -1540,7 +1541,7 @@ struct WorkbenchLocalActionTests {
             resumeAuthority: { _, _, _ in .controlledHere }
         )
         let inspected = try successPayload(inspect)
-        #expect(inspected["authority"] as? String == "unadopted")
+        #expect(inspected["authority"] as? String == "unknown")
         #expect(inspected["resume_authority"] as? String == "controlledHere")
 
         let listed = try successPayload(
@@ -1752,7 +1753,7 @@ struct WorkbenchLocalActionTests {
             defaults: defaults,
             stateStore: store,
             enabled: true,
-            authority: { _, _, _ in .controlledInAgencyHub },
+            authority: { _, _, _ in .controlledExternally },
             effect: { _, _, _ in .pasteFailed }
         )
         #expect(errorPayload(hub)["result_code"] as? String == "authority_denied")
@@ -2060,6 +2061,335 @@ struct WorkbenchLocalActionTests {
         #expect(try successPayload(workspaceFlag)["status"] as? String == "completed")
     }
 
+    @Test func listIncludesAppWideTopologyAndBoundedDeltas() throws {
+        let stateStore = WorkbenchLocalSessionStateStore()
+        let topology: [String: Any] = [
+            "revision": Int64(14),
+            "windows": [[
+                "window_id": "11111111-1111-4111-8111-111111111111",
+                "is_key": true,
+                "workspaces": [[
+                    "workspace_id": "22222222-2222-4222-8222-222222222222",
+                    "selected": true,
+                    "panes": [[
+                        "pane_id": "33333333-3333-4333-8333-333333333333",
+                        "focused": true,
+                        "surfaces": [[
+                            "surface_id": "44444444-4444-4444-8444-444444444444",
+                            "selected": true,
+                            "type": "terminal",
+                        ]],
+                    ]],
+                ]],
+            ]],
+        ]
+        let changes: [String: Any] = [
+            "after_sequence": Int64(12),
+            "latest_sequence": Int64(14),
+            "gap": false,
+            "events": [
+                ["seq": Int64(13), "name": "workspace.selected"],
+                ["seq": Int64(14), "name": "surface.focused"],
+            ],
+        ]
+
+        let listed = try successPayload(WorkbenchLocalActionRouter.list(
+            params: ["after_sequence": 12],
+            stateStore: stateStore,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            topology: { topology },
+            changes: { afterSequence in
+                #expect(afterSequence == 12)
+                return changes
+            }
+        ))
+
+        #expect((listed["topology"] as? [String: Any])?["revision"] as? Int64 == 14)
+        #expect((listed["changes"] as? [String: Any])?["latest_sequence"] as? Int64 == 14)
+        #expect(errorCode(WorkbenchLocalActionRouter.list(
+            params: ["after_sequence": -1],
+            stateStore: stateStore,
+            enabled: true,
+            authority: { _, _, _ in .controlledHere },
+            topology: { topology },
+            changes: { _ in changes }
+        )) == "invalid_params")
+    }
+
+    @Test func resumeContextMakesUnverifiedRestoresVisible() {
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "copilot-session",
+            workbenchAuthority: .unknown
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable,
+            canTakeOver: true
+        )
+
+        #expect(context["state"] as? String == "blocked_unverified")
+        #expect(context["workbench_authority"] as? String == "unknown")
+        #expect(context["kind"] as? String == "copilot")
+        #expect(context["session_id"] as? String == "copilot-session")
+        #expect(context["binding_present"] as? Bool == false)
+        #expect(context["blocked_reason"] as? String == "authority_unverified")
+        #expect(context["can_take_over"] as? Bool == true)
+    }
+
+    @Test func resumeContextDistinguishesSupervisorWaitFromLocalResume() {
+        let externalBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume external-session",
+            checkpointId: "external-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+        let localBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume local-session",
+            checkpointId: "local-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledHere
+        )
+
+        let external = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: externalBinding,
+            state: .manualResumeAvailable
+        )
+        let local = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: localBinding,
+            state: .awaitingAutoResumeCommand
+        )
+
+        #expect(external["state"] as? String == "waiting_for_supervisor")
+        #expect(external["blocked_reason"] as? String == "externally_controlled")
+        #expect(local["state"] as? String == "resuming")
+        #expect(local["workbench_authority"] as? String == "controlledHere")
+    }
+
+    @Test func resumeContextReportsAutoResumeDisabledOnlyForManualLocalSessions() {
+        let defaults = UserDefaults.standard
+        let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "manual-local-session",
+            workbenchAuthority: .controlledHere
+        )
+        defaults.set(false, forKey: key)
+
+        let manual = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable
+        )
+        #expect(manual["state"] as? String == "manual_resume_available")
+        #expect(manual["session_id"] as? String == "manual-local-session")
+        #expect(manual["blocked_reason"] as? String == "auto_resume_disabled")
+
+        for state: Workspace.RestoredAgentResumeState? in [
+            nil, .awaitingAutoResumeCommand, .autoResumeCommandRunning,
+            .observedAgentCommandRunning, .completedAgentExit,
+        ] {
+            let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+                agent: agent,
+                binding: nil,
+                state: state
+            )
+            #expect(context["blocked_reason"] is NSNull)
+        }
+        for (authority, reason) in [
+            (WorkbenchSessionAuthority.controlledExternally, "externally_controlled"),
+            (.unknown, "authority_unverified"),
+        ] {
+            var blockedAgent = agent
+            blockedAgent.workbenchAuthority = authority
+            let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+                agent: blockedAgent,
+                binding: nil,
+                state: .manualResumeAvailable
+            )
+            #expect(context["blocked_reason"] as? String == reason)
+        }
+
+        defaults.set(true, forKey: key)
+        let enabled = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: agent,
+            binding: nil,
+            state: .manualResumeAvailable
+        )
+        #expect(enabled["state"] as? String == "manual_resume_available")
+        #expect(enabled["blocked_reason"] is NSNull)
+    }
+
+    @Test func replacementBindingDoesNotInheritOldSessionLifecycle() {
+        let oldAgent = SessionRestorableAgentSnapshot(
+            kind: .copilot,
+            sessionId: "old-session",
+            workbenchAuthority: .controlledHere
+        )
+        let replacementBinding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume replacement-session",
+            checkpointId: "replacement-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: oldAgent,
+            binding: replacementBinding,
+            state: .completedAgentExit,
+            canTakeOver: WorkbenchSessionAuthority.localTakeoverSnapshot(
+                agent: oldAgent,
+                binding: replacementBinding
+            ) != nil
+        )
+
+        #expect(context["state"] as? String == "waiting_for_supervisor")
+        #expect(context["workbench_authority"] as? String == "controlledExternally")
+        #expect(context["session_id"] as? String == "replacement-session")
+        #expect(context["blocked_reason"] as? String == "externally_controlled")
+        #expect(context["can_take_over"] as? Bool == true)
+    }
+
+    @Test func snapshotlessCompletedStateDoesNotMarkBindingEnded() {
+        let binding = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "copilot --resume replacement-session",
+            checkpointId: "replacement-session",
+            source: "agent-hook",
+            workbenchAuthority: .controlledExternally
+        )
+
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: binding,
+            state: .completedAgentExit,
+            canTakeOver: true
+        )
+
+        #expect(context["state"] as? String == "waiting_for_supervisor")
+        #expect(context["session_id"] as? String == "replacement-session")
+        #expect(context["can_take_over"] as? Bool == true)
+    }
+
+    @Test func resumeContextLeavesOrdinaryTerminalsUnmanaged() {
+        let context = WorkbenchLocalActionRouter.resumeContextForTesting(
+            agent: nil,
+            binding: nil,
+            state: nil
+        )
+
+        #expect(context["state"] as? String == "none")
+        #expect(context["binding_present"] as? Bool == false)
+        #expect(context["can_take_over"] as? Bool == false)
+        #expect(context["workbench_authority"] is NSNull)
+    }
+
+    @Test func boundedChangesStayContiguousAndExposeTheNextCursor() {
+        let events = (1...250).map { sequence in
+            [
+                "seq": Int64(sequence),
+                "name": "surface.updated",
+                "category": "surface",
+            ] as [String: Any]
+        }
+        let page = WorkbenchLocalActionRouter.changesForTesting(
+            events: events,
+            latestSequence: 250,
+            afterSequence: 0,
+            limit: 200
+        )
+        let returned = page["events"] as? [[String: Any]]
+
+        #expect(returned?.count == 200)
+        #expect(returned?.first?["seq"] as? Int64 == 1)
+        #expect(returned?.last?["seq"] as? Int64 == 200)
+        #expect(page["returned_through_sequence"] as? Int64 == 200)
+        #expect(page["latest_sequence"] as? Int64 == 250)
+        #expect(page["has_more"] as? Bool == true)
+        #expect(page["gap"] as? Bool == false)
+    }
+
+    @Test func appLifecycleEventsAreIncludedInWorkbenchChanges() {
+        let page = WorkbenchLocalActionRouter.changesForTesting(
+            events: [
+                [
+                    "seq": Int64(1),
+                    "name": "app.restore.started",
+                    "category": "app",
+                ],
+                [
+                    "seq": Int64(2),
+                    "name": "feed.updated",
+                    "category": "feed",
+                ],
+                [
+                    "seq": Int64(3),
+                    "name": "app.restore.completed",
+                    "category": "app",
+                ],
+            ],
+            latestSequence: 3,
+            afterSequence: 0,
+            limit: 200
+        )
+        let events = page["events"] as? [[String: Any]]
+
+        #expect(events?.count == 2)
+        #expect(events?.first?["name"] as? String == "app.restore.started")
+        #expect(events?.last?["name"] as? String == "app.restore.completed")
+        #expect(page["returned_through_sequence"] as? Int64 == 3)
+    }
+
+    @Test func appContinuityDistinguishesCleanAndUncleanRestarts() throws {
+        let defaults = try makeDefaults()
+        defer { clear(defaults) }
+        let firstLaunch = UUID()
+        let secondLaunch = UUID()
+        let thirdLaunch = UUID()
+
+        let first = WorkbenchAppContinuity.beginLaunch(
+            launchID: firstLaunch,
+            startedAt: Date(timeIntervalSince1970: 100),
+            defaults: defaults
+        )
+        #expect(first.launchID == firstLaunch)
+        #expect(first.previousExitWasClean)
+
+        let second = WorkbenchAppContinuity.beginLaunch(
+            launchID: secondLaunch,
+            startedAt: Date(timeIntervalSince1970: 200),
+            defaults: defaults
+        )
+        #expect(second.launchID == secondLaunch)
+        #expect(!second.previousExitWasClean)
+
+        WorkbenchAppContinuity.markCleanExit(defaults: defaults)
+        let third = WorkbenchAppContinuity.beginLaunch(
+            launchID: thirdLaunch,
+            startedAt: Date(timeIntervalSince1970: 300),
+            defaults: defaults
+        )
+        #expect(third.launchID == thirdLaunch)
+        #expect(third.previousExitWasClean)
+        #expect(WorkbenchAppContinuity.snapshot(defaults: defaults) == third)
+    }
+
     @Test func actionPlaneFailsClosedOutsideWorkbenchAndOnCorruptReceipts() throws {
         let defaults = try makeDefaults()
         defer { clear(defaults) }
@@ -2222,34 +2552,79 @@ struct WorkbenchLocalActionTests {
             ) == nil
         )
 
-        let hubResumeSnapshot = SessionRestorableAgentSnapshot(
+        let bindingOnlySessionId = "binding-only-managed-session"
+        target.restoredAgentSnapshotsByPanelId.removeValue(forKey: surfaceId)
+        target.restoredAgentResumeStatesByPanelId[surfaceId] =
+            .observedAgentCommandRunning
+        target.surfaceResumeBindingsByPanelId[surfaceId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "tmux",
+                command: "tmux attach-session -t workbench",
+                checkpointId: "workbench",
+                source: "process-detected",
+                autoResume: true
+            )
+        target.managedAgentResumeBindingsByPanelId[surfaceId] =
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: "copilot --resume \(bindingOnlySessionId)",
+                checkpointId: bindingOnlySessionId,
+                source: "agent-hook",
+                workbenchAuthority: .controlledHere
+            )
+        let bindingOnlyKey = "copilot.\(bindingOnlySessionId)"
+        let currentPID = getpid()
+        let currentIdentity = try #require(AgentPIDProcessIdentity(pid: currentPID))
+        target.agentPIDs[bindingOnlyKey] = currentPID
+        target.agentPIDProcessIdentitiesByKey[bindingOnlyKey] = currentIdentity
+        target.agentPIDPanelIdsByKey[bindingOnlyKey] = surfaceId
+        target.agentPIDKeysByPanelId[surfaceId] = [bindingOnlyKey]
+        #expect(
+            target.managedAgentResumeBinding(panelId: surfaceId)?.checkpointId ==
+                bindingOnlySessionId
+        )
+        #expect(
+            !target.confirmedRuntimeAgentProcessIdentities(
+                kind: .copilot,
+                sessionId: bindingOnlySessionId,
+                panelId: surfaceId,
+                currentProcessIdentity: {
+                    guard let pid = pid_t(exactly: $0) else { return nil }
+                    return Workspace.agentPIDProcessIdentity(pid: pid)
+                }
+            ).isEmpty
+        )
+        target.clearAgentRuntimeState(panelId: surfaceId)
+
+        let externalResumeSnapshot = SessionRestorableAgentSnapshot(
             kind: .copilot,
             sessionId: completedSessionId,
             workingDirectory: "/tmp",
             launchCommand: nil,
             workbenchAuthority: nil
         )
-        target.restoredAgentSnapshotsByPanelId[surfaceId] = hubResumeSnapshot
-        target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
-        target.surfaceResumeBindingsByPanelId[surfaceId] = SurfaceResumeBindingSnapshot(
+        #expect(target.setSurfaceResumeBinding(SurfaceResumeBindingSnapshot(
             name: "Copilot",
             kind: "copilot",
-            command: "agency copilot --hub",
+            command: "external-wrapper agent --resume \(completedSessionId)",
             cwd: "/tmp",
             checkpointId: completedSessionId,
             source: "agent-hook",
             launchCommand: AgentLaunchCommandSnapshot(
-                launcher: "agency",
-                executablePath: "/usr/local/bin/agency",
-                arguments: ["agency", "copilot", "--hub"],
+                launcher: "external-wrapper",
+                executablePath: "/usr/local/bin/external-wrapper",
+                arguments: ["external-wrapper", "agent"],
                 workingDirectory: "/tmp"
             ),
-            autoResume: false
-        )
+            autoResume: false,
+            workbenchAuthority: .controlledExternally
+        ), panelId: surfaceId))
+        target.restoredAgentSnapshotsByPanelId[surfaceId] = externalResumeSnapshot
+        target.restoredAgentResumeStatesByPanelId[surfaceId] = .manualResumeAvailable
         let targetPanel = try #require(target.panels[surfaceId] as? TerminalPanel)
         #expect(
             targetPanel.enterAgentHibernation(
-                agent: hubResumeSnapshot,
+                agent: externalResumeSnapshot,
                 lastActivityAt: .distantPast
             )
         )
@@ -2258,7 +2633,7 @@ struct WorkbenchLocalActionTests {
                 workspaceId: target.id,
                 surfaceId: surfaceId,
                 sessionId: completedSessionId
-            ) == .controlledInAgencyHub
+            ) == .controlledExternally
         )
 
         let existingRequestId = "review-existing"
@@ -2287,16 +2662,14 @@ struct WorkbenchLocalActionTests {
         )
         #expect(try successPayload(existingResult)["notification_id"] as? String == existing.id.uuidString)
 
-        #expect(errorCode(TerminalController.shared.v2WorkbenchFocus(params: [
-            "request_id": "v2-disabled-focus",
-            "workspace_id": target.id.uuidString,
-            "surface_id": surfaceId.uuidString,
-        ])) == "unsupported")
-        #expect(errorCode(TerminalController.shared.v2WorkbenchFlagForReview(params: [
-            "request_id": "v2-disabled-review",
-            "workspace_id": target.id.uuidString,
-            "summary": "Review.",
-        ])) == "unsupported")
+        let expectedAdmissionError = OuroWorkbenchProduct.isCurrentBundle
+            ? "invalid_params" : "unsupported"
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFocus(
+            params: [:]
+        )) == expectedAdmissionError)
+        #expect(errorCode(TerminalController.shared.v2WorkbenchFlagForReview(
+            params: [:]
+        )) == expectedAdmissionError)
     }
 
     @Test func actionReceiptHistoryTrimsOnlyTerminalRecords() throws {

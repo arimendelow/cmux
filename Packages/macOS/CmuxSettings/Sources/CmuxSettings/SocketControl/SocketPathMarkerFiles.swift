@@ -69,6 +69,14 @@ public enum SocketPathMarkerFiles {
         if bundleId.hasPrefix("\(baseDebugBundleIdentifier).") {
             return .dev(slug: bundleSuffixSlug(bundleId, prefix: "\(baseDebugBundleIdentifier)."))
         }
+        let workbenchDebugBundleIdentifier = "com.ourostack.workbench.v1.debug"
+        if bundleId == workbenchDebugBundleIdentifier || bundleId.hasPrefix(workbenchDebugBundleIdentifier + ".") {
+            let tag = bundleId == workbenchDebugBundleIdentifier
+                ? environment["CMUX_TAG"]
+                : String(bundleId.dropFirst(workbenchDebugBundleIdentifier.count + 1))
+            let slug = tag.flatMap(sanitizeSocketSlug)
+            return .dev(slug: slug.map { "ouro-workbench-\($0)" } ?? "ouro-workbench")
+        }
         return .stable
     }
 

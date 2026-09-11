@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
-import { makeAcpAdapter } from "../adapters/acp";
+import { makeAcpAdapter, userFacingAcpReplayText } from "../adapters/acp";
 import type { AgentEvent, ProviderDef, SessionCtx, SessionStatus } from "../types";
 
 test("ACP loads a persisted provider session and replays its conversation", async () => {
@@ -56,6 +56,23 @@ test("ACP loads a persisted provider session and replays its conversation", asyn
     if (previous === undefined) delete process.env.FAKE_ACP_METHOD_LOG;
     else process.env.FAKE_ACP_METHOD_LOG = previous;
   }
+});
+
+test("Workbench replay hides durable attachment identifiers", () => {
+  expect(userFacingAcpReplayText([
+    "inspect these",
+    "",
+    "[attachments]",
+    "- attachment:cli-local-file:aaa | image | image-8f8647c6.png | image/png | 65 KB",
+    "- attachment:cli-local-file:bbb | image | Screenshot.png | image/png | 12 KB",
+    "- attachment:cli-local-file:ccc | document | brief.pdf | application/pdf | 20 KB",
+  ].join("\n"))).toBe([
+    "inspect these",
+    "",
+    "[Image attachment]",
+    "[Image: Screenshot.png]",
+    "[Attachment: brief.pdf]",
+  ].join("\n"));
 });
 
 test("ACP live reconnect does not append a second copy of the transcript", async () => {

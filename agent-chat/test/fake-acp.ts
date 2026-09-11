@@ -7,6 +7,8 @@ const startupDelayFlag = Bun.argv.findIndex((arg) => arg === "--startup-delay-ms
 const startupDelayMs = startupDelayFlag >= 0 ? Number(Bun.argv[startupDelayFlag + 1] ?? "0") : 0;
 const slowPromptFlag = Bun.argv.findIndex((arg) => arg === "--slow-prompt-ms");
 const slowPromptMs = slowPromptFlag >= 0 ? Number(Bun.argv[slowPromptFlag + 1] ?? "0") : 0;
+const imageCapabilityFlag = Bun.argv.findIndex((arg) => arg === "--image-capability");
+const imageCapability = imageCapabilityFlag >= 0 ? Bun.argv[imageCapabilityFlag + 1] ?? "" : "";
 const failLoad = Bun.argv.includes("--fail-load");
 const requestPermission = Bun.argv.includes("--request-permission");
 const exitAfterPermission = Bun.argv.includes("--exit-after-permission");
@@ -15,6 +17,9 @@ const emitPlan = Bun.argv.includes("--emit-plan");
 const emitUpdateDispositions = Bun.argv.includes("--emit-update-dispositions");
 const log = process.env.FAKE_ACP_MODEL_LOG;
 const methodLog = process.env.FAKE_ACP_METHOD_LOG;
+const promptLog = process.env.FAKE_ACP_PROMPT_LOG;
+const imageSupport = !Bun.argv.includes("--no-image-support")
+  && process.env.FAKE_ACP_IMAGE_SUPPORT !== "0";
 const pidFile = process.env.FAKE_ACP_PID_FILE;
 if (log) await appendFile(log, `${model}\n`);
 if (pidFile) await writeFile(pidFile, `${process.pid}\n`);
@@ -32,7 +37,24 @@ for await (const line of rl) {
   if (methodLog && msg.method) await appendFile(methodLog, `${msg.method}\n`);
   if (msg.method === "initialize") {
     if (startupDelayMs > 0) await Bun.sleep(startupDelayMs);
-    send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        protocolVersion: 1,
+        ...(imageCapability === "omitted"
+          ? {}
+          : {
+              agentCapabilities: {
+                promptCapabilities: {
+                  image: imageCapability
+                    ? imageCapability === "supported"
+                    : imageSupport,
+                },
+              },
+            }),
+      },
+    });
   } else if (msg.method === "session/new") {
     send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params?.sessionId ?? `fake-${model || "default"}` } });
   } else if (msg.method === "session/load") {
@@ -66,6 +88,7 @@ for await (const line of rl) {
     });
     send({ jsonrpc: "2.0", id: msg.id, result: {} });
   } else if (msg.method === "session/prompt") {
+    if (promptLog) await appendFile(promptLog, `${JSON.stringify(msg.params)}\n`);
     if (emitUpdateDispositions) {
       for (const update of [
         { sessionUpdate: "session_info_update", title: "sensitive title" },

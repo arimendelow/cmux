@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writePersistedSession } from "../session-persistence";
-import { pickInitialBossSession, type WorkbenchExperience } from "../src/session";
+import { applyCanonicalBoss, type BossState, type WorkbenchExperience } from "../src/session";
 
 async function waitForPort(stateFile: string): Promise<number> {
   const deadline = Date.now() + 5_000;
@@ -88,8 +88,9 @@ test("Workbench root resumes the persisted Boss with a verified recovery event",
     const hello = await waitForMessage(messages, (message) => message.kind === "hello");
     const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
     expect(hello.providers.map((provider: any) => provider.id)).toEqual(["ouro-boss"]);
-    const recovered = pickInitialBossSession(
+    const recovered = applyCanonicalBoss(
       listed.sessions,
+      hello.boss as BossState,
       hello.experience as WorkbenchExperience,
     );
     expect(recovered?.id).toBe("boss-restored");
@@ -172,9 +173,11 @@ test("Workbench refuses a stale Boss provider session without replacing it", asy
     });
     await waitForMessage(messages, (message) => message.kind === "hello");
     const listed = await waitForMessage(messages, (message) => message.kind === "sessions");
-    const recovered = pickInitialBossSession(
+    const helloMessage = messages.find((message) => message.kind === "hello");
+    const recovered = applyCanonicalBoss(
       listed.sessions,
-      messages.find((message) => message.kind === "hello").experience as WorkbenchExperience,
+      helloMessage.boss as BossState,
+      helloMessage.experience as WorkbenchExperience,
     );
     socket.send(JSON.stringify({ op: "subscribe", sessionId: recovered!.id }));
     const failure = await waitForMessage(
@@ -194,13 +197,14 @@ test("Workbench refuses a stale Boss provider session without replacing it", asy
   }
 }, 10_000);
 
-test("Workbench can cancel Boss startup before the session id reaches the browser", async () => {
+for (const workbench of [true, false]) test(`${workbench ? "Workbench retires unadmitted" : "ordinary ACP can cancel"} startup before the browser receives an id`, async () => {
   const root = await mkdtemp(join(tmpdir(), "workbench-boss-cancel-"));
   const sessions = join(root, "sessions");
   const stateFile = join(root, "server.json");
   const bin = join(root, "bin");
   await mkdir(bin);
   await writeFakeOuro(bin, "--startup-delay-ms 1000");
+  if (!workbench) await copyFile(join(bin, "ouro"), join(bin, "copilot"));
   const process = Bun.spawn(["bun", "server.ts"], {
     cwd: join(import.meta.dir, ".."),
     stdout: "pipe",
@@ -214,7 +218,7 @@ test("Workbench can cancel Boss startup before the session id reaches the browse
       CMUX_AGENT_CHAT_STATE_FILE: stateFile,
       CMUX_AGENT_CHAT_SESSION_DIR: sessions,
       CMUX_AGENT_CHAT_TOKEN: "cancel-token",
-      CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+      CMUX_AGENT_CHAT_PRODUCT: workbench ? "ouro-workbench-v1" : "",
       CMUX_AGENT_CHAT_BOSS_AGENT: "slugger",
       CMUX_AGENT_CHAT_CONTEXT_LABEL: "Desk / cancel-fixture",
       CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
@@ -237,11 +241,36 @@ test("Workbench can cancel Boss startup before the session id reaches the browse
     socket.send(JSON.stringify({
       op: "start",
       requestId: "cancel-before-created",
-      provider: "ouro-boss",
+      provider: workbench ? "ouro-boss" : "copilot",
       cwd: root,
       prompt: "cancel this startup",
     }));
     socket.send(JSON.stringify({ op: "cancel-start", requestId: "cancel-before-created" }));
+    if (workbench) {
+      const retired = await waitForMessage(
+        messages,
+        (message) => message.requestId === "cancel-before-created"
+          && ["start-retired", "session-created"].includes(message.kind),
+      );
+      expect(retired.kind).toBe("start-retired");
+      expect(retired.sessionId).toBeUndefined();
+      expect(await (await fetch(`http://127.0.0.1:${port}/cancel-token/api/sessions`)).json()).toEqual([]);
+      expect(await Bun.file(join(root, "canonical-boss.json")).exists()).toBe(false);
+      expect(messages.some((message) => message.kind === "event" && message.evt?.kind === "error")).toBe(false);
+      socket.send(JSON.stringify({
+        op: "start", requestId: "retry-after-cancel", provider: "ouro-boss", cwd: root, prompt: "later prompt",
+      }));
+      const created = await waitForMessage(
+        messages,
+        (message) => message.kind === "session-created" && message.requestId === "retry-after-cancel",
+      );
+      const history = await waitForMessage(
+        messages,
+        (message) => message.kind === "history" && message.sessionId === created.session.id,
+      );
+      expect(history.events.some((event: any) => event.kind === "user" && event.text === "later prompt")).toBe(true);
+      return;
+    }
     const created = await waitForMessage(
       messages,
       (message) => message.kind === "session-created" && message.requestId === "cancel-before-created",

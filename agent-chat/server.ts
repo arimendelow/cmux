@@ -7,20 +7,36 @@ import type {
   OptionValue,
   ProviderCapabilities,
   ProviderDef,
+  PromptAttachment,
   SessionCtx,
   SessionOption,
   SessionStatus,
+  WorkbenchRestoreReceipt,
 } from "./types";
 import { claudeAdapter } from "./adapters/claude";
 import { codexAdapter } from "./adapters/codex";
 import { piAdapter } from "./adapters/pi";
-import { makeAcpAdapter } from "./adapters/acp";
+import { imageCapabilityOf, makeAcpAdapter } from "./adapters/acp";
 import {
   deletePersistedSession,
   readPersistedSessions,
   writePersistedSession,
   type PersistedAgentChatSession,
 } from "./session-persistence";
+import {
+  listBossCandidates,
+  listBossCandidatesInPartition,
+  readCanonicalBossPointer,
+  removeCanonicalBossPointer,
+  repointCanonicalBoss,
+  resolveCanonicalBoss,
+  writeCanonicalBossPointer,
+  type BossCandidate,
+  type BossSkippedRecord,
+  type CanonicalBossPointer,
+  type CanonicalBossState,
+} from "./canonical-boss";
+import { callWorkbenchNative, watchWorkbenchRestore, workbenchRestoreFacts } from "./workbench-mcp";
 import { pickAccentColor, resolveGhosttyTheme, resolveGhosttyThemeAsync, type GhosttyTheme } from "./theme";
 import { agentModelCatalog, type AgentModelProviderCatalog } from "./catalog";
 import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
@@ -41,6 +57,17 @@ if (AUTH_TOKEN.includes("/")) throw new Error("CMUX_AGENT_CHAT_TOKEN must be a s
 const AUTH_PREFIX = AUTH_TOKEN ? `/${encodeURIComponent(AUTH_TOKEN)}` : "";
 const STATE_FILE = process.env.CMUX_AGENT_CHAT_STATE_FILE ?? "";
 const SESSION_DIR = process.env.CMUX_AGENT_CHAT_SESSION_DIR ?? "";
+// Session records stay partitioned per Boss agent, but the canonical pointer is
+// app-global: it lives one level above the agent partition so resolution never
+// depends on which agent happens to be configured right now.
+const BOSS_AGENT = (process.env.CMUX_AGENT_CHAT_BOSS_AGENT ?? "").trim();
+// A partitioned store keeps the pointer one level above the agent directory; a
+// legacy flat store keeps it beside its records. Either way one pointer file
+// resolves Boss for the whole app.
+const SESSION_DIR_IS_PARTITIONED = Boolean(SESSION_DIR) && Boolean(BOSS_AGENT)
+  && pathBasename(SESSION_DIR) === BOSS_AGENT;
+const BOSS_POINTER_DIR = (process.env.CMUX_AGENT_CHAT_BOSS_POINTER_DIR ?? "").trim()
+  || (SESSION_DIR ? (SESSION_DIR_IS_PARTITIONED ? dirname(SESSION_DIR) : SESSION_DIR) : "");
 const PRODUCT_ID = process.env.CMUX_AGENT_CHAT_PRODUCT ?? "";
 const ALLOWED_ROOT_PATHS = resolveAllowedRoots(process.env.CMUX_AGENT_CHAT_ALLOWED_ROOTS ?? "");
 
@@ -143,15 +170,28 @@ const GEMINI_MODELS = [
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
 ];
 
+export type ExternalAuthorityStatus =
+  | "connected"
+  | "disconnected"
+  | "stopped"
+  | "unavailable"
+  | "unknown";
+
+/** Host-supplied presentation only: an optional installed integration or legacy environment config supplies the label, URL, and status. None of these values proves session ownership. */
+export interface ExternalAuthority {
+  label: string;
+  openUrl?: string;
+  openLabel?: string;
+  status: ExternalAuthorityStatus;
+}
+
 export interface WorkbenchExperience {
   productName: string;
   surfaceName: string;
   contextLabel?: string;
   defaultProvider: string;
   localAuthorityLabel: string;
-  hubAuthorityLabel: string;
-  hubUrl: string;
-  hubStatus: "connected" | "disconnected" | "stopped" | "unavailable" | "unknown";
+  externalAuthority: ExternalAuthority;
 }
 
 interface WorkbenchBossProviderOptions {
@@ -161,10 +201,78 @@ interface WorkbenchBossProviderOptions {
   workbenchMcp?: string;
 }
 
+const DEFAULT_EXTERNAL_AUTHORITY_LABEL = "Controlled elsewhere";
+
+function externalAuthorityOpenUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim() ?? "";
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function externalAuthority(config: {
+  label?: string;
+  url?: string;
+  openLabel?: string;
+  status?: ExternalAuthorityStatus;
+} = {}): ExternalAuthority {
+  const openUrl = externalAuthorityOpenUrl(config.url);
+  const openLabel = config.openLabel?.trim() ?? "";
+  return {
+    label: config.label?.trim() || DEFAULT_EXTERNAL_AUTHORITY_LABEL,
+    ...(openUrl ? { openUrl } : {}),
+    ...(openUrl && openLabel ? { openLabel } : {}),
+    status: config.status ?? "unknown",
+  };
+}
+
+/**
+ * App continuity published by the host. Agent Chat is a consumer only: it
+ * forwards these values unchanged so the Boss surface can preserve a restart
+ * visibly. The world model owns launch identity, restore progress, and
+ * topology; nothing here restates them.
+ */
+export interface AppContinuity {
+  appInstanceId: string;
+  startedAt: string;
+  previousExitClean: boolean;
+}
+
+export function appContinuityFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): AppContinuity | null {
+  const appInstanceId = env.CMUX_WORKBENCH_APP_INSTANCE_ID?.trim() ?? "";
+  if (!appInstanceId) return null;
+  const startedAt = env.CMUX_WORKBENCH_APP_STARTED_AT?.trim() ?? "";
+  const previousExitClean = env.CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN?.trim();
+  return {
+    appInstanceId,
+    startedAt,
+    // Absent or unparsable continuity fails toward "unclean" only when the host
+    // said so explicitly; anything else is treated as clean.
+    previousExitClean: previousExitClean !== "0" && previousExitClean?.toLowerCase() !== "false",
+  };
+}
+
+const APP_CONTINUITY = appContinuityFromEnv();
+
+export function externalAuthorityForTest(config: {
+  label?: string;
+  url?: string;
+  openLabel?: string;
+  status?: ExternalAuthorityStatus;
+}): ExternalAuthority {
+  return externalAuthority(config);
+}
+
 function workbenchExperience(
   productId: string,
   contextLabel: string,
-  hubStatus: WorkbenchExperience["hubStatus"] = "unknown",
+  authority: ExternalAuthority = externalAuthority(),
 ): WorkbenchExperience | undefined {
   if (productId !== "ouro-workbench-v1") return undefined;
   return {
@@ -173,9 +281,7 @@ function workbenchExperience(
     ...(contextLabel ? { contextLabel } : {}),
     defaultProvider: "ouro-boss",
     localAuthorityLabel: "Controlled here",
-    hubAuthorityLabel: "Controlled in Agency Hub",
-    hubUrl: "https://aka.ms/agency/hub",
-    hubStatus,
+    externalAuthority: authority,
   };
 }
 
@@ -183,55 +289,68 @@ export function workbenchExperienceForTest(productId: string, contextLabel = "")
   return workbenchExperience(productId, contextLabel);
 }
 
-export function agencyHubStatusFromOutputForTest(
+export function externalAuthorityStatusFromOutputForTest(
   output: string,
   exitCode: number,
-): WorkbenchExperience["hubStatus"] {
+  json = false,
+): ExternalAuthorityStatus {
   if (exitCode !== 0) return "unavailable";
-  if (/Connection:\s+connected\b/i.test(output)) return "connected";
-  if (/Connection:\s+\S+/i.test(output)) return "disconnected";
-  if (/\bhub daemon\b.*\b(?:stopped|not running)\b/i.test(output)) return "stopped";
+  if (json) {
+    try {
+      const value = JSON.parse(output);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || (value.schemaVersion !== undefined && value.schemaVersion !== 1)
+        || (value.label !== undefined && typeof value.label !== "string")
+        || (value.detail !== undefined && typeof value.detail !== "string")
+        || (value.checkedAt !== undefined
+          && (typeof value.checkedAt !== "string" || !Number.isFinite(Date.parse(value.checkedAt))))) {
+        return "unavailable";
+      }
+      if (value.state === "active") return "connected";
+      if (value.state === "inactive") return "disconnected";
+      if (value.state === "unknown") return "unknown";
+    } catch {}
+    return "unavailable";
+  }
+  const match = /^\s*status:\s*(\S+)\s*$/im.exec(output);
+  const value = match?.[1]?.toLowerCase();
+  if (value === "connected" || value === "disconnected" || value === "stopped") return value;
   return "unknown";
 }
 
-async function agencyHubStatus(
-  command: string[] = ["agency", "hub", "status"],
-  timeoutMs = 3_000,
-  killGraceMs = 250,
-): Promise<WorkbenchExperience["hubStatus"]> {
+/**
+ * Run the host-supplied status helper under a hard timeout. The helper owns the
+ * semantics; Workbench only enforces the bounded contract and fails closed.
+ */
+async function externalAuthorityStatus(
+  command: string[],
+  {
+    timeoutMs = 3_000,
+    killGraceMs = 250,
+    maxOutputBytes = 8_192,
+    json = false,
+  }: { timeoutMs?: number; killGraceMs?: number; maxOutputBytes?: number; json?: boolean } = {},
+): Promise<ExternalAuthorityStatus> {
+  if (!command.length) return "unknown";
   try {
     const child = Bun.spawn(command, {
       stdout: "pipe",
       stderr: "ignore",
       detached: true,
     });
-    const reader = child.stdout.getReader();
-    const output = (async () => {
-      const decoder = new TextDecoder();
-      let text = "";
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) return text + decoder.decode();
-        text += decoder.decode(chunk.value, { stream: true });
-      }
-    })();
-    const completed = Promise.all([output, child.exited])
-      .then(([text, exitCode]) => ({ text, exitCode }))
-      .catch(() => null);
+    const completed = (async () => {
+      const output = await readStreamCapped(child.stdout, maxOutputBytes, json);
+      if (output.truncated) return null;
+      return { text: output.text, exitCode: await child.exited };
+    })().catch(() => null);
     const result = await Promise.race([
       completed,
       Bun.sleep(timeoutMs).then(() => undefined),
     ]);
     if (result !== undefined && result !== null) {
-      return agencyHubStatusFromOutputForTest(result.text, result.exitCode);
+      return externalAuthorityStatusFromOutputForTest(result.text, result.exitCode, json);
     }
-    await Promise.race([reader.cancel().catch(() => {}), Bun.sleep(killGraceMs)]);
-    try {
-      globalThis.process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill();
-    }
-    await Bun.sleep(killGraceMs);
+    // The deadline and output cap stop the whole helper group, including descendants holding stdout open.
     try {
       globalThis.process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -244,22 +363,102 @@ async function agencyHubStatus(
   }
 }
 
-export function agencyHubStatusForTest(
+export function externalAuthorityStatusForTest(
   command: string[],
   timeoutMs: number,
   killGraceMs: number,
-): Promise<WorkbenchExperience["hubStatus"]> {
-  return agencyHubStatus(command, timeoutMs, killGraceMs);
+): Promise<ExternalAuthorityStatus> {
+  return externalAuthorityStatus(command, { timeoutMs, killGraceMs });
 }
+
+function externalAuthorityStatusCommand(raw: string | undefined): string[] {
+  const value = raw?.trim() ?? "";
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string" && entry)) return parsed;
+  } catch {}
+  return value.split(/\s+/).filter(Boolean);
+}
+
+async function installedExternalAuthority(root: string): Promise<ExternalAuthority | undefined> {
+  if (!root) return undefined;
+  try {
+    if (!isAbsolute(root)) throw new Error("invalid integration root");
+    const path = join(root, "integrations", "external-authority.json");
+    const maxConfigBytes = 65_536;
+    const info = await stat(path);
+    if (!info.isFile() || info.size > maxConfigBytes) throw new Error("invalid integration file");
+    const bytes = await Bun.file(path).slice(0, maxConfigBytes + 1).arrayBuffer();
+    if (bytes.byteLength > maxConfigBytes) throw new Error("oversized integration file");
+    const config = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!config || typeof config !== "object" || Array.isArray(config)
+      || Object.keys(config).some((key) => ![
+        "schemaVersion", "owner", "pluginVersion", "displayLabel", "openUrl", "statusCommand",
+      ].includes(key))
+      || config.schemaVersion !== 1
+      || typeof config.owner !== "string" || !config.owner.trim()
+      || (config.pluginVersion !== undefined
+        && (typeof config.pluginVersion !== "string" || !config.pluginVersion.trim()))
+      || typeof config.displayLabel !== "string" || !config.displayLabel.trim()
+      || config.displayLabel.length > 64 || /[\u0000-\u001f\u007f]/.test(config.displayLabel)
+      || typeof config.openUrl !== "string" || !config.openUrl.startsWith("https://")
+      || /[\u0000-\u0020\u007f]/.test(config.openUrl)) {
+      throw new Error("invalid integration config");
+    }
+    const url = new URL(config.openUrl);
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+      throw new Error("invalid integration URL");
+    }
+    const command = config.statusCommand;
+    if (!command || typeof command !== "object" || Array.isArray(command)
+      || Object.keys(command).some((key) => !["argv", "timeoutMs", "maxOutputBytes"].includes(key))
+      || !Array.isArray(command.argv) || !command.argv.length
+      || !command.argv.every((entry: unknown) => typeof entry === "string"
+        && isAbsolute(entry) && !entry.includes("\0"))
+      || !Number.isInteger(command.timeoutMs) || command.timeoutMs < 100 || command.timeoutMs > 5_000
+      || (command.maxOutputBytes !== undefined
+        && (!Number.isInteger(command.maxOutputBytes) || command.maxOutputBytes < 256 || command.maxOutputBytes > 8_192))) {
+      throw new Error("invalid integration command");
+    }
+    // The app-wide header has no attested worker target; never substitute Boss identity or infer authority.
+    const status = await externalAuthorityStatus(
+      [...command.argv, "--session-id", "", "--authority", "unknown"],
+      { timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes, json: true },
+    );
+    if (status === "unavailable") {
+      console.warn("[external-authority] Status helper unavailable; using neutral presentation");
+      return externalAuthority({ status });
+    }
+    return externalAuthority({ label: config.displayLabel, url: config.openUrl, status });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    console.warn("[external-authority] Invalid or unreadable integration config; using neutral presentation");
+    return externalAuthority({ status: "unavailable" });
+  }
+}
+
+const CONFIGURED_EXTERNAL_AUTHORITY = {
+  label: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_LABEL,
+  url: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_URL,
+  openLabel: process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_OPEN_LABEL,
+};
 
 let WORKBENCH_EXPERIENCE = workbenchExperience(
   PRODUCT_ID,
   process.env.CMUX_AGENT_CHAT_CONTEXT_LABEL?.trim() ?? "",
+  externalAuthority(CONFIGURED_EXTERNAL_AUTHORITY),
 );
 if (import.meta.main && WORKBENCH_EXPERIENCE) {
   WORKBENCH_EXPERIENCE = {
     ...WORKBENCH_EXPERIENCE,
-    hubStatus: await agencyHubStatus(),
+    externalAuthority: await installedExternalAuthority(process.env.CMUX_AGENT_CHAT_APP_SUPPORT_ROOT?.trim() ?? "")
+      ?? externalAuthority({
+        ...CONFIGURED_EXTERNAL_AUTHORITY,
+        status: await externalAuthorityStatus(
+          externalAuthorityStatusCommand(process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_STATUS_COMMAND),
+        ),
+      }),
   };
 }
 
@@ -279,14 +478,6 @@ function geminiCatalogModels(): { value: string; label: string; description?: st
 function geminiDefaultModel(): string | undefined {
   return agentModelCatalog.provider("gemini")?.defaultModel ?? (agentModelCatalog.hasPayload ? undefined : "gemini-3.1-pro-preview");
 }
-
-const AGENCY_COPILOT_BASE_COMMAND = [
-  "agency",
-  "copilot",
-  "--no-config-plugins",
-  "--no-default-mcps",
-  "--no-aec",
-];
 
 function ouroBossProvider(options: WorkbenchBossProviderOptions = {}): ProviderDef {
   const bossAgent = options.bossAgent?.trim() ?? "";
@@ -315,29 +506,10 @@ function ouroBossProvider(options: WorkbenchBossProviderOptions = {}): ProviderD
 
 const ALL_PROVIDERS: ProviderDef[] = [
   {
-    id: "agency-worker",
-    label: "Agency worker",
-    description: "Desk-aware Workbench boss",
-    role: "boss",
-    adapter: "acp",
-    cmd: [
-      ...AGENCY_COPILOT_BASE_COMMAND,
-      "--plugin",
-      "github:shared-internal-tools/ms-desk:plugins/ms-desk",
-      "-a",
-      "ms-desk:worker",
-      "--acp",
-      "--stdio",
-    ],
-    defaultAutoApprove: false,
-    probeCatalogs: false,
-    startupTimeoutMs: 90_000,
-  },
-  {
     id: "copilot",
     label: "GitHub Copilot",
     adapter: "acp",
-    cmd: [...AGENCY_COPILOT_BASE_COMMAND, "--acp", "--stdio"],
+    cmd: ["copilot", "--acp", "--stdio"],
     defaultAutoApprove: false,
     probeCatalogs: false,
     startupTimeoutMs: 90_000,
@@ -400,11 +572,22 @@ interface WsData {
 }
 
 const sessions = new Map<string, Session>();
+let preparedBoss: Session | null = null;
 const allSockets = new Set<Bun.ServerWebSocket<WsData>>();
 let fileTheme = resolveGhosttyTheme();
 let cmuxThemeOverride: GhosttyTheme | null = null;
 let currentTheme = fileTheme;
-const startRequests = new Map<string, { createdAt: number; promise: Promise<Session> }>();
+interface StartRequest {
+  createdAt: number;
+  promise: Promise<Session>;
+  cancelled: boolean;
+  session?: Session;
+  settledAt?: number;
+  retired?: boolean;
+  retirement?: Promise<string | void>;
+  retirementCompletedAt?: number;
+}
+const startRequests = new Map<string, StartRequest>();
 type AttributionMode = "new-turn" | "current-turn";
 type InternalDoneEvent = Extract<AgentEvent, { kind: "done" }> & { generation?: number };
 const optionCatalog = new Map<string, {
@@ -443,8 +626,129 @@ function pruneCwdCatalog(map: Map<string, { fetchedAt: number; refreshing?: Prom
 function pruneStartRequests() {
   const now = Date.now();
   for (const [key, entry] of startRequests) {
-    if (now - entry.createdAt > START_REQUEST_TTL_MS) startRequests.delete(key);
+    if (startRequestShouldPruneForTest(entry, now)) startRequests.delete(key);
   }
+}
+
+function retireStartSession(entry: StartRequest): Promise<string | void> {
+  if (entry.retirement) return entry.retirement;
+  entry.cancelled = true;
+  entry.retired = !entry.session || !hasBossRelationship(entry.session);
+  const retirement = (async () => {
+    let sess = entry.session;
+    if (!sess) {
+      try {
+        sess = await entry.promise;
+      } catch (error) {
+        sess = entry.session;
+        if (!sess) {
+          entry.retirementCompletedAt = Date.now();
+          return;
+        }
+      }
+    }
+    const retained = await retireSession(sess);
+    if (retained) entry.retired = false;
+    entry.retirementCompletedAt = Date.now();
+    return retained;
+  })();
+  entry.retirement = retirement;
+  void retirement.catch(() => {
+    if (entry.retirement === retirement) entry.retirement = undefined;
+  });
+  return entry.retirement;
+}
+
+function retireSession(sess: Session): Promise<string | void> {
+  const existing = sess.internal.retirementPromise as Promise<string | void> | undefined;
+  if (existing) return existing;
+  let retainBoss = hasBossRelationship(sess);
+  if (!retainBoss) sess.internal.retired = true;
+  const retirement = (async () => {
+    // A replayed startup timeout must not cancel a later user turn.
+    const startupStillRunning = sess.status === "running" && (
+      sess.internal.admissionPending === true
+      || (sess.internal.startRequestGeneration !== undefined
+        && sess.internal.startRequestGeneration === sess.internal.turnGeneration)
+    );
+    let stopping: Promise<void> | undefined;
+    if (!retainBoss || startupStillRunning) {
+      stopping = Promise.resolve(sess.adapter.stop(sess));
+      await stopping.catch(() => {});
+    }
+    // The first prompt can finish writing while cancellation drains the ACP pipe.
+    retainBoss ||= hasBossRelationship(sess);
+    if (retainBoss) {
+      delete sess.internal.retired;
+      if (sess.internal.admissionPending === true) registerSession(sess);
+    }
+    const pendingPersistence = sess.internal.persistencePromise as Promise<void> | undefined;
+    await pendingPersistence?.catch((error) => {
+      console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
+      if (retainBoss) throw error;
+    });
+    if (retainBoss) {
+      await stopping;
+      return sess.id;
+    }
+    await reconcileRetiredCanonicalBoss(sess);
+    await sess.invalidatePersistedSession?.();
+    sess.adapter.dispose(sess);
+    if (sessions.get(sess.id) === sess) sessions.delete(sess.id);
+    for (const socket of sess.sockets) {
+      if (socket.data.subscribed === sess.id) socket.data.subscribed = null;
+    }
+    sess.sockets.clear();
+    broadcastSessions();
+  })();
+  sess.internal.retirementPromise = retirement;
+  void retirement.catch(() => {
+    if (sess.internal.retirementPromise === retirement) delete sess.internal.retirementPromise;
+  });
+  return retirement;
+}
+
+async function retireStartRequestById(requestId: string): Promise<string | void> {
+  const pending = startRequests.get(requestId);
+  if (pending) {
+    return retireStartSession(pending);
+  }
+  const live = [...sessions.values()].find((session) =>
+    session.internal.startRequestId === requestId
+  );
+  if (live) {
+    return retireSession(live);
+  }
+  if (!SESSION_DIR) return;
+  const persisted = await readPersistedSessions(SESSION_DIR);
+  if (persisted.errors.length > 0) {
+    throw new Error(`cannot verify retired start: ${persisted.errors.join("; ")}`);
+  }
+  for (const record of persisted.records) {
+    if (record.startRequestId === requestId) {
+      if (WORKBENCH_EXPERIENCE && providerDefinitionRole(record.provider) === "boss") {
+        const boss = sessions.get(record.id);
+        if (boss) return retireSession(boss);
+        throw new BossGuardError("the canonical Boss cannot be deleted");
+      }
+      await deletePersistedSession(SESSION_DIR, record.id);
+    }
+  }
+}
+
+export function startRequestShouldPruneForTest(
+  entry: Pick<StartRequest, "settledAt" | "retired" | "retirementCompletedAt">,
+  now: number,
+): boolean {
+  if (entry.retired) {
+    return entry.retirementCompletedAt !== undefined
+      && now - entry.retirementCompletedAt > START_REQUEST_TTL_MS;
+  }
+  return entry.settledAt !== undefined && now - entry.settledAt > START_REQUEST_TTL_MS;
+}
+
+export async function retireStartSessionForTest(entry: StartRequest): Promise<void> {
+  await retireStartSession(entry);
 }
 const keyConfig = await readKeyConfig();
 
@@ -486,6 +790,47 @@ function providerInfo(p: ProviderDef) {
     startupTimeoutMs: p.startupTimeoutMs,
     ...(providerIconInfo.get(p.id) ?? {}),
   };
+}
+
+class BossGuardError extends Error {
+  recoveryError?: WorkbenchRestoreReceipt["error"];
+}
+
+// Reserve before validation or ACP startup; release on failure, temporary retirement, or canonical adoption, never merely because admission is still pending.
+let bossStartReservation: { token: string; sessionId: string | null } | null = null;
+
+function claimBossStartReservation(sessionId: string) {
+  if (bossStartReservation && bossStartReservation.sessionId === null) {
+    bossStartReservation.sessionId = sessionId;
+  }
+}
+
+function releaseBossStartReservation(token?: string) {
+  if (token && bossStartReservation?.token !== token) return;
+  bossStartReservation = null;
+}
+
+/**
+ * Workbench keeps exactly one Boss relationship. A blocked recovery, an
+ * existing canonical session, or an in-flight first start refuses a second Boss
+ * server-side, so no client (browser, CLI, or root route) can create one behind
+ * the UI's back.
+ */
+function assertBossStartAllowed(provider: string): string | null {
+  if (!WORKBENCH_EXPERIENCE || providerDefinitionRole(provider) !== "boss") return null;
+  if (bossClientState.status === "blocked") {
+    throw new BossGuardError(
+      `Boss recovery is blocked (${bossClientState.reason}): ${bossClientState.detail}`,
+    );
+  }
+  if (canonicalBossSessionId() || bossStartReservation) throw new BossGuardError("Boss already exists");
+  const token = crypto.randomUUID();
+  bossStartReservation = { token, sessionId: null };
+  return token;
+}
+
+function providerDefinitionRole(provider: string): ProviderDef["role"] {
+  return PROVIDERS.find((candidate) => candidate.id === provider)?.role;
 }
 
 function providerDefinition(provider: string): ProviderDef {
@@ -593,11 +938,25 @@ function createSession(
   autoApprove: boolean,
   title: string,
   startOptions: Record<string, OptionValue> = {},
-  restored?: { id: string; createdAt: number; providerSessionId: string },
+  restored?: { id: string; createdAt: number; providerSessionId: string; startRequestId?: string },
   headless = false,
+  register = true,
+  startRequestId?: string,
 ): Session {
   const adapter = adapters.get(provider);
   if (!adapter) throw new Error(`unknown provider: ${provider}`);
+  if (!restored && !headless && preparedBoss?.provider === provider) {
+    const sess = preparedBoss;
+    preparedBoss = null;
+    Object.assign(sess, {
+      cwd, autoApprove, title, startOptions,
+      seedOptions: optionCatalog.get(provider)?.options,
+      createdAt: Date.now(),
+    });
+    if (startRequestId) sess.internal.startRequestId = startRequestId;
+    if (register) registerSession(sess);
+    return sess;
+  }
   const id = restored?.id ?? crypto.randomUUID().slice(0, 8);
   const sess: Session = {
     id,
@@ -612,6 +971,10 @@ function createSession(
     internal: {
       ...(PRODUCT_ID ? { productId: PRODUCT_ID } : {}),
       ...(headless ? { observeOnly: true } : {}),
+      ...(!register ? { admissionPending: true } : {}),
+      ...((startRequestId ?? restored?.startRequestId)
+        ? { startRequestId: startRequestId ?? restored?.startRequestId }
+        : {}),
       ...(restored ? {
         acpResumeSessionId: restored.providerSessionId,
         restoredFromDisk: true,
@@ -639,6 +1002,12 @@ function createSession(
       }
       if (sess.status === status) return;
       sess.status = status;
+      const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+      if (status === "idle" && recovery) {
+        recovery.active = false;
+        completeRestoreAssessmentIfIdle(sess);
+        maybeAssessRestore(sess);
+      }
       const payload = JSON.stringify({ kind: "session-status", sessionId: id, status });
       for (const ws of sess.sockets) ws.send(payload);
       if (!sess.headless) broadcastSessions();
@@ -650,12 +1019,60 @@ function createSession(
         await deletePersistedSession(SESSION_DIR, sess.id);
       } catch (error) {
         console.error(`[agent-chat] invalidate persisted session ${sess.id} failed`, error);
+        throw error;
       }
     },
   };
-  sessions.set(id, sess);
-  if (!headless) broadcastSessions();
+  if (register) registerSession(sess);
   return sess;
+}
+
+function registerSession(sess: Session) {
+  sessions.set(sess.id, sess);
+  delete sess.internal.admissionPending;
+  if (typeof sess.internal.persistedProviderSessionId === "string") {
+    queueSessionPersistence(
+      sess,
+      providerDefinitionRole(sess.provider) === "boss"
+        ? () => adoptCanonicalBoss(sess)
+        : undefined,
+    );
+  }
+  if (!sess.headless) broadcastSessions();
+}
+
+function sessionPersistenceEnabled(sess: Pick<Session, "headless" | "internal">): boolean {
+  return !sess.headless
+    && sess.internal.admissionPending !== true
+    && sess.internal.retired !== true;
+}
+
+function queueSessionPersistence(
+  sess: Session,
+  onPersisted?: () => void | Promise<void>,
+): void {
+  if (!sessionPersistenceEnabled(sess)) return;
+  const previous = sess.internal.persistencePromise as Promise<void> | undefined;
+  const next = (previous ?? Promise.resolve()).catch(() => {}).then(async () => {
+    if (sessionPersistenceEnabled(sess)) {
+      await persistSession(sess);
+      await onPersisted?.();
+    }
+  });
+  sess.internal.persistencePromise = next;
+  void next.catch((error) => {
+    console.error(`[agent-chat] persist session ${sess.id} failed`, error);
+  }).finally(() => {
+    if (sess.internal.persistencePromise === next) delete sess.internal.persistencePromise;
+  });
+}
+
+async function admitAndSendPrompt(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[],
+): Promise<void> {
+  await sendPrompt(sess, prompt, attachments);
 }
 
 function emitSessionEvent(sess: Session, evt: AgentEvent) {
@@ -669,17 +1086,25 @@ function emitSessionEvent(sess: Session, evt: AgentEvent) {
 }
 
 function recordSessionEventSideEffects(sess: Session, evt: AgentEvent) {
+  const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+  if (evt.kind === "error" && recovery?.active && !recovery.inputObserved) {
+    updateRestoreReceipt(sess, { assessment: "failed", error: "assessment-failed" });
+  }
   if (evt.kind === "files-changed") recordFileDiffAllowlist(sess, evt.files);
   if (!sess.headless && evt.kind === "meta" && evt.providerSessionId) {
     sess.internal.persistedProviderSessionId = evt.providerSessionId;
-    persistSession(sess).catch((error) => {
-      console.error(`[agent-chat] persist session ${sess.id} failed`, error);
-    });
+    if (!sessionPersistenceEnabled(sess)) return;
+    queueSessionPersistence(
+      sess,
+      providerDefinitionRole(sess.provider) === "boss"
+        ? () => adoptCanonicalBoss(sess)
+        : undefined,
+    );
   }
 }
 
 function persistedSession(sess: Session): PersistedAgentChatSession | null {
-  if (sess.headless) return null;
+  if (!sessionPersistenceEnabled(sess)) return null;
   const providerSessionId = typeof sess.internal.persistedProviderSessionId === "string"
     ? sess.internal.persistedProviderSessionId
     : typeof sess.internal.acpResumeSessionId === "string"
@@ -695,6 +1120,9 @@ function persistedSession(sess: Session): PersistedAgentChatSession | null {
     autoApprove: sess.autoApprove,
     startOptions: sess.startOptions,
     createdAt: sess.createdAt,
+    ...(typeof sess.internal.startRequestId === "string"
+      ? { startRequestId: sess.internal.startRequestId }
+      : {}),
   };
 }
 
@@ -704,7 +1132,354 @@ async function persistSession(sess: Session) {
   if (record) await writePersistedSession(SESSION_DIR, record);
 }
 
+export interface BossClientState {
+  status: "none" | "canonical" | "blocked";
+  agent: string;
+  sessionId?: string;
+  reason?: string;
+  detail?: string;
+  skipped: BossSkippedRecord[];
+}
+
+let canonicalBossPointer: CanonicalBossPointer | null = null;
+let bossClientState: BossClientState = { status: "none", agent: BOSS_AGENT, skipped: [] };
+let canonicalBossMutationTail: Promise<void> = Promise.resolve();
+
+function withCanonicalBossMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const run = canonicalBossMutationTail.catch(() => {}).then(operation);
+  canonicalBossMutationTail = run.then(() => {}, () => {});
+  return run;
+}
+
+function bossClientStateFrom(state: CanonicalBossState): BossClientState {
+  if (state.status === "blocked") {
+    return {
+      status: "blocked",
+      agent: BOSS_AGENT,
+      reason: state.reason,
+      detail: state.detail,
+      skipped: state.skipped,
+    };
+  }
+  if (state.status === "canonical") {
+    return {
+      status: "canonical",
+      agent: state.pointer.agent,
+      sessionId: state.pointer.sessionId,
+      skipped: state.skipped,
+    };
+  }
+  if (state.status === "adopt") {
+    return {
+      status: "canonical",
+      agent: state.pointer.agent,
+      sessionId: state.pointer.sessionId,
+      skipped: state.skipped,
+    };
+  }
+  return { status: "none", agent: BOSS_AGENT, skipped: state.skipped };
+}
+
+export function bossStateForTest(): BossClientState {
+  return bossClientState;
+}
+
+function canonicalBossSessionId(): string | null {
+  return bossClientState.status === "canonical" ? bossClientState.sessionId ?? null : null;
+}
+
+/**
+ * The pointer lands asynchronously, so a session that is still waiting for its
+ * provider session id is not yet "canonical" — but in Workbench it is already
+ * the one Boss relationship. Protect every live Boss-role session from fork and
+ * delete, otherwise a client could destroy or duplicate the transcript in the
+ * window before adoption completes.
+ */
+function isCanonicalBossSession(sess: Session): boolean {
+  if (!WORKBENCH_EXPERIENCE) return false;
+  return canonicalBossSessionId() === sess.id
+    || (!sess.headless && providerDefinitionRole(sess.provider) === "boss");
+}
+
+function hasBossRelationship(sess: Session): boolean {
+  return isCanonicalBossSession(sess) && (
+    sess.internal.admissionPending !== true
+    || Number(sess.internal.turnGeneration ?? 0) > 0
+  );
+}
+
+interface BossRecovery {
+  receipt: WorkbenchRestoreReceipt;
+  inputObserved: boolean;
+  active: boolean;
+  admitted: boolean;
+  nativeStarted: boolean;
+  nativeFinished: boolean;
+  cancellation?: Promise<void>;
+  stopWatching?: () => void;
+}
+
+function bossRecovery(sess: Session): BossRecovery {
+  return (sess.internal.workbenchRecovery ??= {
+    receipt: { kind: "workbench-restore", facts: null, unresolved: [], assessment: "waiting" },
+    inputObserved: false,
+    active: false,
+    admitted: false,
+    nativeStarted: false,
+    nativeFinished: false,
+  }) as BossRecovery;
+}
+
+function updateRestoreReceipt(sess: Session, patch: Partial<WorkbenchRestoreReceipt>) {
+  const recovery = bossRecovery(sess);
+  const receipt = { ...recovery.receipt, ...patch };
+  if (JSON.stringify(receipt) === JSON.stringify(recovery.receipt)) return;
+  recovery.receipt = receipt;
+  sess.emit(receipt);
+}
+
+function completeRestoreAssessmentIfIdle(sess: Session) {
+  const recovery = bossRecovery(sess);
+  if (!recovery.active && recovery.admitted && recovery.receipt.assessment === "running") {
+    updateRestoreReceipt(sess, { assessment: "completed" });
+  }
+}
+
+function maybeAssessRestore(sess: Session) {
+  const recovery = bossRecovery(sess);
+  if (canonicalBossSessionId() !== sess.id || !recovery.nativeFinished
+    || !recovery.receipt.facts || !recovery.receipt.unresolved.length || recovery.inputObserved
+    || recovery.receipt.assessment !== "waiting" || sess.status !== "idle") return;
+  updateRestoreReceipt(sess, { assessment: "pending" });
+  // Warm the existing canonical relationship; this is not a second turn queue.
+  void Promise.resolve(sess.adapter.warmup?.(sess)).then(async () => {
+    if (canonicalBossSessionId() !== sess.id || recovery.inputObserved || recovery.receipt.assessment !== "pending") return;
+    if (sess.status !== "idle") {
+      updateRestoreReceipt(sess, { assessment: "waiting" });
+      return;
+    }
+    recovery.active = true;
+    updateRestoreReceipt(sess, { assessment: "running" });
+    await sendPrompt(
+      sess,
+      "Assess the unresolved native restart recovery items. Do not repeat deterministic restoration or take control of externally owned sessions.",
+      [],
+      () => !recovery.inputObserved && canonicalBossSessionId() === sess.id,
+      true,
+    );
+    recovery.admitted = true;
+    completeRestoreAssessmentIfIdle(sess);
+  }).catch(() => {
+    if (!recovery.inputObserved) updateRestoreReceipt(sess, { assessment: "failed", error: "assessment-failed" });
+  });
+}
+
+function startWorkbenchRestore(sess: Session) {
+  if (!APP_CONTINUITY || canonicalBossSessionId() !== sess.id) return;
+  const recovery = bossRecovery(sess);
+  if (recovery.nativeStarted) return;
+  recovery.nativeStarted = true;
+  let reading = false;
+  let changedDuringRead = false;
+  const failed = () => {
+    recovery.nativeFinished = true;
+    recovery.stopWatching?.();
+    updateRestoreReceipt(sess, { assessment: "failed", error: "native-unavailable" });
+  };
+  const refresh = async () => {
+    if (recovery.nativeFinished) return;
+    if (reading) { changedDuringRead = true; return; }
+    reading = true;
+    try {
+      const result = workbenchRestoreFacts(
+        await callWorkbenchNative("workbench.list", { after_sequence: 0 }),
+        APP_CONTINUITY.appInstanceId,
+      );
+      if (recovery.nativeFinished) return;
+      recovery.nativeFinished = result.ready;
+      updateRestoreReceipt(sess, {
+        facts: result.facts,
+        unresolved: result.unresolved,
+        assessment: result.ready && !result.unresolved.length ? "none" : recovery.inputObserved ? "cancelled" : "waiting",
+      });
+      if (result.ready) recovery.stopWatching?.();
+      else recovery.stopWatching ??= watchWorkbenchRestore(result.revision, () => { void refresh(); }, failed);
+      maybeAssessRestore(sess);
+    } catch { failed(); }
+    finally {
+      reading = false;
+      if (changedDuringRead) {
+        changedDuringRead = false;
+        void refresh();
+      }
+    }
+  };
+  void refresh();
+}
+
+async function preemptWorkbenchRestore(sess: Session): Promise<void> {
+  if (!isCanonicalBossSession(sess)) return;
+  const recovery = bossRecovery(sess);
+  recovery.inputObserved = true;
+  if (recovery.receipt.facts
+    && ["waiting", "pending", "running"].includes(recovery.receipt.assessment)) {
+    updateRestoreReceipt(sess, { assessment: recovery.active ? "cancelling" : "cancelled" });
+  }
+  if (!recovery.active) {
+    if (recovery.receipt.error === "cancel-failed") updateRestoreReceipt(sess, { assessment: "cancelled", error: undefined });
+    return;
+  }
+  // Share cancellation across draft input, Send, and duplicate notifications.
+  recovery.cancellation ??= Promise.resolve().then(() => sess.adapter.stop(sess)).catch(() => {
+    updateRestoreReceipt(sess, { assessment: "failed", error: "cancel-failed" });
+    const error = new BossGuardError("Recovery cancellation did not settle; the user turn was not started.");
+    error.recoveryError = "cancel-failed";
+    throw error;
+  });
+  await recovery.cancellation;
+  recovery.active = false;
+  if (recovery.receipt.assessment === "cancelling") updateRestoreReceipt(sess, { assessment: "cancelled" });
+}
+
+function broadcastBossState() {
+  const payload = JSON.stringify({ kind: "boss-state", boss: bossClientState });
+  for (const ws of allSockets) ws.send(payload);
+}
+
+/**
+ * Record the first canonical Boss relationship. Only ever writes when no
+ * canonical pointer exists; an established pointer is repointed exclusively
+ * through the repair contract.
+ */
+async function adoptCanonicalBoss(sess: Session) {
+  await withCanonicalBossMutation(async () => {
+    if (!WORKBENCH_EXPERIENCE || !BOSS_POINTER_DIR || !BOSS_AGENT) return;
+    if (sess.internal.retired === true) return;
+    if (canonicalBossPointer || bossClientState.status === "blocked") return;
+    const pointer: CanonicalBossPointer = { version: 1, agent: BOSS_AGENT, sessionId: sess.id };
+    await writeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+    if (sess.internal.retired === true) {
+      await removeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+      return;
+    }
+    if (bossStartReservation?.sessionId === sess.id) bossStartReservation = null;
+    canonicalBossPointer = pointer;
+    bossClientState = {
+      status: "canonical",
+      agent: pointer.agent,
+      sessionId: pointer.sessionId,
+      skipped: bossClientState.skipped,
+    };
+    broadcastBossState();
+  });
+}
+
+async function reconcileRetiredCanonicalBoss(sess: Session) {
+  await withCanonicalBossMutation(async () => {
+    if (bossStartReservation?.sessionId === sess.id) {
+      bossStartReservation = null;
+    }
+    const pointer = canonicalBossPointer;
+    if (!pointer || pointer.sessionId !== sess.id) return;
+    await removeCanonicalBossPointer(BOSS_POINTER_DIR, pointer);
+    canonicalBossPointer = null;
+    bossClientState = {
+      status: "none",
+      agent: BOSS_AGENT,
+      skipped: bossClientState.skipped,
+    };
+    broadcastBossState();
+  });
+}
+
+/** Load a persisted Boss record into the live session map, idempotently. */
+async function loadCanonicalBossSession(
+  session: BossCandidate,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  if (sessions.has(session.id)) return { ok: true };
+  try {
+    const cwd = await assertCwd(session.cwd);
+    createSession(
+      session.provider,
+      cwd,
+      session.autoApprove,
+      session.title,
+      session.startOptions,
+      {
+        id: session.id,
+        createdAt: session.createdAt,
+        providerSessionId: session.providerSessionId,
+        startRequestId: session.startRequestId,
+      },
+    );
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `${session.id} cannot load: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+async function restoreWorkbenchBoss() {
+  const pointerResult = await readCanonicalBossPointer(BOSS_POINTER_DIR);
+  if (pointerResult.error) console.error(`[agent-chat] canonical Boss pointer ignored: ${pointerResult.error}`);
+  const candidates = await listBossCandidates(BOSS_POINTER_DIR);
+  // Legacy flat stores carry no agent attribution at all — the directory is the
+  // only signal, and there is none. Their records are read as belonging to the
+  // configured agent so a pre-partition install can still migrate; a host that
+  // renames its Boss agent should partition its store first.
+  if (!SESSION_DIR_IS_PARTITIONED && SESSION_DIR && BOSS_AGENT) {
+    for (const candidate of await listBossCandidatesInPartition(SESSION_DIR, BOSS_AGENT)) {
+      if (!candidates.some((existing) => existing.id === candidate.id && existing.agent === candidate.agent)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+  const state = resolveCanonicalBoss({
+    pointer: pointerResult.pointer,
+    configuredAgent: BOSS_AGENT,
+    routedSessionId: null,
+    candidates,
+  });
+  bossClientState = bossClientStateFrom(state);
+  for (const record of bossClientState.skipped) {
+    console.error(`[agent-chat] Boss record ${record.agent}/${record.id} skipped: ${record.reason}`);
+  }
+  if (state.status === "blocked") {
+    console.error(`[agent-chat] Boss recovery blocked (${state.reason}): ${state.detail}`);
+    canonicalBossPointer = null;
+    return;
+  }
+  if (state.status === "none") {
+    canonicalBossPointer = null;
+    return;
+  }
+  const session = state.status === "canonical"
+    ? state.session
+    : candidates.find((candidate) => candidate.id === state.pointer.sessionId)!;
+  const loaded = await loadCanonicalBossSession(session);
+  if (loaded.ok === false) {
+    bossClientState = {
+      status: "blocked",
+      agent: BOSS_AGENT,
+      reason: "cwd-unavailable",
+      detail: loaded.detail,
+      skipped: bossClientState.skipped,
+    };
+    canonicalBossPointer = null;
+    return;
+  }
+  canonicalBossPointer = state.pointer;
+  if (state.status === "adopt") await writeCanonicalBossPointer(BOSS_POINTER_DIR, state.pointer);
+}
+
 async function restorePersistedSessions() {
+  if (WORKBENCH_EXPERIENCE) {
+    if (!BOSS_POINTER_DIR) return;
+    await restoreWorkbenchBoss();
+    return;
+  }
   if (!SESSION_DIR) return;
   const result = await readPersistedSessions(SESSION_DIR);
   for (const error of result.errors) console.error(`[agent-chat] persisted session ignored: ${error}`);
@@ -721,6 +1496,7 @@ async function restorePersistedSessions() {
           id: record.id,
           createdAt: record.createdAt,
           providerSessionId: record.providerSessionId,
+          startRequestId: record.startRequestId,
         },
       );
     } catch (error) {
@@ -754,6 +1530,10 @@ function capSessionEvents(sess: Session) {
 }
 
 function broadcastSessionEvent(sess: Session, evt: AgentEvent) {
+  if (sess === preparedBoss && evt.kind === "capabilities") {
+    const payload = JSON.stringify({ kind: "boss-capabilities", image: evt.image });
+    for (const ws of allSockets) ws.send(payload);
+  }
   const payload = JSON.stringify({ kind: "event", sessionId: sess.id, evt });
   for (const ws of sess.sockets) ws.send(payload);
 }
@@ -897,37 +1677,165 @@ function disposeHeadlessSession(sess: Session, stop: boolean) {
   Promise.resolve(sess.adapter.stop(sess)).catch(() => {}).finally(dispose);
 }
 
-function sendPrompt(sess: Session, prompt: string) {
+const MAX_PROMPT_ATTACHMENTS = 4;
+const MAX_PROMPT_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_PROMPT_ATTACHMENT_TOTAL_BYTES = MAX_PROMPT_ATTACHMENTS * MAX_PROMPT_ATTACHMENT_BYTES;
+export const MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES =
+  MAX_PROMPT_ATTACHMENTS * Math.ceil(MAX_PROMPT_ATTACHMENT_BYTES / 3) * 4
+  + 1024 * 1024;
+
+function decodePromptAttachmentData(data: string, index: number): { data: string; byteCount: number } {
+  if (
+    !data
+    || data.length % 4 !== 0
+    || /\s/.test(data)
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+  ) {
+    throw new Error(`attachment ${index + 1} data must be valid base64`);
+  }
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  const estimatedBytes = (data.length / 4) * 3 - padding;
+  if (estimatedBytes > MAX_PROMPT_ATTACHMENT_BYTES) {
+    throw new Error(`attachment ${index + 1} data is too large`);
+  }
+  const bytes = Buffer.from(data, "base64");
+  const canonicalData = bytes.toString("base64");
+  if (bytes.length === 0 || canonicalData !== data) {
+    throw new Error(`attachment ${index + 1} data must be canonical base64`);
+  }
+  return { data: canonicalData, byteCount: bytes.length };
+}
+
+function parsePromptAttachments(value: unknown): PromptAttachment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_PROMPT_ATTACHMENTS) {
+    throw new Error(`attachments must contain at most ${MAX_PROMPT_ATTACHMENTS} images`);
+  }
+  let totalBytes = 0;
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error(`attachment ${index + 1} must be an object`);
+    }
+    const attachment = raw as Record<string, unknown>;
+    if (typeof attachment.id !== "string") throw new Error(`attachment ${index + 1} id is invalid`);
+    if (typeof attachment.name !== "string") throw new Error(`attachment ${index + 1} name is invalid`);
+    if (typeof attachment.mimeType !== "string") throw new Error(`attachment ${index + 1} MIME type is unsupported`);
+    if (typeof attachment.data !== "string") throw new Error(`attachment ${index + 1} data must be valid base64`);
+    const id = attachment.id.trim();
+    const name = pathBasename(attachment.name.trim());
+    const mimeType = attachment.mimeType.trim().toLowerCase();
+    const data = attachment.data;
+    if (!id || id.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(id)) {
+      throw new Error(`attachment ${index + 1} id is invalid`);
+    }
+    if (!name || name.length > 255) {
+      throw new Error(`attachment ${index + 1} name is invalid`);
+    }
+    if (!["image/gif", "image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+      throw new Error(`attachment ${index + 1} MIME type is unsupported`);
+    }
+    const decoded = decodePromptAttachmentData(data, index);
+    totalBytes += decoded.byteCount;
+    if (totalBytes > MAX_PROMPT_ATTACHMENT_TOTAL_BYTES) {
+      throw new Error(`attachments exceed ${MAX_PROMPT_ATTACHMENT_TOTAL_BYTES} aggregate bytes`);
+    }
+    return { id, name, mimeType, data: decoded.data, byteCount: decoded.byteCount };
+  });
+}
+
+function promptDisplayText(prompt: string, attachments: PromptAttachment[]): string {
+  const labels = attachments.map((attachment) => `[Image: ${attachment.name}]`);
+  return [prompt, ...labels].filter(Boolean).join("\n");
+}
+
+function promptAttachmentsSupported(adapter: Adapter, attachments: PromptAttachment[]): boolean {
+  return attachments.length === 0 || adapter.capabilities?.imageAttachments === true;
+}
+
+async function sendPrompt(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[] = [],
+  canAdmit?: () => boolean,
+  recoveryAssessment = false,
+): Promise<void> {
+  if (!recoveryAssessment && isCanonicalBossSession(sess)) await preemptWorkbenchRestore(sess);
+  if (!promptAttachmentsSupported(sess.adapter, attachments)) {
+    return Promise.reject(new Error(`${providerDisplayLabel(sess.provider)} does not support image prompts`));
+  }
   delete sess.internal.userStopped;
+  const displayText = promptDisplayText(prompt, attachments);
+  const recovery = sess.internal.workbenchRecovery as BossRecovery | undefined;
+  if (recovery?.receipt.facts) {
+    const topology = recovery.receipt.facts.topology as Record<string, unknown>;
+    // Keep the complete native receipt available, but do not repeat the entire world on every turn.
+    const context = {
+      app_instance_id: topology.app_instance_id,
+      previous_exit_clean: topology.previous_exit_clean,
+      restore_state: topology.restore_state,
+      revision: topology.revision,
+      unresolved: recovery.receipt.unresolved,
+    };
+    prompt = `${prompt}\n\n<workbench_restore_facts>\n${JSON.stringify(context)}\n</workbench_restore_facts>`;
+  }
   const activeGeneration = activeAttributionGeneration(sess);
   if (adapterAttributionMode(sess) === "current-turn" && activeGeneration) {
-    sess.emit({ kind: "user", text: prompt });
-    Promise.resolve((sess.adapter.send as any)(sess, prompt, activeGeneration)).catch((err) => {
+    const onAdmitted = () => { if (!recoveryAssessment) sess.emit({ kind: "user", text: displayText }); };
+    if (sess.adapter.sendWithAdmission) {
+      return sess.adapter.sendWithAdmission(
+        sess,
+        prompt,
+        activeGeneration,
+        attachments,
+        onAdmitted,
+        canAdmit,
+      );
+    }
+    if (canAdmit && !canAdmit()) return Promise.reject(new Error("agent startup cancelled"));
+    onAdmitted();
+    Promise.resolve(sess.adapter.send(sess, prompt, activeGeneration, attachments)).catch((err) => {
       console.error("[agent-chat] send failed", err);
       sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
       sess.emit({ kind: "done", generation: activeGeneration } as any);
       sess.setStatus("idle");
     });
-    return;
+    return Promise.resolve();
   }
   const generation = Number(sess.internal.turnGeneration ?? 0) + 1;
-  sess.internal.turnGeneration = generation;
-  beginAttributionTurn(sess, generation);
-  const baselines = turnBaselines(sess);
-  const baseline = captureDirtyBaseline(sess.cwd, TURN_BASELINE_TIMEOUT_MS).catch((err) => ({
-    files: new Map<string, DirtyPathState>(),
-    failed: String(err instanceof Error ? err.message : err),
-  }));
-  baselines.set(generation, baseline);
-  pruneTurnBaselines(baselines);
-  sess.emit({ kind: "user", text: prompt });
+  const onAdmitted = () => {
+    sess.internal.turnGeneration = generation;
+    if (sess.internal.admissionPending === true && sess.internal.startRequestId) {
+      sess.internal.startRequestGeneration = generation;
+    }
+    beginAttributionTurn(sess, generation);
+    const baselines = turnBaselines(sess);
+    const baseline = captureDirtyBaseline(sess.cwd, TURN_BASELINE_TIMEOUT_MS).catch((err) => ({
+      files: new Map<string, DirtyPathState>(),
+      failed: String(err instanceof Error ? err.message : err),
+    }));
+    baselines.set(generation, baseline);
+    pruneTurnBaselines(baselines);
+    if (!recoveryAssessment) sess.emit({ kind: "user", text: displayText });
+  };
+  if (sess.adapter.sendWithAdmission) {
+    return sess.adapter.sendWithAdmission(
+      sess,
+      prompt,
+      generation,
+      attachments,
+      onAdmitted,
+      canAdmit,
+    );
+  }
+  if (canAdmit && !canAdmit()) return Promise.reject(new Error("agent startup cancelled"));
+  onAdmitted();
   // Conscious tradeoff: the prompt dispatches IMMEDIATELY and the baseline
   // captures concurrently. Gating send on capture cost up to ~3.5s per
   // message in large dirty repos (the primary chat path); the price of not
   // gating is that files the agent edits within the capture window may be
   // absorbed into the baseline and omitted from the cosmetic files-changed
   // block. Turn completion still awaits the stored baseline promise.
-  Promise.resolve((sess.adapter.send as any)(sess, prompt, generation)).catch((err) => {
+  Promise.resolve(sess.adapter.send(sess, prompt, generation, attachments)).catch((err) => {
     console.error("[agent-chat] send failed", err);
     if (isAgentCancellationError(err)) sess.emit({ kind: "status", text: "Stopped" });
     else sess.emit({ kind: "error", message: safeErrorMessage("send", err) });
@@ -936,6 +1844,7 @@ function sendPrompt(sess: Session, prompt: string) {
     sess.emit({ kind: "done", generation } as any);
     sess.setStatus("idle");
   });
+  return Promise.resolve();
 }
 
 function refreshSession(sess: Session) {
@@ -1336,7 +2245,7 @@ async function drainStream(stream: ReadableStream<Uint8Array>) {
   }
 }
 
-async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, fatalUTF8 = false): Promise<{ text: string; truncated: boolean }> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -1367,7 +2276,7 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: nu
     out.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const text = new TextDecoder().decode(out);
+  const text = new TextDecoder("utf-8", { fatal: fatalUTF8 }).decode(out);
   return { text, truncated };
 }
 
@@ -1628,8 +2537,38 @@ export function emitDoneAfterFilesForTest(sess: Session, evt: Extract<AgentEvent
   emitDoneAfterFiles(sess, evt);
 }
 
-export function sendPromptForTest(sess: Session, prompt: string) {
-  sendPrompt(sess, prompt);
+export function sendPromptForTest(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[] = [],
+): Promise<void> {
+  return sendPrompt(sess, prompt, attachments);
+}
+
+export function parsePromptAttachmentsForTest(value: unknown): PromptAttachment[] {
+  return parsePromptAttachments(value);
+}
+
+export function promptDisplayTextForTest(prompt: string, attachments: PromptAttachment[]): string {
+  return promptDisplayText(prompt, attachments);
+}
+
+export function promptAttachmentsSupportedForTest(adapter: Adapter, attachments: PromptAttachment[]): boolean {
+  return promptAttachmentsSupported(adapter, attachments);
+}
+
+export function sessionPersistenceEnabledForTest(
+  sess: Pick<Session, "headless" | "internal">,
+): boolean {
+  return sessionPersistenceEnabled(sess);
+}
+
+export async function admitAndSendPromptForTest(
+  sess: Session,
+  prompt: string,
+  attachments: PromptAttachment[],
+): Promise<void> {
+  await admitAndSendPrompt(sess, prompt, attachments);
 }
 
 async function emitFilesChanged(sess: Session, timeoutMs = GIT_TIMEOUT_MS) {
@@ -2266,6 +3205,62 @@ async function startServer() {
       setTimeout(shutdown, 10);
       return Response.json({ ok: true });
     }
+    // Deliberately non-prominent repair contract for the canonical Boss. It
+    // inspects candidates and repoints the pointer; it never deletes a
+    // transcript or a candidate record.
+    if (url.pathname === "/api/boss" && req.method === "GET") {
+      if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
+      const pointerResult = await readCanonicalBossPointer(BOSS_POINTER_DIR);
+      const candidates = await listBossCandidates(BOSS_POINTER_DIR);
+      return Response.json({
+        pointer: pointerResult.pointer,
+        pointerError: pointerResult.error,
+        state: bossClientState,
+        continuity: APP_CONTINUITY,
+        restore: canonicalBossSessionId()
+          ? (sessions.get(canonicalBossSessionId()!)?.internal.workbenchRecovery as BossRecovery | undefined)?.receipt ?? null
+          : null,
+        candidates,
+      });
+    }
+    if (url.pathname === "/api/boss/repoint" && req.method === "POST") {
+      if (!WORKBENCH_EXPERIENCE) return new Response("not found", { status: 404 });
+      if (!hasTrustedOrigin(req)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const body = await req.json().catch(() => ({}));
+      return withCanonicalBossMutation(async () => {
+        const result = await repointCanonicalBoss(
+          BOSS_POINTER_DIR,
+          { agent: String(body.agent ?? ""), sessionId: String(body.sessionId ?? "") },
+          { configuredAgent: BOSS_AGENT },
+        );
+        if (!result.ok) return Response.json(result, { status: 400 });
+        // A repointed pointer is only canonical once its record is actually
+        // loaded; otherwise the app would report a Boss no client can open and
+        // refuse to create one.
+        const loaded = await loadCanonicalBossSession(result.session);
+        canonicalBossPointer = result.pointer;
+        if (loaded.ok === false) {
+          bossClientState = {
+            status: "blocked",
+            agent: BOSS_AGENT,
+            reason: "cwd-unavailable",
+            detail: loaded.detail,
+            skipped: bossClientState.skipped,
+          };
+          broadcastBossState();
+          return Response.json({ ok: false, error: loaded.detail }, { status: 400 });
+        }
+        bossClientState = {
+          status: "canonical",
+          agent: result.pointer.agent,
+          sessionId: result.pointer.sessionId,
+          skipped: bossClientState.skipped,
+        };
+        broadcastBossState();
+        broadcastSessions();
+        return Response.json({ ok: true, pointer: result.pointer });
+      });
+    }
     // REST for the CLI: create a session (optionally with a first prompt) and
     // get back its id/url; list sessions.
     if (url.pathname === "/api/sessions" && req.method === "POST") {
@@ -2274,17 +3269,24 @@ async function startServer() {
       const provider = String(body.provider ?? DEFAULT_PROVIDER);
       const prompt = String(body.prompt ?? "").trim();
       const requestedCwd = String(body.cwd || defaultCwd);
-      let sess: Session;
+      let sess: Session | undefined;
+      let bossStartToken: string | null = null;
       try {
+        bossStartToken = assertBossStartAllowed(provider);
         const start = resolveSessionStart(provider, body.autoApprove);
         const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
-        sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
+        sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options), undefined, false, false);
+        if (bossStartToken) claimBossStartReservation(sess.id);
+        refreshSession(sess);
+        if (prompt) await sendPrompt(sess, prompt);
+        registerSession(sess);
       } catch (err) {
+        if (sess) await retireSession(sess).catch(() => {});
+        if (bossStartToken) releaseBossStartReservation(bossStartToken);
         return Response.json({ error: String(err) }, { status: 400 });
       }
-      refreshSession(sess);
-      if (prompt) sendPrompt(sess, prompt);
+      if (!sess) return Response.json({ error: "session start failed" }, { status: 500 });
       return Response.json({ id: sess.id, url: `http://127.0.0.1:${server.port}${prefixedPath(`/s/${sess.id}`)}` });
     }
     if (url.pathname === "/api/sessions" && req.method === "GET") {
@@ -2293,6 +3295,7 @@ async function startServer() {
     return new Response(renderPage(url), { headers: { "content-type": "text/html; charset=utf-8" } });
     },
     websocket: {
+      maxPayloadLength: MAX_PROMPT_WEBSOCKET_PAYLOAD_BYTES,
       open(ws) {
       ws.data.closed = false;
       allSockets.add(ws);
@@ -2303,6 +3306,8 @@ async function startServer() {
         defaultCwd,
         defaultProvider: DEFAULT_PROVIDER,
         experience: WORKBENCH_EXPERIENCE,
+        boss: bossClientState,
+        continuity: APP_CONTINUITY,
         keys: keyConfig,
       }));
       ws.send(JSON.stringify({
@@ -2329,11 +3334,12 @@ async function startServer() {
       } catch {
         return;
       }
-      try {
-        handleMessage(ws, msg);
-      } catch (err) {
-        sendWsError(ws, String(msg.op ?? ""), err);
-      }
+      void handleMessage(ws, msg).catch((err) => {
+        sendWsErrorDetails(ws, String(msg.op ?? ""), err, {
+          ...(typeof msg.requestId === "string" ? { requestId: msg.requestId } : {}),
+          ...(typeof msg.sessionId === "string" ? { sessionId: msg.sessionId } : {}),
+        });
+      });
       },
     },
   });
@@ -2368,6 +3374,9 @@ function sendWsError(ws: Bun.ServerWebSocket<WsData>, op: string, err: unknown) 
 }
 
 function safeReason(err: unknown): string {
+  // Boss guard messages are server-authored and carry no user or provider data,
+  // so the operator sees the exact refusal instead of "unexpected error".
+  if (err instanceof BossGuardError) return err.message;
   const text = String(err instanceof Error ? err.message : err).toLowerCase();
   if (text.includes("outside configured roots")) return "working directory is outside the configured roots";
   if (text.includes("working directory") || text.includes("enoent")) return "working directory is unavailable";
@@ -2426,69 +3435,177 @@ function sendWsErrorDetails(
 ) {
   console.error(`[agent-chat] ${op || "request"} failed`, err);
   const { provider, ...publicDetails } = details;
-  ws.send(JSON.stringify({ kind: "error", op, message: safeErrorMessage(op, err, { provider }), ...publicDetails }));
+  ws.send(JSON.stringify({
+    kind: "error", op, message: safeErrorMessage(op, err, { provider }), ...publicDetails,
+    recoveryError: err instanceof BossGuardError ? err.recoveryError : undefined,
+  }));
 }
 
-function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
+async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
+  if (["user-input", "start", "send", "stop", "set-option", "permission-response",
+    "elicitation-response", "fork", "delete", "cancel-start"].includes(msg.op)) {
+    const id = canonicalBossSessionId();
+    const boss = id ? sessions.get(id) : undefined;
+    const wasAssessment = (boss?.internal.workbenchRecovery as BossRecovery | undefined)?.active;
+    if (boss) await preemptWorkbenchRestore(boss);
+    if (msg.op === "user-input" || (msg.op === "stop" && wasAssessment)) return;
+  }
   switch (msg.op) {
     case "start":
     case "headless-start": {
       const headless = msg.op === "headless-start";
       const prompt = String(msg.prompt ?? "").trim();
-      if (!prompt) return;
+      const attachments = parsePromptAttachments(msg.attachments);
+      if (!prompt && attachments.length === 0) return;
       const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
       const requestedCwd = String(msg.cwd || DEFAULT_CWD);
       const provider = headless ? "ouro-boss" : String(msg.provider);
-      const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
-      const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
       pruneStartRequests();
       const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
-      const createStart = () => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
+      const canonical = sessions.get(canonicalBossSessionId() ?? "");
+      const replayed = !headless && requestId && canonical?.internal.startRequestId === requestId
+        ? canonical
+        : undefined;
+      // A replayed request id is the same start, not a second Boss: a client
+      // that reconnects mid-start must re-attach instead of being refused.
+      const bossStartToken = headless || existing || replayed ? null : assertBossStartAllowed(provider);
+      const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
+      const adapter = adapters.get(provider);
+      if (!adapter) throw new Error(`provider not found: ${provider}`);
+      if (!promptAttachmentsSupported(adapter, attachments)) {
+        throw new Error(`${providerDisplayLabel(provider)} does not support image prompts`);
+      }
+      const rawOptions = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(msg.options));
+      const createStart = (entry?: StartRequest) => (headless ? Bun.sleep(0) : Promise.resolve()).then(async () => {
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
         const cwd = await assertCwd(requestedCwd);
         const options = await sanitizeStartOptions(provider, cwd, rawOptions);
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
         return { cwd, options };
-      }).then(({ cwd, options }) => {
+      }).then(async ({ cwd, options }) => {
         if (headless && ws.data.closed) throw new Error("headless owner disconnected");
-        const sess = createSession(provider, cwd, start.autoApprove, start.title, options, undefined, headless);
+        const sess = createSession(
+          provider,
+          cwd,
+          start.autoApprove,
+          start.title,
+          options,
+          undefined,
+          headless,
+          headless,
+          requestId,
+        );
+        if (entry) entry.session = sess;
+        if (bossStartToken) claimBossStartReservation(sess.id);
         if (!headless) {
-          refreshSession(sess);
-          sendPrompt(sess, prompt);
+          try {
+            if (!sess.adapter.sendWithAdmission) refreshSession(sess);
+            await sendPrompt(sess, prompt, attachments, () => entry?.cancelled !== true);
+            if (entry?.cancelled) {
+              await sess.adapter.stop(sess);
+              sess.internal.startupCancelled = true;
+            }
+          } catch (error) {
+            if (entry?.cancelled) {
+              if (!entry.retired) registerSession(sess);
+              sess.internal.startupCancelled = true;
+              return sess;
+            }
+            sess.adapter.dispose(sess);
+            throw error;
+          }
+          if (!entry?.retired) registerSession(sess);
         }
         return sess;
       });
-      const startPromise = existing?.promise ?? createStart();
-      if (!headless && requestId && !existing) {
-        startRequests.set(requestId, { createdAt: Date.now(), promise: startPromise });
+      let startPromise: Promise<Session>;
+      if (existing) {
+        startPromise = existing.promise;
+      } else if (replayed) {
+        startPromise = Promise.resolve(replayed.adapter.warmup?.(replayed)).then(() => replayed);
+      } else if (!headless && requestId) {
+        const entry: StartRequest = {
+          createdAt: Date.now(),
+          cancelled: false,
+          promise: Promise.resolve(null as unknown as Session),
+        };
+        startPromise = createStart(entry);
+        entry.promise = startPromise;
+        startRequests.set(requestId, entry);
         startPromise.finally(() => {
-          setTimeout(() => {
-            if (startRequests.get(requestId)?.promise === startPromise) startRequests.delete(requestId);
-          }, START_REQUEST_TTL_MS);
+          if (startRequests.get(requestId)?.promise === startPromise) {
+            entry.settledAt = Date.now();
+          }
         }).catch(() => {});
+      } else {
+        startPromise = createStart();
       }
-      startPromise.then((sess) => {
+      startPromise.then(async (sess) => {
         if (headless && ws.data.closed) {
           disposeHeadlessSession(sess, true);
           throw new Error("headless owner disconnected");
         }
+        if (!headless && requestId && startRequests.get(requestId)?.retired) {
+          const entry = startRequests.get(requestId);
+          if (entry) void retireStartSession(entry);
+          return;
+        }
         subscribe(ws, sess);
         ws.send(JSON.stringify({ kind: "session-created", session: sessionSummary(sess), requestId }));
+        if (sess.internal.startupCancelled === true) {
+          delete sess.internal.startupCancelled;
+          sess.emit({ kind: "status", text: "Stopped" });
+        }
         if (headless) {
           refreshSession(sess);
-          sendPrompt(sess, prompt);
+          try {
+            await sendPrompt(sess, prompt, attachments);
+          } catch (error) {
+            sendWsErrorDetails(ws, "start", error, { provider, requestId });
+            disposeHeadlessSession(sess, false);
+            return;
+          }
         }
-        if (existing) {
-          ws.send(JSON.stringify({
-            kind: "history",
-            sessionId: sess.id,
-            session: sessionSummary(sess),
-            events: sess.events,
-          }));
-        }
+        ws.send(JSON.stringify({
+          kind: "history",
+          sessionId: sess.id,
+          session: sessionSummary(sess),
+          events: sess.events,
+        }));
       }).catch((err) => {
+        if (bossStartToken) releaseBossStartReservation(bossStartToken);
         if (headless && ws.data.closed) return;
         sendWsErrorDetails(ws, "start", err, { provider, requestId });
+      });
+      break;
+    }
+    case "warm-boss": {
+      // Eager capability negotiation: connect the canonical Boss without
+      // sending a user turn so the client learns image support before input.
+      const sessionId = canonicalBossSessionId();
+      const sess = sessionId ? sessions.get(sessionId) : undefined;
+      if (!sess) {
+        if (!WORKBENCH_EXPERIENCE || bossClientState.status !== "none" || bossStartReservation) return;
+        const cwd = await assertCwd(process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD);
+        if (canonicalBossSessionId() || bossStartReservation) return;
+        const start = resolveSessionStart(DEFAULT_PROVIDER, undefined);
+        // Initialize one peer, but defer session/new until the user's cwd and options are known.
+        const prepared = preparedBoss ??= createSession(DEFAULT_PROVIDER, cwd, start.autoApprove, start.title, {}, undefined, false, false);
+        Promise.resolve(prepared.adapter.warmup?.(prepared, { initializeOnly: true })).then(() => {
+          ws.send(JSON.stringify({ kind: "boss-capabilities", image: imageCapabilityOf(prepared) }));
+        }).catch((err) => {
+          if (preparedBoss === prepared) {
+            prepared.adapter.dispose(prepared);
+            preparedBoss = null;
+          }
+          sendWsErrorDetails(ws, "warm-boss", err);
+        });
+        break;
+      }
+      subscribe(ws, sess);
+      startWorkbenchRestore(sess);
+      Promise.resolve(sess.adapter.warmup?.(sess)).catch((err) => {
+        sendWsErrorDetails(ws, "warm-boss", err, { sessionId: sess.id });
       });
       break;
     }
@@ -2502,14 +3619,45 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "cancel-start": {
       const requestId = String(msg.requestId ?? "");
       const pending = requestId ? startRequests.get(requestId) : undefined;
-      pending?.promise.then((sess) => sess.adapter.stop(sess)).catch(() => {});
+      if (msg.retire === true || WORKBENCH_EXPERIENCE) {
+        void retireStartRequestById(requestId).then((sessionId) => {
+          ws.send(JSON.stringify({ kind: "start-retired", requestId, sessionId }));
+        }).catch((error) => {
+          sendWsErrorDetails(ws, "cancel-start", error, { requestId });
+        });
+      } else if (pending) {
+        pending.cancelled = true;
+        if (pending.session) {
+          void Promise.resolve(pending.session.adapter.stop(pending.session)).catch(() => {});
+        }
+      }
       break;
     }
     case "send": {
       const sess = sessions.get(String(msg.sessionId));
       const prompt = String(msg.prompt ?? "").trim();
-      if (!sess || !prompt) return;
-      sendPrompt(sess, prompt);
+      const attachments = parsePromptAttachments(msg.attachments);
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+      if (!sess) {
+        sendWsErrorDetails(ws, "send", new Error("session not found"), {
+          requestId,
+          sessionId: String(msg.sessionId ?? ""),
+        });
+        return;
+      }
+      if (!prompt && attachments.length === 0) return;
+      void admitAndSendPrompt(sess, prompt, attachments).then(() => {
+        ws.send(JSON.stringify({
+          kind: "send-accepted",
+          requestId,
+          sessionId: sess.id,
+        }));
+      }).catch((err) => {
+        sendWsErrorDetails(ws, "send", err, {
+          requestId,
+          sessionId: sess.id,
+        });
+      });
       break;
     }
     case "subscribe": {
@@ -2519,18 +3667,20 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
         return;
       }
       subscribe(ws, sess);
+      startWorkbenchRestore(sess);
       ws.send(JSON.stringify({
         kind: "history",
         sessionId: sess.id,
         session: sessionSummary(sess),
         events: sess.events,
+        restore: (sess.internal.workbenchRecovery as BossRecovery | undefined)?.receipt ?? null,
       }));
       refreshSession(sess);
       break;
     }
     case "stop": {
       const sess = sessions.get(String(msg.sessionId));
-      sess?.adapter.stop(sess);
+      if (sess) void Promise.resolve(sess.adapter.stop(sess)).catch(() => {});
       break;
     }
     case "set-option": {
@@ -2580,6 +3730,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const sess = sessions.get(String(msg.sessionId));
       if (!sess) {
         sendWsErrorDetails(ws, "fork", new Error("no session"), { sessionId: String(msg.sessionId ?? "") });
+        return;
+      }
+      if (isCanonicalBossSession(sess)) {
+        sendWsErrorDetails(ws, "fork", new BossGuardError("the canonical Boss cannot be forked"), { sessionId: sess.id });
         return;
       }
       Promise.resolve(forkSession(sess))
@@ -2653,6 +3807,10 @@ function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "delete": {
       const sess = sessions.get(String(msg.sessionId));
       if (!sess) return;
+      if (isCanonicalBossSession(sess)) {
+        sendWsErrorDetails(ws, "delete", new BossGuardError("the canonical Boss cannot be deleted"), { sessionId: sess.id });
+        return;
+      }
       sess.adapter.dispose(sess);
       sessions.delete(sess.id);
       broadcastSessions();
@@ -2674,7 +3832,11 @@ function subscribe(ws: Bun.ServerWebSocket<WsData>, sess: Session) {
 }
 
 function shutdown() {
-  for (const sess of sessions.values()) sess.adapter.dispose(sess);
+  preparedBoss?.adapter.dispose(preparedBoss);
+  for (const sess of sessions.values()) {
+    (sess.internal.workbenchRecovery as BossRecovery | undefined)?.stopWatching?.();
+    sess.adapter.dispose(sess);
+  }
   process.exit(0);
 }
 
