@@ -21,10 +21,20 @@ if (rpc >= 0) {
   });
   for await (const chunk of response.body!) process.stdout.write(chunk);
 } else {
-  for await (const line of createInterface({ input: process.stdin })) {
+  const reader = createInterface({ input: process.stdin });
+  for await (const line of reader) {
     if (!line.trim()) continue;
     // A pending prompt must not prevent the peer from reading session/cancel.
     void fetch(`${controller}/acp`, { method: "POST", body: line }).then(async (response) => {
+      const holdInput = process.env.RECOVERY_TEST_HOLD_PROMPT_INPUT === "1"
+        && JSON.parse(line).method === "session/new";
+      if (holdInput) process.stdin.once("data", (chunk) => {
+        reader.pause();
+        void fetch(`${controller}/acp`, {
+          method: "POST",
+          body: JSON.stringify({ method: "test/prompt-input", params: { prefix: chunk.toString().slice(0, 128) } }),
+        }).then(() => reader.resume());
+      });
       for (const message of await response.json() as unknown[]) {
         process.stdout.write(`${JSON.stringify(message)}\n`);
       }

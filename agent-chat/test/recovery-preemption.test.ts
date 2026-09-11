@@ -99,6 +99,7 @@ async function harness(options: {
   startRequestId?: string;
   optionFailure?: boolean;
   holdOption?: boolean;
+  holdPromptInput?: boolean;
   replayPrompt?: string;
   clock?: boolean;
 } = {}) {
@@ -185,7 +186,7 @@ async function harness(options: {
         if (!options.holdLoad) entry.finish({}, options.loadFailure ? "synthetic saved-session failure" : undefined);
       } else if (message.method === "session/set_mode") {
         if (!options.holdOption) entry.finish({}, options.optionFailure ? "synthetic initial option failure" : undefined);
-      } else if (message.method !== "session/prompt") {
+      } else if (!["session/prompt", "test/prompt-input"].includes(message.method)) {
         entry.finish({});
       }
       return response.promise;
@@ -208,6 +209,7 @@ async function harness(options: {
         PATH: process.env.PATH,
         HOME: root,
         RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
+        RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
         CMUX_AGENT_CHAT_OURO_COMMAND: peer,
         CMUX_BUNDLED_CLI_PATH: peer,
         CMUX_SOCKET_PATH: join(root, "native.sock"),
@@ -880,5 +882,35 @@ test("start replay crosses the 60s cache expiry without replacing Boss or interr
     expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(0);
     await h.assertSameBoss(id, id);
     (await h.prompt(1)).finish();
+  } finally { await h.stop(); }
+});
+
+test("retirement preserves a first prompt whose blocked pipe write admits during cancellation", async () => {
+  const h = await harness({ fresh: true, holdPromptInput: true, facts: snapshot() });
+  const start = {
+    op: "start", requestId: "writing-start", provider: "ouro-boss", cwd: h.root,
+    prompt: "synthetic ".repeat(256 * 1024),
+  };
+  try {
+    h.send(start);
+    const blocked = await h.peers.next((entry) => entry.message.method === "test/prompt-input");
+    expect(blocked.message.params.prefix).toContain('"method":"session/prompt"');
+    expect(h.messages.all.some((message) => message.kind === "session-created")).toBe(false);
+    h.send({ op: "cancel-start", requestId: start.requestId, retire: true });
+    h.send({ op: "check-cwd", cwd: h.root });
+    await h.messages.next((message) => message.kind === "cwd-check");
+    blocked.finish();
+    const first = await h.prompt();
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    first.finish({ stopReason: "cancelled" });
+    const retired = await h.messages.next((message) => message.kind === "start-retired");
+    expect(retired.sessionId).toBe(first.message.params.sessionId);
+    await h.assertSameBoss(retired.sessionId, retired.sessionId);
+    const cursor = h.messages.all.length;
+    h.send(start);
+    const replayed = await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor
+      && message.kind === "session-created" && message.requestId === start.requestId);
+    expect(replayed.session.id).toBe(retired.sessionId);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
   } finally { await h.stop(); }
 });
