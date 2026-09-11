@@ -3610,7 +3610,7 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "cancel-start": {
       const requestId = String(msg.requestId ?? "");
       const pending = requestId ? startRequests.get(requestId) : undefined;
-      if (msg.retire === true) {
+      if (msg.retire === true || WORKBENCH_EXPERIENCE) {
         void retireStartRequestById(requestId).then((sessionId) => {
           ws.send(JSON.stringify({ kind: "start-retired", requestId, sessionId }));
         }).catch((error) => {

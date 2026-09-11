@@ -660,6 +660,9 @@ export function useSession(): SessionState {
             setPhase("chat");
             break;
           case "start-retired":
+            if (experienceRef.current && !msg.sessionId && pendingStartRef.current?.requestId === msg.requestId) {
+              failPendingStart("");
+            }
             if (typeof msg.requestId === "string") {
               retiredStartRequestIdsRef.current.delete(msg.requestId);
             }
