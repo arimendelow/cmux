@@ -90,6 +90,36 @@ interface PeerRequest {
   finish(result?: unknown, error?: string): void;
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function remainingProcesses(pids: Iterable<number>): Promise<number[]> {
+  const recorded = [...pids];
+  const deadline = performance.now() + 2_000;
+  while (recorded.some(processExists) && performance.now() < deadline) await Bun.sleep(20);
+  return recorded.filter(processExists);
+}
+
+// A failed lifecycle assertion must not itself strand the deliberately stubborn test peer.
+async function reapRecordedTestProcesses(pids: Iterable<number>) {
+  const recorded = [...pids];
+  if (recorded.some((pid) => !Number.isSafeInteger(pid) || pid <= 1)) throw new Error("invalid recorded fixture PID");
+  for (const pid of recorded) {
+    try { process.kill(pid, "SIGKILL"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  }
+  const remaining = await remainingProcesses(recorded);
+  console.log("recovery fixture cleanup", JSON.stringify({ recorded, remaining }));
+  expect(remaining).toEqual([]);
+}
+
 async function harness(options: {
   facts?: ReturnType<typeof snapshot>;
   holdNative?: boolean;
@@ -106,6 +136,7 @@ async function harness(options: {
   optionFailure?: boolean;
   holdOption?: boolean;
   holdPromptInput?: boolean;
+  peerLifetime?: "until-sigterm" | "until-sigkill";
   replayPrompt?: string;
   clock?: boolean;
 } = {}) {
@@ -222,6 +253,8 @@ async function harness(options: {
         HOME: root,
         RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
         RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
+        RECOVERY_TEST_PROCESS_LOG: join(root, "processes.jsonl"),
+        RECOVERY_TEST_PEER_LIFETIME: options.peerLifetime ?? "",
         CMUX_AGENT_CHAT_OURO_COMMAND: peer,
         CMUX_BUNDLED_CLI_PATH: peer,
         CMUX_SOCKET_PATH: join(root, "native.sock"),
@@ -268,6 +301,10 @@ async function harness(options: {
   return {
     url,
     root,
+    get pid() { return server.child.pid; },
+    async processes(): Promise<Array<{ pid: number; ppid: number; role: string }>> {
+      return (await readFile(join(root, "processes.jsonl"), "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    },
     peers,
     native,
     async expireStartup() {
@@ -329,6 +366,111 @@ async function harness(options: {
     },
   };
 }
+
+for (const phase of ["initializing", "allocated", "idle"]) test(`recovery fixture teardown reaps ${phase} descendants that ignore SIGTERM`, async () => {
+  const h = await harness({
+    fresh: true, manualInitialize: phase === "initializing", holdOption: phase === "allocated",
+    peerLifetime: "until-sigkill", facts: snapshot(),
+  });
+  const recorded = new Set([h.pid]);
+  let stopped = false;
+  try {
+    h.send(phase === "idle" ? { op: "warm-boss" } : {
+      op: "start", requestId: "teardown-start", provider: "ouro-boss", cwd: h.root,
+      prompt: "Synthetic startup request.", options: phase === "allocated" ? { mode: "plan" } : {},
+    });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    if (phase === "allocated") await h.peers.next((entry) => entry.message.method === "session/set_mode");
+    if (phase === "idle") await h.messages.next((message) => message.kind === "boss-capabilities");
+    const children = await h.processes();
+    expect(children.filter((child) => child.role === "acp")).toHaveLength(1);
+    for (const child of children) {
+      expect(child.ppid).toBe(h.pid);
+      expect(processExists(child.pid)).toBe(true);
+      recorded.add(child.pid);
+    }
+    await h.stop();
+    stopped = true;
+    expect(await remainingProcesses(recorded)).toEqual([]);
+    recorded.clear();
+  } finally {
+    try { if (!stopped) await h.stop(); }
+    finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
+
+test("recovery fixture teardown reaps a responsive peer after its sidecar has exited", async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, peerLifetime: "until-sigterm", facts: snapshot() });
+  const recorded = new Set([h.pid]);
+  let stopped = false;
+  try {
+    h.send({ op: "start", requestId: "orphaned-start", provider: "ouro-boss", cwd: h.root, prompt: "Synthetic startup request." });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    const children = await h.processes();
+    expect(children.filter((child) => child.role === "acp")).toHaveLength(1);
+    for (const child of children) {
+      expect(child.ppid).toBe(h.pid);
+      recorded.add(child.pid);
+    }
+    process.kill(h.pid, "SIGKILL");
+    expect(await remainingProcesses([h.pid])).toEqual([]);
+    expect(children.every((child) => processExists(child.pid))).toBe(true);
+    await h.stop();
+    stopped = true;
+    expect(await remainingProcesses(recorded)).toEqual([]);
+    recorded.clear();
+  } finally {
+    try {
+      if (!stopped) await h.stop();
+      for (const pid of recorded) {
+        try { process.kill(pid, "SIGTERM"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+      const remaining = await remainingProcesses(recorded);
+      console.log("recovery fixture SIGTERM cleanup", JSON.stringify({ recorded: [...recorded], remaining }));
+      expect(remaining).toEqual([]);
+      recorded.clear();
+    } finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
+
+test("recovery fixture restarts twice and stops without leaving any recorded descendants", async () => {
+  const h = await harness({ peerLifetime: "until-sigkill", facts: snapshot("resuming", "restoring") });
+  const recorded = new Set<number>();
+  let stopped = false;
+  let peerCursor = 0;
+  let nativeCursor = 0;
+  try {
+    for (const action of ["restart", "restart", "stop"] as const) {
+      h.send({ op: "subscribe", sessionId: bossId });
+      h.send({ op: "warm-boss" });
+      await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "session/load");
+      await h.native.next((request) => h.native.all.indexOf(request) >= nativeCursor && Array.isArray(request.stream));
+      const children = (await h.processes()).filter((child) => child.ppid === h.pid);
+      expect(children.some((child) => child.role === "acp" && processExists(child.pid))).toBe(true);
+      expect(children.some((child) => child.role === "events" && processExists(child.pid))).toBe(true);
+      const generation = [h.pid, ...children.map((child) => child.pid)];
+      for (const pid of generation) recorded.add(pid);
+      peerCursor = h.peers.all.length;
+      nativeCursor = h.native.all.length;
+      await h[action]();
+      stopped = action === "stop";
+      expect(await remainingProcesses(generation)).toEqual([]);
+      for (const pid of generation) recorded.delete(pid);
+    }
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(0);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    expect(await remainingProcesses(recorded)).toEqual([]);
+  } finally {
+    try {
+      if (!stopped) {
+        recorded.add(h.pid);
+        for (const child of await h.processes()) if (child.ppid === h.pid) recorded.add(child.pid);
+        await h.stop();
+      }
+    } finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
 
 test("clean native restore emits a factual receipt without a speculative model turn", async () => {
   const facts = snapshot();

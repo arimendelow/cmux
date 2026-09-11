@@ -1,9 +1,21 @@
 #!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 // Both native CLI and ACP traffic terminate at the test-owned controller.
 const controller = process.env.RECOVERY_TEST_URL!;
 const rpc = Bun.argv.indexOf("rpc");
+const role = rpc >= 0 ? "rpc" : Bun.argv.includes("events") ? "events" : "acp";
+if (process.env.RECOVERY_TEST_PROCESS_LOG) {
+  appendFileSync(process.env.RECOVERY_TEST_PROCESS_LOG, `${JSON.stringify({ pid: process.pid, ppid: process.ppid, role })}\n`);
+}
+const lifetime = process.env.RECOVERY_TEST_PEER_LIFETIME;
+if (role === "acp" && (lifetime === "until-sigterm" || lifetime === "until-sigkill")) {
+  if (lifetime === "until-sigkill") process.on("SIGTERM", () => {});
+  process.stdout.on("error", () => {});
+  process.on("unhandledRejection", () => {});
+  setInterval(() => {}, 60_000);
+}
 if (rpc >= 0) {
   const response = await fetch(`${controller}/native`, {
     method: "POST",
