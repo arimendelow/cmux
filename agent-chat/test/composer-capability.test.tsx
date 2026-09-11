@@ -389,3 +389,21 @@ test("a fresh composer chooses defaults without a stored provider or draft and h
     expect(ui.drop().className).toBe("image-drop-active");
   } finally { await ui.stop(); }
 });
+
+test("Boss preparation errors appear once without hiding a different start failure", async () => {
+  const state = {
+    ...context("unknown"),
+    bossPreparationError: "Preparation could not finish.",
+    lastError: "Preparation could not finish.",
+  };
+  const ui = await composerFixture(state);
+  try {
+    // The picker also carries the same reason in its title; count visible alerts, not attributes.
+    expect(ui.html().match(/<span[^>]+role="alert"[^>]*>[^<]*Preparation could not finish\.<\/span>/g)).toHaveLength(1);
+    expect(ui.html()).not.toContain('class="composer-error"');
+    await ui.render({ ...state, lastError: "The selected directory is unavailable." });
+    expect(ui.html()).toContain(state.bossPreparationError);
+    expect(ui.html()).toContain('<div class="composer-error">The selected directory is unavailable.</div>');
+    expect(ui.submit().disabled).toBe(true);
+  } finally { await ui.stop(); }
+});

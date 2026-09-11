@@ -284,16 +284,20 @@ test("status controls preserve option payloads, working directory commits, and d
       { id: "extra", label: "Extra", kind: "toggle" as const, value: false },
       select("other"), select("no-choices", "", { choices: undefined }),
     ];
-    const tree = StatusRow({
+    const props: Parameters<typeof StatusRow>[0] = {
       provider: "demo", providers: [{ id: "demo", label: "Demo" }], cwd: "/work",
       options, onChange: (id, value) => changes.push([id, value]),
       onCwdChange: (value) => cwdChanges.push(value), onCwdCommit: (value) => commits.push(value),
       openOptionId: "effort", setOpenOptionId: (id) => opened.push(id),
-      running: true, disabled: true, trailing: <button id="stop">Stop</button>,
-    });
+      running: true, trailing: <button id="stop">Stop</button>,
+    };
+    let tree = StatusRow({ ...props, disabled: true });
     expect(element(tree, (node) => node.props.className === "status-row-controls").props.inert).toBe(true);
     expect(element(tree, (node) => node.props.className === "status-row-controls").props["aria-disabled"]).toBe(true);
     expect(element(tree, (node) => node.props.id === "stop")).not.toBeNull();
+    tree = StatusRow(props);
+    expect(element(tree, (node) => node.props.className === "status-row-controls").props.inert).toBeUndefined();
+    expect(renderToStaticMarkup(tree)).toContain("provider-running");
     for (const label of ["Fast", "Approve"]) element(tree, (node) => node.props["aria-label"] === label).props.onClick();
     expect(changes).toEqual([["fastMode", true], ["approve", false]]);
     element(tree, (node) => node.type === "button" && node.props.className === "row-control").props.onClick();
@@ -396,7 +400,8 @@ test("model picker searches, navigates, chooses, and refuses disabled models thr
     expect(row("demo:a").props["aria-selected"]).toBe(true);
     expect(row("demo:b").props.disabled).toBe(true);
     expect(row("demo:c").props.children[1].props.children[1].props.children).toBe("Unavailable");
-    act(() => row("demo:b").props.onMouseEnter());
+    press("ArrowDown");
+    expect(search().props["aria-activedescendant"]).toBe("demo:b");
     press("Enter");
     expect(choices).toEqual([]);
     act(() => row("demo:d").props.onMouseEnter());
@@ -425,6 +430,10 @@ test("model picker searches, navigates, chooses, and refuses disabled models thr
     press("ArrowRight", railTarget);
     expect(row("other:a")).not.toBeNull();
     press("ArrowLeft", railTarget);
+    expect(row("demo:a")).not.toBeNull();
+    press("ArrowUp", railTarget);
+    expect(row("blank:default")).not.toBeNull();
+    press("ArrowDown", railTarget);
     expect(row("demo:a")).not.toBeNull();
     act(() => find((node) => node.props.role === "tab" && node.props["aria-label"] === "Blank").props.onClick());
     expect(row("blank:default")).not.toBeNull();
@@ -476,6 +485,14 @@ test("model picker searches, navigates, chooses, and refuses disabled models thr
     act(() => find((node) => node.type === Popover.Root).props.onOpenChange(true));
     const count = choices.length;
     act(() => row("blank:default").props.onClick());
+    expect(choices.length).toBe(count);
+    await render({ provider: "missing", providers: props.providers.filter((provider) => provider.installed === false), options: [], open: true });
+    expect(find((node) => node.props["aria-label"] === "Missing not installed")).not.toBeNull();
+    expect(find((node) => node.props.role === "tab")).toBeNull();
+    // The install controls remain in the rail even when no harness is installed.
+    press("ArrowRight", railTarget);
+    press("ArrowUp", railTarget);
+    expect(search().props["aria-activedescendant"]).toBeUndefined();
     expect(choices.length).toBe(count);
     await render({ provider: "unknown", providers: [], options: [], open: true });
     expect(search().props["aria-activedescendant"]).toBeUndefined();
