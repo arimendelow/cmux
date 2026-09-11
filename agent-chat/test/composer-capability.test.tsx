@@ -1,21 +1,11 @@
 import { expect, test } from "bun:test";
-import { act, createElement, isValidElement, type ReactElement } from "react";
+import { act, createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SessionContext } from "../src/context";
 import { Composer } from "../src/components/Composer";
 import { ImageAttachmentTray } from "../src/components/ImageAttachments";
 import type { SessionState } from "../src/session";
-import { clientFixture } from "./client-fixture";
-
-function element(tree: any, matches: (node: ReactElement<any>) => boolean): ReactElement<any> {
-  if (Array.isArray(tree)) {
-    for (const child of tree) { const found = element(child, matches); if (found) return found; }
-  } else if (isValidElement<any>(tree)) {
-    if (matches(tree)) return tree;
-    return element([tree.props.children, tree.props.trailing], matches);
-  }
-  return null;
-}
+import { clientFixture, findElement as element } from "./client-fixture";
 
 function context(imageCapability: SessionState["imageCapability"], workbench = true): SessionState {
   const provider = workbench ? "ouro-boss" : "example-acp";
@@ -44,8 +34,13 @@ async function composerFixture(state: SessionState, locale = "en") {
   localStorage.setItem("agentui.provider", state.defaultProvider);
   localStorage.setItem("agentui.cwd", "/example");
   let tree: ReactElement;
+  let tray: ReactElement;
   // Keep the component's real hooks and returned event handlers; no DOM nodes are mounted.
-  function Probe() { tree = Composer(); return null; }
+  function Probe() {
+    tree = Composer();
+    tray = ImageAttachmentTray(element(tree, (node) => node.type === ImageAttachmentTray).props as any);
+    return null;
+  }
   const render = async (next: SessionState) => client.render(
     createElement(SessionContext.Provider, { value: next }, createElement(Probe)),
   );
@@ -57,6 +52,7 @@ async function composerFixture(state: SessionState, locale = "en") {
     tray: () => element(tree, (node) => node.type === ImageAttachmentTray).props,
     drop: () => element(tree, (node) => node.props.id === "composer-card").props,
     submit: () => element(tree, (node) => node.props["aria-label"] === "Start").props,
+    retry: () => element(tray, (node) => node.type === "button" && ["Retry", "再試行"].includes(node.props.children)),
     stop: client.stop,
   };
 }
@@ -207,3 +203,44 @@ for (const capability of ["unknown", "unsupported", "supported"] as const) {
     } finally { await ui.stop(); }
   });
 }
+
+for (const locale of ["en", "ja-JP"]) test(`failed initial negotiation explains Retry in ${locale}`, async () => {
+  let retries = 0;
+  const reason = "Synthetic initialization failure.";
+  const state = {
+    ...context("unknown"),
+    bossPreparationError: reason,
+    retryBossPreparation: () => { retries += 1; },
+  };
+  const ui = await composerFixture(state, locale);
+  try {
+    act(() => ui.textarea().onChange({ target: { value: "Keep this failed negotiation draft." } }));
+    expect(ui.html()).toContain(reason);
+    expect(ui.html()).toContain(locale === "en" ? "Could not check image support." : "画像への対応を確認できませんでした。");
+    expect(ui.html()).not.toContain(locale === "en" ? "Connecting to Boss." : "Boss に接続しています。");
+    expect(ui.retry()).not.toBeNull();
+    expect(ui.retry().props.children).toBe(locale === "en" ? "Retry" : "再試行");
+    expect(ui.retry().props.type).toBe("button");
+    expect(ui.submit().disabled).toBe(true);
+    act(() => ui.retry().props.onClick());
+    expect(retries).toBe(1);
+    expect(ui.textarea().value).toBe("Keep this failed negotiation draft.");
+  } finally { await ui.stop(); }
+});
+
+test("ordinary composer ignores Boss preparation failures and retry callbacks", async () => {
+  let retries = 0;
+  const state = {
+    ...context("unknown", false),
+    bossPreparationError: "Synthetic Boss-only failure.",
+    retryBossPreparation: () => { retries += 1; },
+  };
+  const ui = await composerFixture(state);
+  try {
+    act(() => ui.textarea().onChange({ target: { value: "Ordinary text remains available." } }));
+    expect(ui.html()).not.toContain(state.bossPreparationError);
+    expect(ui.retry()).toBeNull();
+    expect(ui.submit().disabled).toBe(false);
+    expect(retries).toBe(0);
+  } finally { await ui.stop(); }
+});

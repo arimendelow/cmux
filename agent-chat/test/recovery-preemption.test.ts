@@ -1,10 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readLines } from "../adapters/lines";
-import { act, createElement } from "react";
+import { act, createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { composerDraftKey, useSession, type SessionState } from "../src/session";
-import { clientFixture } from "./client-fixture";
+import { SessionContext } from "../src/context";
+import { Composer } from "../src/components/Composer";
+import { ImageAttachmentTray } from "../src/components/ImageAttachments";
+import { clientFixture, findElement } from "./client-fixture";
 
 const appId = "11111111-1111-4111-8111-111111111111";
 const bossId = "boss-1";
@@ -90,6 +94,8 @@ async function harness(options: {
   facts?: ReturnType<typeof snapshot>;
   holdNative?: boolean;
   holdInitialize?: boolean;
+  manualInitialize?: boolean;
+  ordinary?: boolean;
   nativeFailure?: boolean;
   loadFailure?: boolean;
   holdLoad?: boolean;
@@ -170,8 +176,10 @@ async function harness(options: {
       };
       peers.push(entry);
       if (message.method === "initialize") {
-        await initialized.promise;
-        entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
+        if (!options.manualInitialize) {
+          await initialized.promise;
+          entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
+        }
       } else if (message.method === "session/new") {
         entry.finish({
           sessionId: message.params.sessionId,
@@ -193,7 +201,11 @@ async function harness(options: {
     },
   });
   const peer = join(import.meta.dir, "fake-recovery-peer.ts");
-  const ticks = new Inbox<number>();
+  if (options.ordinary) {
+    await symlink(process.execPath, join(root, "bun"));
+    await symlink(peer, join(root, "copilot"));
+  }
+  const ticks = new Inbox<number | { startup: true }>();
   async function launch(port = 0) {
     const address = Promise.withResolvers<string>();
     const child = Bun.spawn([
@@ -206,7 +218,7 @@ async function harness(options: {
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        PATH: process.env.PATH,
+        PATH: options.ordinary ? root : process.env.PATH,
         HOME: root,
         RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
         RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
@@ -216,7 +228,7 @@ async function harness(options: {
         CMUX_SOCKET_CAPABILITY: "synthetic-capability",
         CMUX_AGENT_CHAT_PORT: String(port),
         CMUX_AGENT_CHAT_TOKEN: "test-token",
-        CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+        CMUX_AGENT_CHAT_PRODUCT: options.ordinary ? "" : "ouro-workbench-v1",
         CMUX_AGENT_CHAT_BOSS_AGENT: "example-boss",
         CMUX_AGENT_CHAT_SESSION_DIR: partition,
         CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
@@ -233,6 +245,7 @@ async function harness(options: {
       const url = line.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
       if (url) address.resolve(`${url}/test-token`);
       if (line.startsWith("test-clock:")) ticks.push(Number(line.slice(11)));
+      if (line === "test-startup-timeout") ticks.push({ startup: true });
     }, () => address.reject(new Error(errors.join("\n"))));
     return { child, url: await address.promise };
   }
@@ -257,6 +270,12 @@ async function harness(options: {
     root,
     peers,
     native,
+    async expireStartup() {
+      const cursor = ticks.all.length;
+      server.child.stdin.write("startup-timeout\n");
+      await server.child.stdin.flush();
+      await ticks.next((value) => typeof value === "object" && ticks.all.indexOf(value) >= cursor && value.startup);
+    },
     messages,
     send,
     releaseInitialize: initialized.resolve,
@@ -301,10 +320,10 @@ async function harness(options: {
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
-    async assertSameBoss(id = bossId, providerSession = peerSessionId) {
+    async assertSameBoss(id = bossId, providerSession = peerSessionId, allocations = options.fresh ? 1 : 0) {
       const pointer = JSON.parse(await readFile(join(root, "sessions/canonical-boss.json"), "utf8"));
       expect(pointer).toEqual({ version: 1, agent: "example-boss", sessionId: id });
-      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(options.fresh ? 1 : 0);
+      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(allocations);
       expect(peers.all.filter((entry) => entry.message.method === "session/load")
         .every((entry) => entry.message.params.sessionId === providerSession)).toBe(true);
     },
@@ -935,4 +954,284 @@ for (const duplicate of [false, true]) test(`retirement preserves a first prompt
     expect(replayed.session.id).toBe(retired.sessionId);
     expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
   } finally { await h.stop(); }
+});
+
+for (const withImage of [false, true]) test(`lost Stop acknowledgment never restarts an unadmitted ${withImage ? "image" : "text"} prompt`, async () => {
+  const h = await harness({ fresh: true, holdOption: true, facts: snapshot() });
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const delayed: Array<() => void> = [];
+  let holdRetirement = true;
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
+    frames.push({ ...message, connection });
+    if (message.kind === "start-retired" && holdRetirement) {
+      delayed.push(deliver);
+      return true;
+    }
+    return false;
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  const prompt = "Keep this stopped draft.";
+  const attachments = withImage
+    ? [{ id: "stopped-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3 }]
+    : [];
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt, attachments, options: { mode: "plan" } })).toBe(true); });
+    const start = await sent.next((message) => message.op === "start");
+    const option = await h.peers.next((entry) => entry.message.method === "session/set_mode");
+    act(() => state.stop());
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    option.finish({});
+    const retired = await frames.next((message) => message.kind === "start-retired");
+    expect(retired.sessionId).toBeUndefined();
+    expect((await h.boss()).pointer).toBeNull();
+    for (const acknowledge of [false, true]) {
+      holdRetirement = !acknowledge;
+      const outgoingCursor = sent.all.length;
+      const cursor = frames.all.length;
+      await h.restart();
+      const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
+        && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
+      const { connection, ...request } = replay;
+      expect(request).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const result = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.connection === connection && message.kind === "start-retired");
+      expect(result.sessionId).toBeUndefined();
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    }
+    await renders.next((value) => value.phase === "composer");
+    expect(sessionStorage.getItem(composerDraftKey)).toBe(prompt);
+    expect(state.composerAttachments).toEqual(attachments);
+    expect((await h.boss()).pointer).toBeNull();
+
+    const cursor = h.peers.all.length;
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt: "A later request.", options: { mode: "plan" } })).toBe(true); });
+    const laterOption = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "session/set_mode");
+    const pendingId = state.session?.id;
+    for (const deliver of delayed) act(() => { deliver(); deliver(); });
+    expect(state.session?.id).toBe(pendingId);
+    expect(state.phase).toBe("chat");
+    laterOption.finish({});
+    const later = await h.prompt();
+    await renders.next((value) => value.session?.id === later.message.params.sessionId);
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === later.message.params.sessionId);
+    await h.assertSameBoss(later.message.params.sessionId, later.message.params.sessionId, 2);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
+    later.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
+
+test("lost Stop acknowledgment retains an admitted Boss and ignores settled replies during a later turn", async () => {
+  const prompt = "Keep the admitted conversation.";
+  const h = await harness({ fresh: true, replayPrompt: prompt, facts: snapshot() });
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const delayedCreated: Array<() => void> = [];
+  const delayedHistory: Array<() => void> = [];
+  const delayedRetired: Array<() => void> = [];
+  let holdCreation = true;
+  let holdRetirement = true;
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
+    frames.push({ ...message, connection });
+    if (holdCreation && message.kind === "session-created") { delayedCreated.push(deliver); return true; }
+    if (holdCreation && message.kind === "history") { delayedHistory.push(deliver); return true; }
+    if (holdRetirement && message.kind === "start-retired") { delayedRetired.push(deliver); return true; }
+    return false;
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt })).toBe(true); });
+    const start = await sent.next((message) => message.op === "start");
+    const first = await h.prompt();
+    const id = first.message.params.sessionId;
+    await frames.next((message) => message.kind === "history");
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === id);
+    act(() => state.stop());
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    for (const deliver of [...delayedCreated, ...delayedHistory]) act(() => deliver());
+    expect(state.session?.id).not.toBe(id);
+    first.finish({ stopReason: "cancelled" });
+    await frames.next((message) => message.kind === "start-retired");
+    holdCreation = false;
+    for (const acknowledge of [false, true]) {
+      holdRetirement = !acknowledge;
+      const outgoingCursor = sent.all.length;
+      const cursor = frames.all.length;
+      await h.restart();
+      const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
+        && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
+      const { connection, ...request } = replay;
+      expect(request).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const retained = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.connection === connection && message.kind === "start-retired");
+      expect(retained.sessionId).toBe(id);
+      await h.assertSameBoss(id, id);
+    }
+    await renders.next((value) => value.session?.id === id && value.blocks.some((block) => block.kind === "user" && block.text === prompt));
+    const cursor = h.peers.all.length;
+    let accepted: Promise<boolean>;
+    act(() => { accepted = state.reply("A later user turn."); });
+    expect(await accepted).toBe(true);
+    const later = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "session/prompt");
+    await renders.next((value) => value.blocks.some((block) => block.kind === "user" && block.text === "A later user turn."));
+    const blocks = [...state.blocks];
+    const sends = sent.all.length;
+    for (const deliver of [...delayedCreated, ...delayedRetired]) act(() => { deliver(); deliver(); });
+    expect(state.blocks).toEqual(blocks);
+    expect(sent.all).toHaveLength(sends);
+    expect(state.session?.id).toBe(id);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(2);
+    later.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
+
+async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = []) {
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const client = await clientFixture(h.url, (message, _deliver, connection) => {
+    frames.push({ ...message, connection });
+    return false;
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  sessionStorage.setItem(composerDraftKey, "Keep this negotiation draft.");
+  let state: SessionState;
+  let tree: ReactElement;
+  let tray: ReactElement;
+  function Probe() {
+    tree = Composer();
+    tray = ImageAttachmentTray(findElement(tree, (node) => node.type === ImageAttachmentTray).props as any);
+    return null;
+  }
+  function Root() {
+    state = useSession();
+    renders.push(state);
+    return createElement(SessionContext.Provider, { value: { ...state, composerAttachments: attachments } },
+      state.ready && state.phase === "composer" ? createElement(Probe) : null);
+  }
+  await client.render(createElement(Root));
+  return {
+    state: () => state,
+    frames, sent, renders,
+    html: () => renderToStaticMarkup(tree),
+    textarea: () => findElement(tree, (node) => node.type === "textarea").props,
+    tray: () => findElement(tree, (node) => node.type === ImageAttachmentTray).props,
+    submit: () => findElement(tree, (node) => node.props["aria-label"] === "Start").props,
+    retry: () => findElement(tray, (node) => node.type === "button" && node.props.children === "Retry"),
+    stop: client.stop,
+  };
+}
+
+const stagedNegotiationImage = {
+  id: "negotiation-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3,
+};
+
+for (const failure of ["error", "timeout"]) for (const supported of [true, false]) {
+  test(`initial negotiation ${failure} retries to ${supported ? "supported" : "unsupported"} on the same websocket`, async () => {
+    const h = await harness({ fresh: true, manualInitialize: true, clock: failure === "timeout", facts: snapshot() });
+    const ui = await rootComposer(h, [stagedNegotiationImage]);
+    try {
+      const first = await h.peers.next((entry) => entry.message.method === "initialize");
+      expect(ui.textarea().value).toBe("Keep this negotiation draft.");
+      if (failure === "timeout") await h.expireStartup();
+      else first.finish({}, "synthetic negotiation failure");
+      const failed = await ui.frames.next((message) => message.kind === "error" && message.op === "warm-boss");
+      if (failure === "timeout") expect(failed.message).toBe("Request failed: unexpected error");
+      act(() => ui.textarea().onChange({ target: { value: "Keep the edited draft." } }));
+      expect(ui.html()).toContain(failed.message);
+      expect(ui.html()).not.toContain("Connecting to Boss.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.retry()).not.toBeNull();
+      expect(ui.retry().props.type).toBe("button");
+
+      const cursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      const retry = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "initialize");
+      expect(ui.html()).toContain("Connecting to Boss.");
+      expect(ui.html()).not.toContain(failed.message);
+      expect(ui.retry()).toBeNull();
+      expect(ui.textarea().value).toBe("Keep the edited draft.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+
+      retry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: supported } } });
+      await ui.renders.next((value) => value.imageCapability === (supported ? "supported" : "unsupported"));
+      expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+      const warmups = ui.sent.all.filter((message) => message.op === "warm-boss");
+      expect(warmups).toHaveLength(2);
+      expect(new Set(warmups.map((message) => message.connection)).size).toBe(1);
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+      expect((await h.boss()).pointer).toBeNull();
+      expect(ui.textarea().value).toBe("Keep the edited draft.");
+      expect(ui.tray().attachments).toEqual(supported ? [stagedNegotiationImage] : []);
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.retry()).toBeNull();
+      act(() => ui.submit().onClick());
+      const user = await h.prompt();
+      expect(user.message.params.prompt.some((part: any) => part.type === "text" && part.text.includes("Keep the edited draft."))).toBe(true);
+      expect(user.message.params.prompt.some((part: any) => part.type === "image")).toBe(supported);
+      expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(2);
+      user.finish();
+    } finally { await ui.stop(); await h.stop(); }
+  });
+}
+
+test("initial negotiation retry failure keeps its reason and images until another retry succeeds", async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, facts: snapshot() });
+  const ui = await rootComposer(h, [stagedNegotiationImage]);
+  try {
+    let initialize = await h.peers.next((entry) => entry.message.method === "initialize");
+    let previousReason = "";
+    for (const reason of ["synthetic initialization timeout", "synthetic initialization permission failure"]) {
+      const cursor = ui.frames.all.length;
+      initialize.finish({}, reason);
+      const failure = await ui.frames.next((message) => ui.frames.all.indexOf(message) >= cursor && message.kind === "error" && message.op === "warm-boss");
+      act(() => ui.textarea().onChange({ target: { value: "Keep retrying this draft." } }));
+      expect(ui.html()).toContain(failure.message);
+      if (previousReason) expect(ui.html()).not.toContain(previousReason);
+      previousReason = failure.message;
+      expect(ui.html()).not.toContain("Connecting to Boss.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.retry()).not.toBeNull();
+      const peerCursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      initialize = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "initialize");
+    }
+    initialize.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true } } });
+    await ui.renders.next((value) => value.imageCapability === "supported");
+    expect(ui.textarea().value).toBe("Keep retrying this draft.");
+    expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+    expect(ui.submit().disabled).toBe(false);
+    expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+    expect(new Set(ui.sent.all.filter((message) => message.op === "warm-boss").map((message) => message.connection)).size).toBe(1);
+    expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+  } finally { await ui.stop(); await h.stop(); }
+});
+
+test("ordinary root never starts Boss preparation or exposes its retry action", async () => {
+  const h = await harness({ fresh: true, ordinary: true });
+  const ui = await rootComposer(h);
+  try {
+    await ui.renders.next((value) => value.ready && value.providers.some((provider) => provider.id === "copilot" && provider.installed));
+    expect(ui.state().experience).toBeNull();
+    expect(ui.retry()).toBeNull();
+    expect(ui.submit().disabled).toBe(false);
+    expect(ui.html()).not.toContain("Connecting to Boss.");
+    act(() => { (ui.state() as any).retryBossPreparation?.(); ui.state().checkCwd(h.root); });
+    await ui.frames.next((message) => message.kind === "cwd-check");
+    expect(ui.sent.all.filter((message) => message.op === "warm-boss")).toHaveLength(0);
+    expect(h.peers.all).toHaveLength(0);
+  } finally { await ui.stop(); await h.stop(); }
 });

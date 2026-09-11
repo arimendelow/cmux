@@ -1,10 +1,21 @@
-import { act, type ReactNode } from "react";
+import { act, isValidElement, type ReactElement, type ReactNode } from "react";
+
+export function findElement(tree: any, matches: (node: ReactElement<any>) => boolean): ReactElement<any> {
+  if (Array.isArray(tree)) {
+    for (const child of tree) { const found = findElement(child, matches); if (found) return found; }
+  } else if (isValidElement<any>(tree)) {
+    if (matches(tree)) return tree;
+    return findElement([tree.props.children, tree.props.trailing], matches);
+  }
+  return null;
+}
 
 /** Run real React effects and client callbacks without a browser, profile, or DOM renderer. */
 export async function clientFixture(
   url: string,
-  intercept?: (message: any, deliver: () => void) => boolean,
+  intercept?: (message: any, deliver: () => void, connection: number) => boolean,
   locale = "en",
+  onSend?: (message: any, connection: number) => void,
 ) {
   const saved = new Map<string, PropertyDescriptor | undefined>();
   const install = (name: string, value: unknown) => {
@@ -36,8 +47,10 @@ export async function clientFixture(
   });
   Object.assign(document, { defaultView: window });
   const NativeWebSocket = globalThis.WebSocket;
+  let connectionSequence = 0;
   class ClientSocket {
     static OPEN = NativeWebSocket.OPEN;
+    private connection = ++connectionSequence;
     private socket: WebSocket;
     onopen?: (event: Event) => void;
     onclose?: (event: CloseEvent) => void;
@@ -50,11 +63,11 @@ export async function clientFixture(
       this.socket.onerror = (event) => { act(() => this.onerror?.(event)); };
       this.socket.onmessage = (event) => {
         const deliver = () => { act(() => this.onmessage?.(event)); };
-        if (!intercept?.(JSON.parse(String(event.data)), deliver)) deliver();
+        if (!intercept?.(JSON.parse(String(event.data)), deliver, this.connection)) deliver();
       };
     }
     get readyState() { return this.socket.readyState; }
-    send(data: string) { this.socket.send(data); }
+    send(data: string) { onSend?.(JSON.parse(data), this.connection); this.socket.send(data); }
     close() { this.socket.close(); }
   }
   install("document", document);
