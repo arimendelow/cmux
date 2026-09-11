@@ -936,3 +936,138 @@ for (const duplicate of [false, true]) test(`retirement preserves a first prompt
     expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
   } finally { await h.stop(); }
 });
+
+for (const withImage of [false, true]) test(`lost Stop acknowledgment never restarts an unadmitted ${withImage ? "image" : "text"} prompt`, async () => {
+  const h = await harness({ fresh: true, holdOption: true, facts: snapshot() });
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const delayed: Array<() => void> = [];
+  let holdRetirement = true;
+  const client = await clientFixture(h.url, (message, deliver) => {
+    frames.push(message);
+    if (message.kind === "start-retired" && holdRetirement) {
+      delayed.push(deliver);
+      return true;
+    }
+    return false;
+  }, "en", (message) => sent.push(message));
+  const prompt = "Keep this stopped draft.";
+  const attachments = withImage
+    ? [{ id: "stopped-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3 }]
+    : [];
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt, attachments, options: { mode: "plan" } })).toBe(true); });
+    const start = await sent.next((message) => message.op === "start");
+    const option = await h.peers.next((entry) => entry.message.method === "session/set_mode");
+    act(() => state.stop());
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    option.finish({});
+    const retired = await frames.next((message) => message.kind === "start-retired");
+    expect(retired.sessionId).toBeUndefined();
+    expect((await h.boss()).pointer).toBeNull();
+    for (const acknowledge of [false, true]) {
+      holdRetirement = !acknowledge;
+      const outgoingCursor = sent.all.length;
+      const cursor = frames.all.length;
+      await h.restart();
+      const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
+        && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
+      expect(replay).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const result = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "start-retired");
+      expect(result.sessionId).toBeUndefined();
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    }
+    await renders.next((value) => value.phase === "composer");
+    expect(sessionStorage.getItem(composerDraftKey)).toBe(prompt);
+    expect(state.composerAttachments).toEqual(attachments);
+    expect((await h.boss()).pointer).toBeNull();
+
+    const cursor = h.peers.all.length;
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt: "A later request.", options: { mode: "plan" } })).toBe(true); });
+    const laterOption = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "session/set_mode");
+    const pendingId = state.session?.id;
+    for (const deliver of delayed) act(() => { deliver(); deliver(); });
+    expect(state.session?.id).toBe(pendingId);
+    expect(state.phase).toBe("chat");
+    laterOption.finish({});
+    const later = await h.prompt();
+    await renders.next((value) => value.session?.id === later.message.params.sessionId);
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === later.message.params.sessionId);
+    await h.assertSameBoss(later.message.params.sessionId, later.message.params.sessionId);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
+    later.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
+
+test("lost Stop acknowledgment retains an admitted Boss and ignores settled replies during a later turn", async () => {
+  const prompt = "Keep the admitted conversation.";
+  const h = await harness({ fresh: true, replayPrompt: prompt, facts: snapshot() });
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const delayedCreated: Array<() => void> = [];
+  const delayedHistory: Array<() => void> = [];
+  const delayedRetired: Array<() => void> = [];
+  let holdCreation = true;
+  let holdRetirement = true;
+  const client = await clientFixture(h.url, (message, deliver) => {
+    frames.push(message);
+    if (holdCreation && message.kind === "session-created") { delayedCreated.push(deliver); return true; }
+    if (holdCreation && message.kind === "history") { delayedHistory.push(deliver); return true; }
+    if (holdRetirement && message.kind === "start-retired") { delayedRetired.push(deliver); return true; }
+    return false;
+  }, "en", (message) => sent.push(message));
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt })).toBe(true); });
+    const start = await sent.next((message) => message.op === "start");
+    const first = await h.prompt();
+    const id = first.message.params.sessionId;
+    await frames.next((message) => message.kind === "history");
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === id);
+    act(() => state.stop());
+    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    for (const deliver of [...delayedCreated, ...delayedHistory]) act(() => deliver());
+    expect(state.session?.id).not.toBe(id);
+    first.finish({ stopReason: "cancelled" });
+    await frames.next((message) => message.kind === "start-retired");
+    holdCreation = false;
+    for (const acknowledge of [false, true]) {
+      holdRetirement = !acknowledge;
+      const outgoingCursor = sent.all.length;
+      const cursor = frames.all.length;
+      await h.restart();
+      const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
+        && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
+      expect(replay).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const retained = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "start-retired");
+      expect(retained.sessionId).toBe(id);
+      await h.assertSameBoss(id, id);
+    }
+    await renders.next((value) => value.session?.id === id && value.blocks.some((block) => block.kind === "user" && block.text === prompt));
+    const cursor = h.peers.all.length;
+    let accepted: Promise<boolean>;
+    act(() => { accepted = state.reply("A later user turn."); });
+    expect(await accepted).toBe(true);
+    const later = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "session/prompt");
+    await renders.next((value) => value.blocks.some((block) => block.kind === "user" && block.text === "A later user turn."));
+    const blocks = [...state.blocks];
+    const sends = sent.all.length;
+    for (const deliver of [...delayedCreated, ...delayedRetired]) act(() => { deliver(); deliver(); });
+    expect(state.blocks).toEqual(blocks);
+    expect(sent.all).toHaveLength(sends);
+    expect(state.session?.id).toBe(id);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(2);
+    later.finish();
+  } finally { await client.stop(); await h.stop(); }
+});

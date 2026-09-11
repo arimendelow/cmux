@@ -5,6 +5,7 @@ export async function clientFixture(
   url: string,
   intercept?: (message: any, deliver: () => void) => boolean,
   locale = "en",
+  onSend?: (message: any) => void,
 ) {
   const saved = new Map<string, PropertyDescriptor | undefined>();
   const install = (name: string, value: unknown) => {
@@ -54,7 +55,7 @@ export async function clientFixture(
       };
     }
     get readyState() { return this.socket.readyState; }
-    send(data: string) { this.socket.send(data); }
+    send(data: string) { onSend?.(JSON.parse(data)); this.socket.send(data); }
     close() { this.socket.close(); }
   }
   install("document", document);
