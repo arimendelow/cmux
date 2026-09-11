@@ -4,6 +4,7 @@ import { act, type ReactNode } from "react";
 export async function clientFixture(
   url: string,
   intercept?: (message: any, deliver: () => void) => boolean,
+  locale = "en",
 ) {
   const saved = new Map<string, PropertyDescriptor | undefined>();
   const install = (name: string, value: unknown) => {
@@ -60,6 +61,7 @@ export async function clientFixture(
   install("getComputedStyle", () => ({ getPropertyValue: () => "#111111" }));
   install("window", window);
   install("location", location);
+  install("navigator", { language: locale });
   install("history", {
     replaceState: (_state: unknown, _title: string, path: string) => {
       location.href = new URL(path, location).href;

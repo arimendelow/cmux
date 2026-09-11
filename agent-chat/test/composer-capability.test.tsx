@@ -39,8 +39,8 @@ function context(imageCapability: SessionState["imageCapability"], workbench = t
   } as unknown as SessionState;
 }
 
-async function composerFixture(state: SessionState) {
-  const client = await clientFixture("http://example.invalid");
+async function composerFixture(state: SessionState, locale = "en") {
+  const client = await clientFixture("http://example.invalid", undefined, locale);
   localStorage.setItem("agentui.provider", state.defaultProvider);
   localStorage.setItem("agentui.cwd", "/example");
   let tree: ReactElement;
@@ -73,10 +73,16 @@ function fileEvent() {
 }
 
 for (const capability of ["unknown", "unsupported"] as const) {
-  test(`initial Boss ${capability} capability disables picker, drop, and paste without navigating`, async () => {
+  test(`initial Boss ${capability} capability explains its disabled picker before any file input`, async () => {
     const ui = await composerFixture(context(capability));
     try {
-      expect(ui.html()).not.toContain("+ Image");
+      expect(ui.html()).toContain("+ Image");
+      expect(ui.html()).toMatch(/class="attach-image"[^>]*disabled=""/);
+      expect(ui.html()).toMatch(/type="file"[^>]*disabled=""/);
+      expect(ui.html()).toContain('role="status"');
+      expect(ui.html()).toContain(capability === "unknown"
+        ? "Connecting to Boss. Checking image support"
+        : "This runtime did not advertise image support. You can still send text.");
       expect(ui.tray().enabled).toBe(false);
       const dropped = fileEvent();
       await act(async () => ui.drop().onDrop(dropped.event));
@@ -101,7 +107,7 @@ test("initial Boss keeps its draft and staged images while capability is unknown
     expect(ui.textarea().value).toBe("Keep my draft.");
     expect(ui.tray().attachments).toHaveLength(1);
     expect(ui.submit().disabled).toBe(true);
-    expect(ui.html()).not.toContain("+ Image");
+    expect(ui.html()).toMatch(/class="attach-image"[^>]*disabled=""/);
     await ui.render({ ...state, imageCapability: "supported" });
     expect(ui.html()).toContain("+ Image");
     expect(ui.tray().attachments).toHaveLength(1);
@@ -122,7 +128,7 @@ test("a definitive unsupported result releases staged images but keeps the initi
   } finally { await ui.stop(); }
 });
 
-test("initial Boss images remain visible and removable while negotiation is unknown", async () => {
+test("initial Boss images remain removable while unknown, but text waits for a known capability", async () => {
   const state = context("supported");
   let submitted: unknown;
   state.start = (value) => { submitted = value; return true; };
@@ -132,22 +138,72 @@ test("initial Boss images remain visible and removable while negotiation is unkn
     await act(async () => ui.tray().onAdd([fileEvent().image]));
     await ui.render({ ...state, imageCapability: "unknown" });
     expect(ui.html()).toContain('aria-label="Remove example.png"');
-    expect(ui.html()).not.toContain("+ Image");
+    expect(ui.html()).toMatch(/class="attach-image"[^>]*disabled=""/);
     act(() => ui.tray().onRemove(ui.tray().attachments[0].id));
+    expect(ui.tray().attachments).toEqual([]);
+    expect(ui.submit().disabled).toBe(true);
+    act(() => ui.submit().onClick());
+    expect(submitted).toBeUndefined();
+    await ui.render({ ...state, imageCapability: "unsupported" });
     expect(ui.submit().disabled).toBe(false);
     act(() => ui.submit().onClick());
     expect(submitted).toMatchObject({ prompt: "Keep the text.", attachments: [] });
   } finally { await ui.stop(); }
 });
 
-test("ordinary non-Boss composers retain their existing static image behavior", async () => {
-  const ui = await composerFixture(context("unknown", false));
+test("unknown initial Boss capability blocks text-only click and Enter without losing the draft", async () => {
+  const state = context("unknown");
+  const submitted: unknown[] = [];
+  state.start = (value) => { submitted.push(value); return true; };
+  const ui = await composerFixture(state);
   try {
-    expect(ui.html()).toContain("+ Image");
-    const dropped = fileEvent();
-    await act(async () => ui.drop().onDrop(dropped.event));
-    expect(dropped.prevented()).toBe(true);
-    expect(ui.tray().attachments).toHaveLength(1);
+    act(() => ui.textarea().onChange({ target: { value: "Keep this draft until connected." } }));
+    expect(ui.submit().disabled).toBe(true);
+    act(() => ui.submit().onClick());
+    act(() => ui.textarea().onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} }));
+    expect(submitted).toEqual([]);
+    expect(ui.textarea().value).toBe("Keep this draft until connected.");
+    await ui.render({ ...state, imageCapability: "supported" });
     expect(ui.submit().disabled).toBe(false);
+    expect(ui.html()).not.toMatch(/class="attach-image"[^>]*disabled=""/);
+    act(() => ui.submit().onClick());
+    expect(submitted).toEqual([expect.objectContaining({
+    prompt: "Keep this draft until connected.", attachments: [],
+    })]);
   } finally { await ui.stop(); }
 });
+
+for (const capability of ["unknown", "unsupported"] as const) {
+  test(`initial Boss explains ${capability} image capability in Japanese`, async () => {
+    const ui = await composerFixture(context(capability), "ja-JP");
+    try {
+      expect(ui.html()).toContain("+ 画像");
+      expect(ui.html()).toContain(capability === "unknown"
+        ? "Boss に接続しています。画像への対応を確認しています。"
+        : "このランタイムは画像への対応を通知していません。テキストは送信できます。");
+      expect(ui.html()).toMatch(/class="attach-image"[^>]*disabled=""/);
+      act(() => ui.textarea().onChange({ target: { value: "この下書きを保持します。" } }));
+      expect(ui.submit().disabled).toBe(capability === "unknown");
+    } finally { await ui.stop(); }
+  });
+}
+
+for (const capability of ["unknown", "unsupported", "supported"] as const) {
+  test(`ordinary non-Boss composers keep text and images available with ${capability} negotiation`, async () => {
+    const state = context(capability, false);
+    const ui = await composerFixture(state);
+    try {
+      act(() => ui.textarea().onChange({ target: { value: "Ordinary text stays available." } }));
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.html()).toContain("+ Image");
+      expect(ui.html()).not.toMatch(/class="attach-image"[^>]*disabled=""/);
+      expect(ui.html()).not.toContain("Checking image support");
+      expect(ui.html()).not.toContain("did not advertise image support");
+      const dropped = fileEvent();
+      await act(async () => ui.drop().onDrop(dropped.event));
+      expect(dropped.prevented()).toBe(true);
+      expect(ui.tray().attachments).toHaveLength(1);
+      expect(ui.submit().disabled).toBe(false);
+    } finally { await ui.stop(); }
+  });
+}
