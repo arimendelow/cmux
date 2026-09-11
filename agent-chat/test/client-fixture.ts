@@ -1,4 +1,14 @@
-import { act, type ReactNode } from "react";
+import { act, isValidElement, type ReactElement, type ReactNode } from "react";
+
+export function findElement(tree: any, matches: (node: ReactElement<any>) => boolean): ReactElement<any> {
+  if (Array.isArray(tree)) {
+    for (const child of tree) { const found = findElement(child, matches); if (found) return found; }
+  } else if (isValidElement<any>(tree)) {
+    if (matches(tree)) return tree;
+    return findElement([tree.props.children, tree.props.trailing], matches);
+  }
+  return null;
+}
 
 /** Run real React effects and client callbacks without a browser, profile, or DOM renderer. */
 export async function clientFixture(

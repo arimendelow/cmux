@@ -1,10 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readLines } from "../adapters/lines";
-import { act, createElement } from "react";
+import { act, createElement, type ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { composerDraftKey, useSession, type SessionState } from "../src/session";
-import { clientFixture } from "./client-fixture";
+import { SessionContext } from "../src/context";
+import { Composer } from "../src/components/Composer";
+import { ImageAttachmentTray } from "../src/components/ImageAttachments";
+import { clientFixture, findElement } from "./client-fixture";
 
 const appId = "11111111-1111-4111-8111-111111111111";
 const bossId = "boss-1";
@@ -90,6 +94,8 @@ async function harness(options: {
   facts?: ReturnType<typeof snapshot>;
   holdNative?: boolean;
   holdInitialize?: boolean;
+  manualInitialize?: boolean;
+  ordinary?: boolean;
   nativeFailure?: boolean;
   loadFailure?: boolean;
   holdLoad?: boolean;
@@ -170,8 +176,10 @@ async function harness(options: {
       };
       peers.push(entry);
       if (message.method === "initialize") {
-        await initialized.promise;
-        entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
+        if (!options.manualInitialize) {
+          await initialized.promise;
+          entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
+        }
       } else if (message.method === "session/new") {
         entry.finish({
           sessionId: message.params.sessionId,
@@ -193,7 +201,11 @@ async function harness(options: {
     },
   });
   const peer = join(import.meta.dir, "fake-recovery-peer.ts");
-  const ticks = new Inbox<number>();
+  if (options.ordinary) {
+    await symlink(process.execPath, join(root, "bun"));
+    await symlink(peer, join(root, "copilot"));
+  }
+  const ticks = new Inbox<number | { startup: true }>();
   async function launch(port = 0) {
     const address = Promise.withResolvers<string>();
     const child = Bun.spawn([
@@ -206,7 +218,7 @@ async function harness(options: {
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        PATH: process.env.PATH,
+        PATH: options.ordinary ? root : process.env.PATH,
         HOME: root,
         RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
         RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
@@ -216,7 +228,7 @@ async function harness(options: {
         CMUX_SOCKET_CAPABILITY: "synthetic-capability",
         CMUX_AGENT_CHAT_PORT: String(port),
         CMUX_AGENT_CHAT_TOKEN: "test-token",
-        CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+        CMUX_AGENT_CHAT_PRODUCT: options.ordinary ? "" : "ouro-workbench-v1",
         CMUX_AGENT_CHAT_BOSS_AGENT: "example-boss",
         CMUX_AGENT_CHAT_SESSION_DIR: partition,
         CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
@@ -233,6 +245,7 @@ async function harness(options: {
       const url = line.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
       if (url) address.resolve(`${url}/test-token`);
       if (line.startsWith("test-clock:")) ticks.push(Number(line.slice(11)));
+      if (line === "test-startup-timeout") ticks.push({ startup: true });
     }, () => address.reject(new Error(errors.join("\n"))));
     return { child, url: await address.promise };
   }
@@ -257,6 +270,12 @@ async function harness(options: {
     root,
     peers,
     native,
+    async expireStartup() {
+      const cursor = ticks.all.length;
+      server.child.stdin.write("startup-timeout\n");
+      await server.child.stdin.flush();
+      await ticks.next((value) => typeof value === "object" && ticks.all.indexOf(value) >= cursor && value.startup);
+    },
     messages,
     send,
     releaseInitialize: initialized.resolve,
@@ -1074,4 +1093,142 @@ test("lost Stop acknowledgment retains an admitted Boss and ignores settled repl
     expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(2);
     later.finish();
   } finally { await client.stop(); await h.stop(); }
+});
+
+async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = []) {
+  const frames = new Inbox<any>();
+  const sent = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  const client = await clientFixture(h.url, (message, _deliver, connection) => {
+    frames.push({ ...message, connection });
+    return false;
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  sessionStorage.setItem(composerDraftKey, "Keep this negotiation draft.");
+  let state: SessionState;
+  let tree: ReactElement;
+  let tray: ReactElement;
+  function Probe() {
+    tree = Composer();
+    tray = ImageAttachmentTray(findElement(tree, (node) => node.type === ImageAttachmentTray).props as any);
+    return null;
+  }
+  function Root() {
+    state = useSession();
+    renders.push(state);
+    return createElement(SessionContext.Provider, { value: { ...state, composerAttachments: attachments } },
+      state.ready && state.phase === "composer" ? createElement(Probe) : null);
+  }
+  await client.render(createElement(Root));
+  return {
+    state: () => state,
+    frames, sent, renders,
+    html: () => renderToStaticMarkup(tree),
+    textarea: () => findElement(tree, (node) => node.type === "textarea").props,
+    tray: () => findElement(tree, (node) => node.type === ImageAttachmentTray).props,
+    submit: () => findElement(tree, (node) => node.props["aria-label"] === "Start").props,
+    retry: () => findElement(tray, (node) => node.type === "button" && node.props.children === "Retry"),
+    stop: client.stop,
+  };
+}
+
+const stagedNegotiationImage = {
+  id: "negotiation-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3,
+};
+
+for (const failure of ["error", "timeout"]) for (const supported of [true, false]) {
+  test(`initial negotiation ${failure} retries to ${supported ? "supported" : "unsupported"} on the same websocket`, async () => {
+    const h = await harness({ fresh: true, manualInitialize: true, clock: failure === "timeout", facts: snapshot() });
+    const ui = await rootComposer(h, [stagedNegotiationImage]);
+    try {
+      const first = await h.peers.next((entry) => entry.message.method === "initialize");
+      expect(ui.textarea().value).toBe("Keep this negotiation draft.");
+      if (failure === "timeout") await h.expireStartup();
+      else first.finish({}, "synthetic negotiation failure");
+      const failed = await ui.frames.next((message) => message.kind === "error" && message.op === "warm-boss");
+      if (failure === "timeout") expect(failed.message).toContain("did not finish ACP startup");
+      act(() => ui.textarea().onChange({ target: { value: "Keep the edited draft." } }));
+      expect(ui.html()).toContain(failed.message);
+      expect(ui.html()).not.toContain("Connecting to Boss.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.retry()).not.toBeNull();
+      expect(ui.retry().props.type).toBe("button");
+
+      const cursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      const retry = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= cursor && entry.message.method === "initialize");
+      expect(ui.html()).toContain("Connecting to Boss.");
+      expect(ui.html()).not.toContain(failed.message);
+      expect(ui.retry()).toBeNull();
+      expect(ui.textarea().value).toBe("Keep the edited draft.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+
+      retry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: supported } } });
+      await ui.renders.next((value) => value.imageCapability === (supported ? "supported" : "unsupported"));
+      expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+      const warmups = ui.sent.all.filter((message) => message.op === "warm-boss");
+      expect(warmups).toHaveLength(2);
+      expect(new Set(warmups.map((message) => message.connection)).size).toBe(1);
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+      expect((await h.boss()).pointer).toBeNull();
+      expect(ui.textarea().value).toBe("Keep the edited draft.");
+      expect(ui.tray().attachments).toEqual(supported ? [stagedNegotiationImage] : []);
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.retry()).toBeNull();
+      act(() => ui.submit().onClick());
+      const user = await h.prompt();
+      expect(user.message.params.prompt.some((part: any) => part.type === "text" && part.text.includes("Keep the edited draft."))).toBe(true);
+      expect(user.message.params.prompt.some((part: any) => part.type === "image")).toBe(supported);
+      expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(2);
+      user.finish();
+    } finally { await ui.stop(); await h.stop(); }
+  });
+}
+
+test("initial negotiation retry failure keeps its reason and images until another retry succeeds", async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, facts: snapshot() });
+  const ui = await rootComposer(h, [stagedNegotiationImage]);
+  try {
+    let initialize = await h.peers.next((entry) => entry.message.method === "initialize");
+    for (const reason of ["first synthetic negotiation failure", "second synthetic negotiation failure"]) {
+      const cursor = ui.frames.all.length;
+      initialize.finish({}, reason);
+      const failure = await ui.frames.next((message) => ui.frames.all.indexOf(message) >= cursor && message.kind === "error" && message.op === "warm-boss");
+      act(() => ui.textarea().onChange({ target: { value: "Keep retrying this draft." } }));
+      expect(ui.html()).toContain(failure.message);
+      expect(ui.html()).not.toContain("Connecting to Boss.");
+      expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.retry()).not.toBeNull();
+      const peerCursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      initialize = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "initialize");
+    }
+    initialize.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true } } });
+    await ui.renders.next((value) => value.imageCapability === "supported");
+    expect(ui.textarea().value).toBe("Keep retrying this draft.");
+    expect(ui.tray().attachments).toEqual([stagedNegotiationImage]);
+    expect(ui.submit().disabled).toBe(false);
+    expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+    expect(new Set(ui.sent.all.filter((message) => message.op === "warm-boss").map((message) => message.connection)).size).toBe(1);
+    expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+  } finally { await ui.stop(); await h.stop(); }
+});
+
+test("ordinary root never starts Boss preparation or exposes its retry action", async () => {
+  const h = await harness({ fresh: true, ordinary: true });
+  const ui = await rootComposer(h);
+  try {
+    await ui.renders.next((value) => value.ready && value.providers.some((provider) => provider.id === "copilot" && provider.installed));
+    expect(ui.state().experience).toBeNull();
+    expect(ui.retry()).toBeNull();
+    expect(ui.submit().disabled).toBe(false);
+    expect(ui.html()).not.toContain("Connecting to Boss.");
+    act(() => { (ui.state() as any).retryBossPreparation?.(); ui.state().checkCwd(h.root); });
+    await ui.frames.next((message) => message.kind === "cwd-check");
+    expect(ui.sent.all.filter((message) => message.op === "warm-boss")).toHaveLength(0);
+    expect(h.peers.all).toHaveLength(0);
+  } finally { await ui.stop(); await h.stop(); }
 });
