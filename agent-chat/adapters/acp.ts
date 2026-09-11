@@ -111,7 +111,7 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
         await turn;
         return;
       }
-      const startingProc = sess.internal.acpStartingProc as AcpState["proc"] | undefined;
+      const startingProc = (sess.internal.acpStartingProc as AcpState["proc"] | undefined) ?? st?.proc;
       if (startingProc?.exitCode === null && !startingProc.killed) {
         sess.internal.acpStartupCancelled = true;
         sess.internal.userStopped = true;
@@ -119,8 +119,8 @@ export function makeAcpAdapter(def: ProviderDef): Adapter {
       }
       await turn;
     },
-    async warmup(sess) {
-      await ensureAcp(sess, def);
+    async warmup(sess, options) {
+      await ensureAcp(sess, def, false, options?.initializeOnly);
     },
     dispose(sess) {
       const st = sess.internal.acp as AcpState | undefined;
@@ -264,11 +264,16 @@ async function ensureAcp(
   sess: SessionCtx,
   def: ProviderDef,
   requiresImageSupport = false,
+  initializeOnly = false,
 ): Promise<AcpState> {
   const existing = sess.internal.acp as AcpState | undefined;
-  if (existing && existing.proc.exitCode === null && !existing.proc.killed) return existing;
+  if (existing && existing.proc.exitCode === null && !existing.proc.killed
+    && (initializeOnly || existing.acpSessionId)) return existing;
   const starting = sess.internal.acpStarting as Promise<AcpState> | undefined;
-  if (starting) return starting;
+  if (starting) {
+    await starting;
+    return ensureAcp(sess, def, requiresImageSupport, initializeOnly);
+  }
 
   const displayName = def.role === "boss" ? "Boss" : def.label;
   sess.emit({
@@ -277,7 +282,7 @@ async function ensureAcp(
     title: `Starting ${displayName}`,
     message: "Connecting to the local ACP session.",
   });
-  const promise = startAcp(sess, def, requiresImageSupport).then((state) => {
+  const promise = startAcp(sess, def, requiresImageSupport, initializeOnly).then((state) => {
     sess.emit({ kind: "connection", state: "ready", title: `${displayName} connected` });
     return state;
   }).catch((error) => {
@@ -333,12 +338,7 @@ export function userFacingAcpReplayText(text: string): string {
   return output.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-async function startAcp(
-  sess: SessionCtx,
-  def: ProviderDef,
-  requiresImageSupport = false,
-): Promise<AcpState> {
-  const spawnModel = effectiveSpawnModel(def, sess.startOptions);
+function spawnAcp(sess: SessionCtx, def: ProviderDef): AcpState {
   const cmd = commandForSession(def, sess.startOptions);
   if (sess.internal.observeOnly === true) cmd.push("--observe-only");
   const autoApprove = typeof sess.startOptions.autoApprove === "boolean" ? sess.startOptions.autoApprove : sess.autoApprove;
@@ -434,6 +434,20 @@ async function startAcp(
     }
   });
   readLines(proc.stderr, () => {});
+  return st;
+}
+
+async function startAcp(
+  sess: SessionCtx,
+  def: ProviderDef,
+  requiresImageSupport = false,
+  initializeOnly = false,
+): Promise<AcpState> {
+  const previous = sess.internal.acp as AcpState | undefined;
+  const st = previous && previous.proc.exitCode === null && !previous.proc.killed
+    ? previous
+    : spawnAcp(sess, def);
+  const { proc, request } = st;
 
   // An agent that starts but never answers initialize/session/new would leave
   // the session stuck in "running" with nothing to cancel; killing the process
@@ -445,16 +459,23 @@ async function startAcp(
     proc.kill();
   }, startupTimeoutMs);
   try {
-    const initializeResult = await request("initialize", {
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        elicitation: { form: {} },
-      },
-    });
-    st.imageCapability = imageCapabilityFromInitialize(initializeResult);
+    if (st !== previous) {
+      const initializeResult = await request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          elicitation: { form: {} },
+        },
+      });
+      st.imageCapability = imageCapabilityFromInitialize(initializeResult);
+    }
     if (requiresImageSupport && st.imageCapability !== "supported") {
       throw new Error(`${def.label} does not support image prompts`);
+    }
+    if (initializeOnly) {
+      sess.internal.acp = st;
+      sess.emit({ kind: "capabilities", image: st.imageCapability });
+      return st;
     }
     const resumeSessionId = typeof sess.internal.acpResumeSessionId === "string"
       ? sess.internal.acpResumeSessionId
@@ -498,7 +519,7 @@ async function startAcp(
     }
     st.acpSessionId = resumed ? resumeSessionId : sessionState.sessionId;
     sess.internal.acpResumeSessionId = st.acpSessionId;
-    ingestAcpOptions(st, sessionState ?? {}, def, spawnModel);
+    ingestAcpOptions(st, sessionState ?? {}, def, effectiveSpawnModel(def, sess.startOptions));
     sess.internal.acp = st;
     if (resumed) {
       const restoredFromDisk = sess.internal.restoredFromDisk === true;

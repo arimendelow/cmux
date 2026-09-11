@@ -24,6 +24,7 @@ export interface BossCandidate {
   autoApprove: boolean;
   startOptions: Record<string, OptionValue>;
   createdAt: number;
+  startRequestId?: string;
   /** Non-null when the record could not be parsed; the file is never removed. */
   loadError: string | null;
   cwdAvailable: boolean;
@@ -154,6 +155,7 @@ function candidateFromRecord(agent: string, id: string, raw: unknown): BossCandi
     autoApprove: record.autoApprove === true,
     startOptions: (record.startOptions ?? {}) as Record<string, OptionValue>,
     createdAt: Number(record.createdAt ?? 0),
+    ...(typeof record.startRequestId === "string" ? { startRequestId: record.startRequestId } : {}),
     loadError: null,
     cwdAvailable: true,
   };

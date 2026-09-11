@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { composerDraftKey, type OptionValue } from "../session";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { composerDraftKey, imageAttachmentAllowed, type OptionValue } from "../session";
 import { useCtx } from "../context";
 import { readStoredProviderOptions, updateStoredProviderOption } from "../options-store";
 import { ArrowUp } from "./icons";
@@ -47,6 +47,7 @@ export function Composer() {
     defaultCwd,
     defaultProvider,
     experience,
+    imageCapability,
     providerOptions,
     providerCommands,
     filesByCwd,
@@ -81,10 +82,21 @@ export function Composer() {
   const options = withLocalValues(baseOptions, startOptions);
   const commandGroups = useMemo(() => withFileTrigger(providerCommands[provider] ?? [], filesByCwd[committedCwd] ?? []), [committedCwd, filesByCwd, provider, providerCommands]);
   const commandMenu = useCommandMenu(prompt, setPrompt, commandGroups, taRef, ctrlJ);
+  const imagesAllowed = capabilities[provider]?.imageAttachments === true
+    && (!experience || imageAttachmentAllowed(imageCapability));
   const imageAttachments = useImageAttachments(
-    capabilities[provider]?.imageAttachments === true,
+    imagesAllowed,
     composerAttachments,
   );
+  const canSubmit = ready
+    && imagePromptCanSubmit(prompt, imageAttachments.attachments.length, imageAttachments.loading)
+    && (imageAttachments.attachments.length === 0 || imagesAllowed);
+  useEffect(() => {
+    if (!experience || imageCapability !== "unsupported") return;
+    imageAttachments.invalidateForUnsupportedProvider(
+      "Staged images were removed because the provider does not support image attachments.",
+    );
+  }, [experience, imageCapability, imageAttachments.invalidateForUnsupportedProvider]);
   const selectProvider = useCallback((nextProvider: string) => {
     if (shouldInvalidateImagesForProviderSwitch(provider, nextProvider)) {
       imageAttachments.invalidateForUnsupportedProvider(
@@ -126,11 +138,7 @@ export function Composer() {
 
   const submit = () => {
     const text = prompt.trim();
-    if (!imagePromptCanSubmit(
-      text,
-      imageAttachments.attachments.length,
-      imageAttachments.loading,
-    ) || !ready) return;
+    if (!canSubmit) return;
     const runCwd = cwd.trim();
     const sent = start({
       provider,
@@ -175,7 +183,7 @@ export function Composer() {
       >
         <ImageAttachmentTray
           attachments={imageAttachments.attachments}
-          enabled={capabilities[provider]?.imageAttachments === true}
+          enabled={imagesAllowed}
           error={imageAttachments.error}
           loading={imageAttachments.loading}
           onAdd={(files) => { void imageAttachments.addFiles(files); }}
@@ -222,11 +230,7 @@ export function Composer() {
               className="send"
               type="button"
               aria-label="Start"
-              disabled={!imagePromptCanSubmit(
-                prompt,
-                imageAttachments.attachments.length,
-                imageAttachments.loading,
-              ) || !ready}
+              disabled={!canSubmit}
               onClick={submit}
             >
               <ArrowUp />

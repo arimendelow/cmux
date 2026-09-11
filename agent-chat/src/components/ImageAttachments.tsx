@@ -294,7 +294,7 @@ export function ImageAttachmentTray({
   loading?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  if (!enabled) {
+  if (!enabled && attachments.length === 0 && !loading) {
     return error
       ? <div className="image-attachment-controls"><span className="image-attachment-error" role="alert">{error}</span></div>
       : null;
@@ -323,26 +323,30 @@ export function ImageAttachmentTray({
         </div>
       ) : null}
       <div className="image-attachment-controls">
-        <button
-          type="button"
-          className="attach-image"
-          disabled={locked}
-          onClick={() => inputRef.current?.click()}
-        >
-          + Image
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          multiple
-          hidden
-          disabled={locked}
-          onChange={(event) => {
-            if (event.target.files) onAdd(event.target.files);
-            event.target.value = "";
-          }}
-        />
+        {enabled ? (
+          <>
+            <button
+              type="button"
+              className="attach-image"
+              disabled={locked}
+              onClick={() => inputRef.current?.click()}
+            >
+              + Image
+            </button>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              multiple
+              hidden
+              disabled={locked}
+              onChange={(event) => {
+                if (event.target.files) onAdd(event.target.files);
+                event.target.value = "";
+              }}
+            />
+          </>
+        ) : null}
         {loading ? <span className="image-attachment-loading" role="status">Loading image…</span> : null}
         {error ? <span className="image-attachment-error" role="alert">{error}</span> : null}
       </div>

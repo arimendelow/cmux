@@ -170,7 +170,7 @@ export interface Adapter {
   ): Promise<void>;
   forkSession?(source: SessionCtx, target: SessionCtx): Promise<void>;
   /** Establish the peer connection without sending a user turn. */
-  warmup?(sess: SessionCtx): Promise<void>;
+  warmup?(sess: SessionCtx, options?: { initializeOnly?: boolean }): Promise<void>;
   capabilities?: ProviderCapabilities;
 }
 

@@ -618,6 +618,7 @@ export function useSession(): SessionState {
             setBoss(bossRef.current);
             setContinuity(h.continuity ?? null);
             if (h.boss?.status === "blocked") setLastError(bossBlockedMessage(h.boss));
+            else if (h.experience) sendRaw({ op: "warm-boss" });
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
@@ -667,6 +668,15 @@ export function useSession(): SessionState {
             if (typeof msg.requestId === "string") {
               retiredStartRequestIdsRef.current.delete(msg.requestId);
             }
+            if (experienceRef.current && typeof msg.sessionId === "string") {
+              retiredSessionIdsRef.current.delete(msg.sessionId);
+              clearPendingStartTimeout();
+              pendingStartRef.current = null;
+              sessionIdRef.current = msg.sessionId;
+              history.replaceState(null, "", appPath("/s/" + msg.sessionId));
+              setLastError("");
+              sendRaw({ op: "subscribe", sessionId: msg.sessionId });
+            }
             break;
           case "send-accepted": {
             const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
@@ -710,6 +720,9 @@ export function useSession(): SessionState {
             bossRef.current = (msg.boss as BossState) ?? null;
             setBoss(bossRef.current);
             if (bossRef.current?.status === "blocked") setLastError(bossBlockedMessage(bossRef.current));
+            break;
+          case "boss-capabilities":
+            if (experienceRef.current && !sessionIdRef.current) setImageCapability(msg.image);
             break;
           case "sessions": {
             if (initialSessionListHandledRef.current) break;
@@ -797,6 +810,7 @@ export function useSession(): SessionState {
             }
             break;
           case "error":
+            if (msg.op === "warm-boss") setLastError(String(msg.message ?? ""));
             if (msg.op === "start") {
               if (
                 typeof msg.requestId === "string"
