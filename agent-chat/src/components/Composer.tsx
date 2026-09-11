@@ -89,6 +89,7 @@ export function Composer() {
     composerAttachments,
   );
   const canSubmit = ready
+    && (!experience || imageCapability !== "unknown")
     && imagePromptCanSubmit(prompt, imageAttachments.attachments.length, imageAttachments.loading)
     && (imageAttachments.attachments.length === 0 || imagesAllowed);
   useEffect(() => {
@@ -184,6 +185,7 @@ export function Composer() {
         <ImageAttachmentTray
           attachments={imageAttachments.attachments}
           enabled={imagesAllowed}
+          capability={experience ? imageCapability : undefined}
           error={imageAttachments.error}
           loading={imageAttachments.loading}
           onAdd={(files) => { void imageAttachments.addFiles(files); }}

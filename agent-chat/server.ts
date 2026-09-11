@@ -632,6 +632,8 @@ function pruneStartRequests() {
 
 function retireStartSession(entry: StartRequest): Promise<string | void> {
   if (entry.retirement) return entry.retirement;
+  entry.cancelled = true;
+  entry.retired = !entry.session || !hasBossRelationship(entry.session);
   const retirement = (async () => {
     let sess = entry.session;
     if (!sess) {
@@ -645,8 +647,8 @@ function retireStartSession(entry: StartRequest): Promise<string | void> {
         }
       }
     }
-    if (hasBossRelationship(sess)) entry.retired = false;
     const retained = await retireSession(sess);
+    if (retained) entry.retired = false;
     entry.retirementCompletedAt = Date.now();
     return retained;
   })();
@@ -660,7 +662,7 @@ function retireStartSession(entry: StartRequest): Promise<string | void> {
 function retireSession(sess: Session): Promise<string | void> {
   const existing = sess.internal.retirementPromise as Promise<string | void> | undefined;
   if (existing) return existing;
-  const retainBoss = hasBossRelationship(sess);
+  let retainBoss = hasBossRelationship(sess);
   if (!retainBoss) sess.internal.retired = true;
   const retirement = (async () => {
     // A replayed startup timeout must not cancel a later user turn.
@@ -669,17 +671,26 @@ function retireSession(sess: Session): Promise<string | void> {
       || (sess.internal.startRequestGeneration !== undefined
         && sess.internal.startRequestGeneration === sess.internal.turnGeneration)
     );
+    let stopping: Promise<void> | undefined;
     if (!retainBoss || startupStillRunning) {
-      const stopping = Promise.resolve(sess.adapter.stop(sess));
-      await (retainBoss ? stopping : stopping.catch(() => {}));
+      stopping = Promise.resolve(sess.adapter.stop(sess));
+      await stopping.catch(() => {});
     }
-    if (retainBoss && sess.internal.admissionPending === true) registerSession(sess);
+    // The first prompt can finish writing while cancellation drains the ACP pipe.
+    retainBoss ||= hasBossRelationship(sess);
+    if (retainBoss) {
+      delete sess.internal.retired;
+      if (sess.internal.admissionPending === true) registerSession(sess);
+    }
     const pendingPersistence = sess.internal.persistencePromise as Promise<void> | undefined;
     await pendingPersistence?.catch((error) => {
       console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
       if (retainBoss) throw error;
     });
-    if (retainBoss) return sess.id;
+    if (retainBoss) {
+      await stopping;
+      return sess.id;
+    }
     await reconcileRetiredCanonicalBoss(sess);
     await sess.invalidatePersistedSession?.();
     sess.adapter.dispose(sess);
@@ -700,8 +711,6 @@ function retireSession(sess: Session): Promise<string | void> {
 async function retireStartRequestById(requestId: string): Promise<string | void> {
   const pending = startRequests.get(requestId);
   if (pending) {
-    pending.cancelled = true;
-    pending.retired = !pending.session || !hasBossRelationship(pending.session);
     return retireStartSession(pending);
   }
   const live = [...sessions.values()].find((session) =>
@@ -1196,7 +1205,6 @@ function hasBossRelationship(sess: Session): boolean {
   return isCanonicalBossSession(sess) && (
     sess.internal.admissionPending !== true
     || Number(sess.internal.turnGeneration ?? 0) > 0
-    || Boolean(sess.internal.persistedProviderSessionId || sess.internal.acpResumeSessionId)
   );
 }
 
@@ -3454,9 +3462,13 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const provider = headless ? "ouro-boss" : String(msg.provider);
       pruneStartRequests();
       const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
+      const canonical = sessions.get(canonicalBossSessionId() ?? "");
+      const replayed = !headless && requestId && canonical?.internal.startRequestId === requestId
+        ? canonical
+        : undefined;
       // A replayed request id is the same start, not a second Boss: a client
       // that reconnects mid-start must re-attach instead of being refused.
-      const bossStartToken = headless || existing ? null : assertBossStartAllowed(provider);
+      const bossStartToken = headless || existing || replayed ? null : assertBossStartAllowed(provider);
       const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
       const adapter = adapters.get(provider);
       if (!adapter) throw new Error(`provider not found: ${provider}`);
@@ -3509,6 +3521,8 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       let startPromise: Promise<Session>;
       if (existing) {
         startPromise = existing.promise;
+      } else if (replayed) {
+        startPromise = Promise.resolve(replayed.adapter.warmup?.(replayed)).then(() => replayed);
       } else if (!headless && requestId) {
         const entry: StartRequest = {
           createdAt: Date.now(),
@@ -3605,7 +3619,7 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
     case "cancel-start": {
       const requestId = String(msg.requestId ?? "");
       const pending = requestId ? startRequests.get(requestId) : undefined;
-      if (msg.retire === true) {
+      if (msg.retire === true || WORKBENCH_EXPERIENCE) {
         void retireStartRequestById(requestId).then((sessionId) => {
           ws.send(JSON.stringify({ kind: "start-retired", requestId, sessionId }));
         }).catch((error) => {

@@ -441,12 +441,7 @@ export function workbenchActionsAllowed(
   return { fork: true, compose: true, delete: true };
 }
 
-/**
- * Image attachment is offered only once the peer has positively advertised it.
- * Text submission is never blocked on negotiation: a peer that dies resets the
- * capability to `unknown`, and blocking send there would leave a Workbench with
- * no new/reset action unable to revive its own Boss.
- */
+/** Images require positive capability. Established conversations keep text recovery available while reconnecting; initial Workbench input waits for negotiation. */
 export function imageAttachmentAllowed(capability: ImagePromptCapability): boolean {
   return capability === "supported";
 }
@@ -665,6 +660,9 @@ export function useSession(): SessionState {
             setPhase("chat");
             break;
           case "start-retired":
+            if (experienceRef.current && !msg.sessionId && pendingStartRef.current?.requestId === msg.requestId) {
+              failPendingStart("");
+            }
             if (typeof msg.requestId === "string") {
               retiredStartRequestIdsRef.current.delete(msg.requestId);
             }

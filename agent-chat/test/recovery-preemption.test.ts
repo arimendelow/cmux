@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readLines } from "../adapters/lines";
 import { act, createElement } from "react";
-import { useSession, type SessionState } from "../src/session";
+import { composerDraftKey, useSession, type SessionState } from "../src/session";
 import { clientFixture } from "./client-fixture";
 
 const appId = "11111111-1111-4111-8111-111111111111";
@@ -92,10 +92,16 @@ async function harness(options: {
   holdInitialize?: boolean;
   nativeFailure?: boolean;
   loadFailure?: boolean;
+  holdLoad?: boolean;
   warm?: boolean;
   fresh?: boolean;
   imageSupport?: boolean;
   startRequestId?: string;
+  optionFailure?: boolean;
+  holdOption?: boolean;
+  holdPromptInput?: boolean;
+  replayPrompt?: string;
+  clock?: boolean;
 } = {}) {
   const scratch = join(import.meta.dir, "../scratch");
   await mkdir(scratch, { recursive: true });
@@ -148,7 +154,14 @@ async function harness(options: {
       const entry: PeerRequest = {
         message,
         finish(result = { stopReason: "end_turn" }, error) {
-          response.resolve(Response.json(message.id === undefined ? [] : [{
+          const replay = message.method === "session/load" && !error && options.replayPrompt ? [{
+            jsonrpc: "2.0", method: "session/update",
+            params: {
+              sessionId: message.params.sessionId,
+              update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: options.replayPrompt } },
+            },
+          }] : [];
+          response.resolve(Response.json(message.id === undefined ? [] : [...replay, {
             jsonrpc: "2.0",
             id: message.id,
             ...(error ? { error: { code: -32000, message: error } } : { result }),
@@ -160,53 +173,80 @@ async function harness(options: {
         await initialized.promise;
         entry.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: options.imageSupport !== false } } });
       } else if (message.method === "session/new") {
-        entry.finish({ sessionId: message.params.sessionId });
+        entry.finish({
+          sessionId: message.params.sessionId,
+          ...((options.optionFailure || options.holdOption) ? {
+            modes: {
+              currentModeId: "build",
+              availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }],
+            },
+          } : {}),
+        });
       } else if (message.method === "session/load") {
-        entry.finish({}, options.loadFailure ? "synthetic saved-session failure" : undefined);
-      } else if (message.method !== "session/prompt") {
+        if (!options.holdLoad) entry.finish({}, options.loadFailure ? "synthetic saved-session failure" : undefined);
+      } else if (message.method === "session/set_mode") {
+        if (!options.holdOption) entry.finish({}, options.optionFailure ? "synthetic initial option failure" : undefined);
+      } else if (!["session/prompt", "test/prompt-input"].includes(message.method)) {
         entry.finish({});
       }
       return response.promise;
     },
   });
-  const address = Promise.withResolvers<string>();
   const peer = join(import.meta.dir, "fake-recovery-peer.ts");
-  const child = Bun.spawn([process.execPath, "server.ts"], {
-    cwd: join(import.meta.dir, ".."),
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      PATH: process.env.PATH,
-      HOME: root,
-      RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
-      CMUX_AGENT_CHAT_OURO_COMMAND: peer,
-      CMUX_BUNDLED_CLI_PATH: peer,
-      CMUX_SOCKET_PATH: join(root, "native.sock"),
-      CMUX_SOCKET_CAPABILITY: "synthetic-capability",
-      CMUX_AGENT_CHAT_PORT: "0",
-      CMUX_AGENT_CHAT_TOKEN: "test-token",
-      CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
-      CMUX_AGENT_CHAT_BOSS_AGENT: "example-boss",
-      CMUX_AGENT_CHAT_SESSION_DIR: partition,
-      CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
-      CMUX_AGENT_UI_CWD: root,
-      CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
-      CMUX_WORKBENCH_APP_INSTANCE_ID: appId,
-      CMUX_WORKBENCH_APP_STARTED_AT: "2026-01-01T00:00:00Z",
-      CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN: "1",
-    },
-  });
-  const errors: string[] = [];
-  void readLines(child.stderr, (line) => errors.push(line));
-  void readLines(child.stdout, (line) => {
-    const url = line.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
-    if (url) address.resolve(`${url}/test-token`);
-  }, () => address.reject(new Error(errors.join("\n"))));
-  const url = await address.promise;
+  const ticks = new Inbox<number>();
+  async function launch(port = 0) {
+    const address = Promise.withResolvers<string>();
+    const child = Bun.spawn([
+      process.execPath,
+      ...(options.clock ? ["--preload", join(import.meta.dir, "fake-clock.ts")] : []),
+      "server.ts",
+    ], {
+      cwd: join(import.meta.dir, ".."),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        PATH: process.env.PATH,
+        HOME: root,
+        RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
+        RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
+        CMUX_AGENT_CHAT_OURO_COMMAND: peer,
+        CMUX_BUNDLED_CLI_PATH: peer,
+        CMUX_SOCKET_PATH: join(root, "native.sock"),
+        CMUX_SOCKET_CAPABILITY: "synthetic-capability",
+        CMUX_AGENT_CHAT_PORT: String(port),
+        CMUX_AGENT_CHAT_TOKEN: "test-token",
+        CMUX_AGENT_CHAT_PRODUCT: "ouro-workbench-v1",
+        CMUX_AGENT_CHAT_BOSS_AGENT: "example-boss",
+        CMUX_AGENT_CHAT_SESSION_DIR: partition,
+        CMUX_AGENT_CHAT_ALLOWED_ROOTS: root,
+        CMUX_AGENT_UI_CWD: root,
+        CMUX_AGENT_MODELS_URL: "http://127.0.0.1:1",
+        CMUX_WORKBENCH_APP_INSTANCE_ID: appId,
+        CMUX_WORKBENCH_APP_STARTED_AT: "2026-01-01T00:00:00Z",
+        CMUX_WORKBENCH_PREVIOUS_EXIT_CLEAN: "1",
+      },
+    });
+    const errors: string[] = [];
+    void readLines(child.stderr, (line) => errors.push(line));
+    void readLines(child.stdout, (line) => {
+      const url = line.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
+      if (url) address.resolve(`${url}/test-token`);
+      if (line.startsWith("test-clock:")) ticks.push(Number(line.slice(11)));
+    }, () => address.reject(new Error(errors.join("\n"))));
+    return { child, url: await address.promise };
+  }
+  let server = await launch();
+  const url = server.url;
   const messages = new Inbox<any>();
-  const socket = new WebSocket(`${url.replace("http:", "ws:")}/ws`);
-  socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
-  await messages.next((message) => message.kind === "hello");
+  async function connect() {
+    const cursor = messages.all.length;
+    const socket = new WebSocket(`${url.replace("http:", "ws:")}/ws`);
+    socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
+    await messages.next((message) => message.kind === "hello" && messages.all.indexOf(message) >= cursor);
+    return socket;
+  }
+  let socket = await connect();
   const send = (message: unknown) => socket.send(JSON.stringify(message));
   if (!options.fresh) {
     send({ op: "subscribe", sessionId: bossId });
@@ -239,13 +279,25 @@ async function harness(options: {
       await messages.next((message) => message.kind === "cwd-check");
     },
     async boss() { return (await fetch(`${url}/api/boss`)).json() as Promise<any>; },
+    async restart() {
+      socket.close();
+      server.child.kill();
+      await server.child.exited;
+      server = await launch(Number(new URL(url).port));
+      socket = await connect();
+    },
+    async setClock(value: number) {
+      server.child.stdin.write(`${value}\n`);
+      await server.child.stdin.flush();
+      await ticks.next((tick) => tick === value);
+    },
     async stop() {
       initialized.resolve();
       nativeReady.resolve();
       for (const entry of peers.all) entry.finish({ stopReason: "cancelled" });
       socket.close();
-      child.kill();
-      await child.exited;
+      server.child.kill();
+      await server.child.exited;
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
@@ -682,4 +734,205 @@ test("duplicate fresh-root warmups and input during initialize share one Boss pe
     await h.assertSameBoss(user.message.params.sessionId, user.message.params.sessionId);
     user.finish();
   } finally { await client.stop(); await h.stop(); }
+});
+
+test("initial option failure after session/new cleans the unadmitted REST Boss and permits retry", async () => {
+  const h = await harness({ fresh: true, optionFailure: true });
+  try {
+    const failed = await fetch(`${h.url}/api/sessions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "ouro-boss", cwd: h.root, prompt: "Unadmitted request.", options: { mode: "plan" } }),
+    });
+    expect(failed.status).toBe(400);
+    const allocated = h.peers.all.find((entry) => entry.message.method === "session/new")!;
+    const option = h.peers.all.find((entry) => entry.message.method === "session/set_mode")!;
+    expect(option.message.params).toEqual({ sessionId: allocated.message.params.sessionId, modeId: "plan" });
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    expect(await (await fetch(`${h.url}/api/sessions`)).json()).toEqual([]);
+    expect((await h.boss()).pointer).toBeNull();
+    expect(await Bun.file(join(h.root, "sessions/example-boss", `${allocated.message.params.sessionId}.json`)).exists()).toBe(false);
+
+    const retry = await fetch(`${h.url}/api/sessions`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "ouro-boss", cwd: h.root, prompt: "Admit this request." }),
+    });
+    expect(retry.status).toBe(200);
+    const admitted = await retry.json() as { id: string };
+    const user = await h.prompt();
+    expect(user.message.params.sessionId).toBe(admitted.id);
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === admitted.id);
+    expect((await h.boss()).pointer.sessionId).toBe(admitted.id);
+    user.finish();
+  } finally { await h.stop(); }
+});
+
+for (const cancellation of ["timeout", "Stop"]) for (const withImage of [false, true]) {
+  test(`client ${cancellation} after session/new preserves the unadmitted ${withImage ? "image" : "text"} draft without a Boss`, async () => {
+    const h = await harness({ fresh: true, holdOption: true, facts: snapshot() });
+    const frames = new Inbox<any>();
+    const renders = new Inbox<SessionState>();
+    const client = await clientFixture(h.url, (message) => { frames.push(message); return false; });
+    const prompt = "Keep this unsubmitted draft.";
+    const attachments = withImage
+      ? [{ id: "image-1", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3 }]
+      : [];
+    let state: SessionState;
+    function Root() { state = useSession(); renders.push(state); return null; }
+    try {
+      await client.render(createElement(Root));
+      await renders.next((value) => value.ready);
+      act(() => {
+        expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt, attachments, options: { mode: "plan" } })).toBe(true);
+      });
+      const option = await h.peers.next((entry) => entry.message.method === "session/set_mode");
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+      if (cancellation === "timeout") await client.expireStartTimeout();
+      else act(() => state.stop());
+      await h.peers.next((entry) => entry.message.method === "session/cancel");
+      option.finish({});
+      const retired = await frames.next((message) => ["start-retired", "session-created"].includes(message.kind));
+      expect(retired.kind).toBe("start-retired");
+      expect(retired.sessionId).toBeUndefined();
+      expect(state.phase).toBe("composer");
+      expect(state.session).toBeNull();
+      expect(sessionStorage.getItem(composerDraftKey)).toBe(prompt);
+      expect(state.composerAttachments).toEqual(attachments);
+      expect(await (await fetch(`${h.url}/api/sessions`)).json()).toEqual([]);
+      expect((await h.boss()).pointer).toBeNull();
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    } finally { await client.stop(); await h.stop(); }
+  });
+}
+
+test("an unacknowledged client start replays after sidecar restart into the same Boss history", async () => {
+  const prompt = "Keep this admitted request.";
+  const h = await harness({ fresh: true, holdLoad: true, replayPrompt: prompt, facts: snapshot() });
+  const frames = new Inbox<any>();
+  const renders = new Inbox<SessionState>();
+  let holdAcknowledgment = true;
+  const client = await clientFixture(h.url, (message) => {
+    frames.push(message);
+    return holdAcknowledgment && ["session-created", "history"].includes(message.kind);
+  });
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await renders.next((value) => value.ready);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt })).toBe(true); });
+    const first = await h.prompt();
+    const created = await frames.next((message) => message.kind === "session-created");
+    await frames.next((message) => message.kind === "history");
+    const id = created.session.id;
+    expect(state.session?.id).not.toBe(id);
+    first.finish();
+    await frames.next((message) => message.kind === "session-status" && message.status === "idle");
+    await h.assertSameBoss(id, id);
+    for (const acknowledge of [false, true]) {
+      const cursor = frames.all.length;
+      const peerCursor = h.peers.all.length;
+      holdAcknowledgment = !acknowledge;
+      await h.restart();
+      const load = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "session/load");
+      expect(load.message.params.sessionId).toBe(id);
+      expect(frames.all.slice(cursor).some((message) => message.kind === "history")).toBe(false);
+      load.finish({});
+      const replayed = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.requestId === created.requestId && ["session-created", "error"].includes(message.kind));
+      expect(replayed.kind).toBe("session-created");
+      expect(replayed.session.id).toBe(id);
+      const history = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "history");
+      expect(history.events.filter((event: any) => event.kind === "user")).toEqual([{ kind: "user", text: prompt }]);
+      if (acknowledge) {
+        await renders.next((value) => value.session?.id === id && value.blocks.some((block) => block.kind === "user" && block.text === prompt));
+      } else {
+        expect(state.session?.id).not.toBe(id);
+      }
+      // An idle retirement receipt also waits for the restored record's pending write.
+      const retirementCursor = h.messages.all.length;
+      h.send({ op: "cancel-start", requestId: created.requestId, retire: true });
+      const retained = await h.messages.next((message) => h.messages.all.indexOf(message) >= retirementCursor && message.kind === "start-retired");
+      expect(retained.sessionId).toBe(id);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
+      await h.assertSameBoss(id, id);
+    }
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/load")).toHaveLength(2);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(0);
+  } finally { await client.stop(); await h.stop(); }
+});
+
+test("start replay crosses the 60s cache expiry without replacing Boss or interrupting a later turn", async () => {
+  const h = await harness({ fresh: true, clock: true, facts: snapshot() });
+  const start = { op: "start", requestId: "original-start", provider: "ouro-boss", cwd: h.root, prompt: "Original request." };
+  try {
+    await h.setClock(1_000);
+    h.send(start);
+    const first = await h.prompt();
+    const created = await h.messages.next((message) => message.kind === "session-created");
+    const id = created.session.id;
+    first.finish();
+    await h.messages.next((message) => message.kind === "session-status" && message.status === "idle");
+    await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === id);
+    for (const now of [61_000, 61_001]) {
+      await h.setClock(now);
+      const cursor = h.messages.all.length;
+      h.send(start);
+      const replayed = await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor
+        && message.requestId === start.requestId && ["session-created", "error"].includes(message.kind));
+      expect(replayed.kind).toBe("session-created");
+      expect(replayed.session.id).toBe(id);
+      const history = await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor && message.kind === "history");
+      expect(history.events).toContainEqual({ kind: "user", text: "Original request." });
+      if (now === 61_000) {
+        h.send({ op: "send", requestId: "later-user", sessionId: id, prompt: "Keep this later turn running." });
+        await h.prompt(1);
+        await h.messages.next((message) => message.kind === "send-accepted" && message.requestId === "later-user");
+      } else {
+        expect(history.events).toContainEqual({ kind: "user", text: "Keep this later turn running." });
+      }
+    }
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(2);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(0);
+    await h.assertSameBoss(id, id);
+    (await h.prompt(1)).finish();
+  } finally { await h.stop(); }
+});
+
+for (const duplicate of [false, true]) test(`retirement preserves a first prompt whose blocked pipe write admits during cancellation${duplicate ? " with a duplicate retirement" : ""}`, async () => {
+  const h = await harness({ fresh: true, holdPromptInput: true, facts: snapshot() });
+  const start = {
+    op: "start", requestId: "writing-start", provider: "ouro-boss", cwd: h.root,
+    prompt: "synthetic ".repeat(256 * 1024),
+  };
+  try {
+    h.send(start);
+    const blocked = await h.peers.next((entry) => entry.message.method === "test/prompt-input");
+    expect(blocked.message.params.prefix).toContain('"method":"session/prompt"');
+    expect(h.messages.all.some((message) => message.kind === "session-created")).toBe(false);
+    h.send({ op: "cancel-start", requestId: start.requestId, retire: true });
+    h.send({ op: "check-cwd", cwd: h.root });
+    await h.messages.next((message) => message.kind === "cwd-check");
+    blocked.finish();
+    const first = await h.prompt();
+    const cancelling = await h.peers.next((entry) => entry.message.method === "session/cancel");
+    if (duplicate) {
+      // createStart also cancels after admission; its write proves admission happened.
+      await h.peers.next((entry) => entry.message.method === "session/cancel" && h.peers.all.indexOf(entry) > h.peers.all.indexOf(cancelling));
+      const cursor = h.messages.all.length;
+      h.send({ op: "cancel-start", requestId: start.requestId, retire: true });
+      h.send({ op: "check-cwd", cwd: h.root });
+      await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor && message.kind === "cwd-check");
+    }
+    first.finish({ stopReason: "cancelled" });
+    const retired = await h.messages.next((message) => message.kind === "start-retired");
+    expect(retired.sessionId).toBe(first.message.params.sessionId);
+    await h.assertSameBoss(retired.sessionId, retired.sessionId);
+    const cursor = h.messages.all.length;
+    h.send(start);
+    const replayed = await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor
+      && message.kind === "session-created" && message.requestId === start.requestId);
+    expect(replayed.session.id).toBe(retired.sessionId);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
+  } finally { await h.stop(); }
 });
