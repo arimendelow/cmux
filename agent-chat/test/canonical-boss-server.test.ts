@@ -51,6 +51,9 @@ async function shim(root: string): Promise<string> {
   const ouro = join(bin, "ouro");
   await Bun.write(ouro, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\" \"$@\"\n");
   await chmod(ouro, 0o755);
+  const ordinary = join(bin, "copilot");
+  await Bun.write(ordinary, "#!/bin/sh\nexec \"$BUN_BIN\" \"$FAKE_ACP_SCRIPT\" \"$@\"\n");
+  await chmod(ordinary, 0o755);
   return bin;
 }
 
@@ -480,7 +483,7 @@ test("a replayed start request re-attaches instead of being refused as a second 
   }
 }, 60_000);
 
-test("retiring a started Boss clears its pointer and permits a clean replacement", async () => {
+test("retiring an admitted Boss preserves its pointer and refuses replacement", async () => {
   const root = await tempRoot("boss-retire-");
   const work = join(root, "work");
   await mkdir(work, { recursive: true });
@@ -520,7 +523,9 @@ test("retiring a started Boss clears its pointer and permits a clean replacement
       client.messages.find((message) =>
         message.kind === "start-retired"
         && message.requestId === "retired-start"));
-    expect(await readdir(join(root, "sessions"))).not.toContain("canonical-boss.json");
+    expect(JSON.parse(await readFile(pointerPath, "utf8")).sessionId).toBe(created.session.id);
+    expect(JSON.parse(await readFile(join(root, "sessions", "slugger", `${created.session.id}.json`), "utf8")).id)
+      .toBe(created.session.id);
 
     client.send({
       op: "start",
@@ -529,16 +534,41 @@ test("retiring a started Boss clears its pointer and permits a clean replacement
       cwd: work,
       prompt: "replacement",
     });
-    const replacement = await client.waitFor("replacement created", () =>
+    const replacement = await client.waitFor("replacement refused", () =>
       client.messages.find((message) =>
-        message.kind === "session-created"
+        message.kind === "error"
+        && message.op === "start"
         && message.requestId === "replacement-start"));
-    expect(replacement.session.id).not.toBe(created.session.id);
+    expect(replacement.message).toContain("Boss already exists");
     client.close();
   } finally {
     await server.stop();
     await rm(root, { recursive: true, force: true });
   }
+}, 60_000);
+
+test("retiring a non-Boss start still removes its record and permits replacement", async () => {
+  const root = await tempRoot("ordinary-retire-");
+  const work = join(root, "work");
+  await mkdir(work, { recursive: true });
+  const server = await startServer(root, { CMUX_AGENT_CHAT_PRODUCT: "" });
+  try {
+    const client = await connect(server.port);
+    client.send({ op: "start", requestId: "ordinary-start", provider: "copilot", cwd: work, prompt: "hello" });
+    const created = await client.waitFor("ordinary created", () =>
+      client.messages.find((message) => message.kind === "session-created"));
+    client.send({ op: "cancel-start", requestId: "ordinary-start", retire: true });
+    await client.waitFor("ordinary retired", () =>
+      client.messages.find((message) => message.kind === "start-retired"));
+    expect(await readdir(join(root, "sessions", "slugger"))).not.toContain(`${created.session.id}.json`);
+    const sessions = await (await fetch(`http://127.0.0.1:${server.port}/boss-token/api/sessions`)).json();
+    expect(sessions).toEqual([]);
+    client.send({ op: "start", requestId: "ordinary-replacement", provider: "copilot", cwd: work, prompt: "replacement" });
+    const replacement = await client.waitFor("ordinary replacement", () =>
+      client.messages.find((message) => message.kind === "session-created" && message.requestId === "ordinary-replacement"));
+    expect(replacement.session.id).not.toBe(created.session.id);
+    client.close();
+  } finally { await server.stop(); await rm(root, { recursive: true, force: true }); }
 }, 60_000);
 
 test("repair refuses a foreign-agent target and loads the session it repoints to", async () => {

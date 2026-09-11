@@ -16,7 +16,7 @@ import type {
 import { claudeAdapter } from "./adapters/claude";
 import { codexAdapter } from "./adapters/codex";
 import { piAdapter } from "./adapters/pi";
-import { makeAcpAdapter } from "./adapters/acp";
+import { imageCapabilityOf, makeAcpAdapter } from "./adapters/acp";
 import {
   deletePersistedSession,
   readPersistedSessions,
@@ -572,6 +572,7 @@ interface WsData {
 }
 
 const sessions = new Map<string, Session>();
+let preparedBoss: Session | null = null;
 const allSockets = new Set<Bun.ServerWebSocket<WsData>>();
 let fileTheme = resolveGhosttyTheme();
 let cmuxThemeOverride: GhosttyTheme | null = null;
@@ -583,7 +584,7 @@ interface StartRequest {
   session?: Session;
   settledAt?: number;
   retired?: boolean;
-  retirement?: Promise<void>;
+  retirement?: Promise<string | void>;
   retirementCompletedAt?: number;
 }
 const startRequests = new Map<string, StartRequest>();
@@ -629,7 +630,7 @@ function pruneStartRequests() {
   }
 }
 
-function retireStartSession(entry: StartRequest): Promise<void> {
+function retireStartSession(entry: StartRequest): Promise<string | void> {
   if (entry.retirement) return entry.retirement;
   const retirement = (async () => {
     let sess = entry.session;
@@ -644,8 +645,10 @@ function retireStartSession(entry: StartRequest): Promise<void> {
         }
       }
     }
-    await retireSession(sess);
+    if (hasBossRelationship(sess)) entry.retired = false;
+    const retained = await retireSession(sess);
     entry.retirementCompletedAt = Date.now();
+    return retained;
   })();
   entry.retirement = retirement;
   void retirement.catch(() => {
@@ -654,16 +657,29 @@ function retireStartSession(entry: StartRequest): Promise<void> {
   return entry.retirement;
 }
 
-function retireSession(sess: Session): Promise<void> {
-  const existing = sess.internal.retirementPromise as Promise<void> | undefined;
+function retireSession(sess: Session): Promise<string | void> {
+  const existing = sess.internal.retirementPromise as Promise<string | void> | undefined;
   if (existing) return existing;
-  sess.internal.retired = true;
+  const retainBoss = hasBossRelationship(sess);
+  if (!retainBoss) sess.internal.retired = true;
   const retirement = (async () => {
-    await Promise.resolve(sess.adapter.stop(sess)).catch(() => {});
+    // A replayed startup timeout must not cancel a later user turn.
+    const startupStillRunning = sess.status === "running" && (
+      sess.internal.admissionPending === true
+      || (sess.internal.startRequestGeneration !== undefined
+        && sess.internal.startRequestGeneration === sess.internal.turnGeneration)
+    );
+    if (!retainBoss || startupStillRunning) {
+      const stopping = Promise.resolve(sess.adapter.stop(sess));
+      await (retainBoss ? stopping : stopping.catch(() => {}));
+    }
+    if (retainBoss && sess.internal.admissionPending === true) registerSession(sess);
     const pendingPersistence = sess.internal.persistencePromise as Promise<void> | undefined;
     await pendingPersistence?.catch((error) => {
       console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
+      if (retainBoss) throw error;
     });
+    if (retainBoss) return sess.id;
     await reconcileRetiredCanonicalBoss(sess);
     await sess.invalidatePersistedSession?.();
     sess.adapter.dispose(sess);
@@ -681,20 +697,18 @@ function retireSession(sess: Session): Promise<void> {
   return retirement;
 }
 
-async function retireStartRequestById(requestId: string): Promise<void> {
+async function retireStartRequestById(requestId: string): Promise<string | void> {
   const pending = startRequests.get(requestId);
   if (pending) {
     pending.cancelled = true;
-    pending.retired = true;
-    await retireStartSession(pending);
-    return;
+    pending.retired = !pending.session || !hasBossRelationship(pending.session);
+    return retireStartSession(pending);
   }
   const live = [...sessions.values()].find((session) =>
     session.internal.startRequestId === requestId
   );
   if (live) {
-    await retireSession(live);
-    return;
+    return retireSession(live);
   }
   if (!SESSION_DIR) return;
   const persisted = await readPersistedSessions(SESSION_DIR);
@@ -703,6 +717,11 @@ async function retireStartRequestById(requestId: string): Promise<void> {
   }
   for (const record of persisted.records) {
     if (record.startRequestId === requestId) {
+      if (WORKBENCH_EXPERIENCE && providerDefinitionRole(record.provider) === "boss") {
+        const boss = sessions.get(record.id);
+        if (boss) return retireSession(boss);
+        throw new BossGuardError("the canonical Boss cannot be deleted");
+      }
       await deletePersistedSession(SESSION_DIR, record.id);
     }
   }
@@ -768,20 +787,8 @@ class BossGuardError extends Error {
   recoveryError?: WorkbenchRestoreReceipt["error"];
 }
 
-// The pointer is written asynchronously after the peer reports its session id,
-// so a synchronous reservation closes the race where two concurrent opens each
-// pass the "no canonical Boss yet" check. The reservation names its session as
-// soon as one exists and is released when that session goes away, so a peer
-// that never reports a session id cannot wedge Boss creation for the process.
+// Reserve before validation or ACP startup; release on failure, temporary retirement, or canonical adoption, never merely because admission is still pending.
 let bossStartReservation: { token: string; sessionId: string | null } | null = null;
-
-function bossReservationIsLive(): boolean {
-  if (!bossStartReservation) return false;
-  if (bossStartReservation.sessionId === null) return true;
-  if (sessions.has(bossStartReservation.sessionId)) return true;
-  bossStartReservation = null;
-  return false;
-}
 
 function claimBossStartReservation(sessionId: string) {
   if (bossStartReservation && bossStartReservation.sessionId === null) {
@@ -807,7 +814,7 @@ function assertBossStartAllowed(provider: string): string | null {
       `Boss recovery is blocked (${bossClientState.reason}): ${bossClientState.detail}`,
     );
   }
-  if (canonicalBossSessionId() || bossReservationIsLive()) throw new BossGuardError("Boss already exists");
+  if (canonicalBossSessionId() || bossStartReservation) throw new BossGuardError("Boss already exists");
   const token = crypto.randomUUID();
   bossStartReservation = { token, sessionId: null };
   return token;
@@ -929,6 +936,18 @@ function createSession(
 ): Session {
   const adapter = adapters.get(provider);
   if (!adapter) throw new Error(`unknown provider: ${provider}`);
+  if (!restored && !headless && preparedBoss?.provider === provider) {
+    const sess = preparedBoss;
+    preparedBoss = null;
+    Object.assign(sess, {
+      cwd, autoApprove, title, startOptions,
+      seedOptions: optionCatalog.get(provider)?.options,
+      createdAt: Date.now(),
+    });
+    if (startRequestId) sess.internal.startRequestId = startRequestId;
+    if (register) registerSession(sess);
+    return sess;
+  }
   const id = restored?.id ?? crypto.randomUUID().slice(0, 8);
   const sess: Session = {
     id,
@@ -1173,6 +1192,14 @@ function isCanonicalBossSession(sess: Session): boolean {
     || (!sess.headless && providerDefinitionRole(sess.provider) === "boss");
 }
 
+function hasBossRelationship(sess: Session): boolean {
+  return isCanonicalBossSession(sess) && (
+    sess.internal.admissionPending !== true
+    || Number(sess.internal.turnGeneration ?? 0) > 0
+    || Boolean(sess.internal.persistedProviderSessionId || sess.internal.acpResumeSessionId)
+  );
+}
+
 interface BossRecovery {
   receipt: WorkbenchRestoreReceipt;
   inputObserved: boolean;
@@ -1374,6 +1401,7 @@ async function loadCanonicalBossSession(
         id: session.id,
         createdAt: session.createdAt,
         providerSessionId: session.providerSessionId,
+        startRequestId: session.startRequestId,
       },
     );
     return { ok: true };
@@ -1494,6 +1522,10 @@ function capSessionEvents(sess: Session) {
 }
 
 function broadcastSessionEvent(sess: Session, evt: AgentEvent) {
+  if (sess === preparedBoss && evt.kind === "capabilities") {
+    const payload = JSON.stringify({ kind: "boss-capabilities", image: evt.image });
+    for (const ws of allSockets) ws.send(payload);
+  }
   const payload = JSON.stringify({ kind: "event", sessionId: sess.id, evt });
   for (const ws of sess.sockets) ws.send(payload);
 }
@@ -1764,6 +1796,9 @@ async function sendPrompt(
   const generation = Number(sess.internal.turnGeneration ?? 0) + 1;
   const onAdmitted = () => {
     sess.internal.turnGeneration = generation;
+    if (sess.internal.admissionPending === true && sess.internal.startRequestId) {
+      sess.internal.startRequestGeneration = generation;
+    }
     beginAttributionTurn(sess, generation);
     const baselines = turnBaselines(sess);
     const baseline = captureDirtyBaseline(sess.cwd, TURN_BASELINE_TIMEOUT_MS).catch((err) => ({
@@ -3233,10 +3268,11 @@ async function startServer() {
         const start = resolveSessionStart(provider, body.autoApprove);
         const cwd = await assertCwd(requestedCwd);
         const options = applyAutoApproveDefaults(provider, start.autoApprove, parseOptions(body.options));
-        sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options));
+        sess = createSession(provider, cwd, start.autoApprove, start.title, await sanitizeStartOptions(provider, cwd, options), undefined, false, false);
         if (bossStartToken) claimBossStartReservation(sess.id);
         refreshSession(sess);
         if (prompt) await sendPrompt(sess, prompt);
+        registerSession(sess);
       } catch (err) {
         if (sess) await retireSession(sess).catch(() => {});
         if (bossStartToken) releaseBossStartReservation(bossStartToken);
@@ -3534,7 +3570,24 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       // sending a user turn so the client learns image support before input.
       const sessionId = canonicalBossSessionId();
       const sess = sessionId ? sessions.get(sessionId) : undefined;
-      if (!sess) return;
+      if (!sess) {
+        if (!WORKBENCH_EXPERIENCE || bossClientState.status !== "none" || bossStartReservation) return;
+        const cwd = await assertCwd(process.env.CMUX_AGENT_UI_CWD ?? DEFAULT_CWD);
+        if (canonicalBossSessionId() || bossStartReservation) return;
+        const start = resolveSessionStart(DEFAULT_PROVIDER, undefined);
+        // Initialize one peer, but defer session/new until the user's cwd and options are known.
+        const prepared = preparedBoss ??= createSession(DEFAULT_PROVIDER, cwd, start.autoApprove, start.title, {}, undefined, false, false);
+        Promise.resolve(prepared.adapter.warmup?.(prepared, { initializeOnly: true })).then(() => {
+          ws.send(JSON.stringify({ kind: "boss-capabilities", image: imageCapabilityOf(prepared) }));
+        }).catch((err) => {
+          if (preparedBoss === prepared) {
+            prepared.adapter.dispose(prepared);
+            preparedBoss = null;
+          }
+          sendWsErrorDetails(ws, "warm-boss", err);
+        });
+        break;
+      }
       subscribe(ws, sess);
       startWorkbenchRestore(sess);
       Promise.resolve(sess.adapter.warmup?.(sess)).catch((err) => {
@@ -3553,8 +3606,8 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const requestId = String(msg.requestId ?? "");
       const pending = requestId ? startRequests.get(requestId) : undefined;
       if (msg.retire === true) {
-        void retireStartRequestById(requestId).then(() => {
-          ws.send(JSON.stringify({ kind: "start-retired", requestId }));
+        void retireStartRequestById(requestId).then((sessionId) => {
+          ws.send(JSON.stringify({ kind: "start-retired", requestId, sessionId }));
         }).catch((error) => {
           sendWsErrorDetails(ws, "cancel-start", error, { requestId });
         });
@@ -3765,6 +3818,7 @@ function subscribe(ws: Bun.ServerWebSocket<WsData>, sess: Session) {
 }
 
 function shutdown() {
+  preparedBoss?.adapter.dispose(preparedBoss);
   for (const sess of sessions.values()) {
     (sess.internal.workbenchRecovery as BossRecovery | undefined)?.stopWatching?.();
     sess.adapter.dispose(sess);
