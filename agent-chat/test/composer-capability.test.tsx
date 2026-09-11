@@ -1,9 +1,11 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SessionContext } from "../src/context";
 import { Composer } from "../src/components/Composer";
 import { ImageAttachmentTray } from "../src/components/ImageAttachments";
+import { StatusRow } from "../src/components/StatusRow";
+import { ShortcutOverlay } from "../src/hooks/useKeymap";
 import type { SessionState } from "../src/session";
 import { clientFixture, findElement as element } from "./client-fixture";
 
@@ -29,10 +31,11 @@ function context(imageCapability: SessionState["imageCapability"], workbench = t
   } as unknown as SessionState;
 }
 
-async function composerFixture(state: SessionState, locale = "en") {
+async function composerFixture(state: SessionState, locale = "en", setup?: () => void) {
   const client = await clientFixture("http://example.invalid", undefined, locale);
   localStorage.setItem("agentui.provider", state.defaultProvider);
   localStorage.setItem("agentui.cwd", "/example");
+  setup?.();
   let tree: ReactElement;
   let tray: ReactElement;
   // Keep the component's real hooks and returned event handlers; no DOM nodes are mounted.
@@ -53,6 +56,8 @@ async function composerFixture(state: SessionState, locale = "en") {
     drop: () => element(tree, (node) => node.props.id === "composer-card").props,
     submit: () => element(tree, (node) => node.props["aria-label"] === "Start").props,
     retry: () => element(tray, (node) => node.type === "button" && ["Retry", "再試行"].includes(node.props.children)),
+    row: () => element(tree, (node) => node.type === StatusRow).props,
+    shortcuts: () => element(tree, (node) => node.type === ShortcutOverlay),
     stop: client.stop,
   };
 }
@@ -242,5 +247,145 @@ test("ordinary composer ignores Boss preparation failures and retry callbacks", 
     expect(ui.retry()).toBeNull();
     expect(ui.submit().disabled).toBe(false);
     expect(retries).toBe(0);
+  } finally { await ui.stop(); }
+});
+
+const clientGlobals = new Map<string, PropertyDescriptor | undefined>();
+beforeAll(() => {
+  for (const [name, value] of Object.entries({
+    WebSocket: class { static OPEN = 1; constructor() { throw new Error("Composer must not open a socket"); } },
+    fetch: () => { throw new Error("Composer must not fetch"); },
+    HTMLElement: class {},
+    requestAnimationFrame: (callback: FrameRequestCallback) => { callback(0); return 0; },
+  })) {
+    clientGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+});
+afterAll(() => {
+  for (const [name, descriptor] of clientGlobals) {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else Reflect.deleteProperty(globalThis, name);
+  }
+});
+
+test("composer retains a rejected start, trims the submitted text and cwd, and clears only accepted images", async () => {
+  const state = { ...context("supported", false), lastError: "Prior error", ready: false };
+  const submissions: unknown[] = [];
+  let cleared = 0;
+  let accept = false;
+  state.clearError = () => { cleared += 1; };
+  state.start = (value) => { submissions.push(value); return accept; };
+  const ui = await composerFixture(state);
+  try {
+    act(() => ui.textarea().onChange({ target: { value: "  Inspect this  " } }));
+    expect(cleared).toBe(1);
+    act(() => ui.submit().onClick());
+    expect(submissions).toEqual([]);
+    await ui.render({ ...state, ready: true });
+    act(() => ui.row().onCwdChange("  /work  "));
+    await act(async () => ui.tray().onAdd([fileEvent().image]));
+    const attachments = [...ui.tray().attachments];
+    act(() => ui.submit().onClick());
+    expect(submissions).toEqual([{ provider: state.defaultProvider, cwd: "/work", prompt: "Inspect this", options: {}, attachments }]);
+    expect(ui.tray().attachments).toEqual(attachments);
+    expect(ui.textarea().value).toBe("  Inspect this  ");
+    accept = true;
+    act(() => ui.submit().onClick());
+    expect(ui.tray().attachments).toEqual([]);
+    expect(localStorage.getItem("agentui.provider")).toBe(state.defaultProvider);
+    expect(localStorage.getItem("agentui.cwd")).toBe("/work");
+  } finally { await ui.stop(); }
+});
+
+test("composer restores stored draft and model options, commits cwd, and invalidates images on provider changes", async () => {
+  const model = { id: "model", label: "Model", kind: "select" as const, value: "a", choices: [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }] };
+  const effort = { id: "effort", label: "Effort", role: "effort" as const, kind: "select" as const, value: "low", choices: [{ value: "low", label: "Low" }, { value: "high", label: "High" }] };
+  const state = context("supported", false);
+  state.providers = [...state.providers, { id: "other", label: "Other", installed: true }, { id: "unlisted", label: "Unlisted", installed: true }];
+  state.capabilities.other = { options: [model, effort], triggers: [], imageAttachments: false };
+  state.providerOptions[state.defaultProvider] = [model, effort];
+  const submissions: unknown[] = [];
+  state.start = (value) => { submissions.push(value); return true; };
+  const ui = await composerFixture(state, "en", () => {
+    sessionStorage.setItem("agentui.draft", "Restored draft");
+    localStorage.setItem(`agentui.opts.${state.defaultProvider}`, JSON.stringify({ model: "a", effort: "high", stale: true }));
+  });
+  try {
+    expect(ui.textarea().value).toBe("Restored draft");
+    expect(sessionStorage.getItem("agentui.draft")).toBeNull();
+    expect(ui.row().options.find((o) => o.id === "effort").value).toBe("high");
+    act(() => ui.row().onChange("effort", "low"));
+    expect(ui.row().options.find((o) => o.id === "effort").value).toBe("low");
+    act(() => ui.row().onCwdCommit("  "));
+    expect(localStorage.getItem("agentui.cwd")).toBe("/example");
+    act(() => ui.row().onCwdCommit(" /committed "));
+    expect(localStorage.getItem("agentui.cwd")).toBe("/committed");
+    await act(async () => ui.tray().onAdd([fileEvent().image]));
+    act(() => ui.row().onProviderModelChange("other", "b"));
+    expect(ui.tray().attachments).toEqual([]);
+    expect(ui.tray().error).toContain("provider changed");
+    expect(ui.row().provider).toBe("other");
+    expect(ui.row().options.find((o) => o.id === "model").value).toBe("b");
+    act(() => ui.row().onProviderModelChange("other", "a"));
+    expect(ui.row().options.find((o) => o.id === "model").value).toBe("a");
+    act(() => ui.submit().onClick());
+    expect(submissions.at(-1)).toMatchObject({ provider: "other", prompt: "Restored draft", options: { model: "a" }, attachments: [] });
+    act(() => ui.row().onProviderModelChange("unlisted", "missing"));
+    act(() => ui.submit().onClick());
+    expect(submissions.at(-1)).toMatchObject({ provider: "unlisted", options: {} });
+  } finally { await ui.stop(); }
+});
+
+test("composer keyboard accepts command-menu choices, keeps newline input, and exposes shortcut help", async () => {
+  const state = context("supported", false);
+  state.providerCommands[state.defaultProvider] = [{ trigger: "/", commands: [{ name: "review", description: "Review this change" }] }];
+  let starts = 0;
+  state.start = () => { starts += 1; return true; };
+  const ui = await composerFixture(state);
+  const event = (key: string, extra: Record<string, unknown> = {}) => {
+    const value = { key, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {}, ...extra };
+    return { ...value, nativeEvent: value };
+  };
+  try {
+    act(() => ui.textarea().onChange({ target: { value: "/rev" } }));
+    act(() => ui.textarea().onKeyDown(event("Enter")));
+    expect(ui.textarea().value).toBe("/review ");
+    expect(starts).toBe(0);
+    act(() => ui.textarea().onKeyDown(event("j", { ctrlKey: true })));
+    expect(ui.textarea().value).toBe("/review \n");
+    act(() => ui.textarea().onKeyDown(event("Enter", { shiftKey: true })));
+    expect(starts).toBe(0);
+    act(() => ui.textarea().onKeyDown(event("x")));
+    expect(starts).toBe(0);
+    act(() => ui.textarea().onKeyDown(event("Enter")));
+    expect(starts).toBe(1);
+    const help = Object.assign(new Event("keydown", { cancelable: true }), event("/", { ctrlKey: true }));
+    act(() => window.dispatchEvent(help));
+    expect(ui.shortcuts()).not.toBeNull();
+    act(() => ui.shortcuts().props.onClose());
+    expect(ui.shortcuts()).toBeNull();
+    const model = Object.assign(new Event("keydown", { cancelable: true }), event("P", { ctrlKey: true, shiftKey: true }));
+    act(() => window.dispatchEvent(model));
+    expect(ui.row().openOptionId).toBe("modelPicker");
+  } finally { await ui.stop(); }
+});
+
+test("a fresh composer chooses defaults without a stored provider or draft and has no sendable empty prompt", async () => {
+  const state = context("supported", false);
+  const ui = await composerFixture(state, "en", () => {
+    localStorage.removeItem("agentui.provider");
+    localStorage.removeItem("agentui.cwd");
+  });
+  try {
+    expect(ui.row().provider).toBe(state.defaultProvider);
+    expect(ui.row().cwd).toBe("/example");
+    expect(ui.textarea().value).toBe("");
+    expect(ui.submit().disabled).toBe(true);
+    await act(async () => ui.tray().onAdd([fileEvent().image]));
+    expect(ui.submit().disabled).toBe(false);
+    const dropped = fileEvent();
+    act(() => ui.drop().onDragEnter(dropped.event));
+    expect(ui.drop().className).toBe("image-drop-active");
   } finally { await ui.stop(); }
 });
