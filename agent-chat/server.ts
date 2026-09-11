@@ -645,8 +645,8 @@ function retireStartSession(entry: StartRequest): Promise<string | void> {
         }
       }
     }
-    if (hasBossRelationship(sess)) entry.retired = false;
     const retained = await retireSession(sess);
+    if (retained) entry.retired = false;
     entry.retirementCompletedAt = Date.now();
     return retained;
   })();
@@ -660,7 +660,7 @@ function retireStartSession(entry: StartRequest): Promise<string | void> {
 function retireSession(sess: Session): Promise<string | void> {
   const existing = sess.internal.retirementPromise as Promise<string | void> | undefined;
   if (existing) return existing;
-  const retainBoss = hasBossRelationship(sess);
+  let retainBoss = hasBossRelationship(sess);
   if (!retainBoss) sess.internal.retired = true;
   const retirement = (async () => {
     // A replayed startup timeout must not cancel a later user turn.
@@ -669,17 +669,26 @@ function retireSession(sess: Session): Promise<string | void> {
       || (sess.internal.startRequestGeneration !== undefined
         && sess.internal.startRequestGeneration === sess.internal.turnGeneration)
     );
+    let stopping: Promise<void> | undefined;
     if (!retainBoss || startupStillRunning) {
-      const stopping = Promise.resolve(sess.adapter.stop(sess));
-      await (retainBoss ? stopping : stopping.catch(() => {}));
+      stopping = Promise.resolve(sess.adapter.stop(sess));
+      await stopping.catch(() => {});
     }
-    if (retainBoss && sess.internal.admissionPending === true) registerSession(sess);
+    // The first prompt can finish writing while cancellation drains the ACP pipe.
+    retainBoss ||= hasBossRelationship(sess);
+    if (retainBoss) {
+      delete sess.internal.retired;
+      if (sess.internal.admissionPending === true) registerSession(sess);
+    }
     const pendingPersistence = sess.internal.persistencePromise as Promise<void> | undefined;
     await pendingPersistence?.catch((error) => {
       console.error(`[agent-chat] pending persistence failed before retirement ${sess.id}`, error);
       if (retainBoss) throw error;
     });
-    if (retainBoss) return sess.id;
+    if (retainBoss) {
+      await stopping;
+      return sess.id;
+    }
     await reconcileRetiredCanonicalBoss(sess);
     await sess.invalidatePersistedSession?.();
     sess.adapter.dispose(sess);
