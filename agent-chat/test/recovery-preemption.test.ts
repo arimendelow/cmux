@@ -1259,14 +1259,16 @@ test("lost Stop acknowledgment retains an admitted Boss and ignores settled repl
   } finally { await client.stop(); await h.stop(); }
 });
 
-async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = []) {
+async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = [], locale = "en") {
   const frames = new Inbox<any>();
   const sent = new Inbox<any>();
   const renders = new Inbox<SessionState>();
-  const client = await clientFixture(h.url, (message, _deliver, connection) => {
+  let repeatUnknown: (() => void) | undefined;
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
     frames.push({ ...message, connection });
+    if (message.kind === "boss-capabilities" && message.image === "unknown") repeatUnknown = deliver;
     return false;
-  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  }, locale, (message, connection) => sent.push({ ...message, connection }));
   sessionStorage.setItem(composerDraftKey, "Keep this negotiation draft.");
   let state: SessionState;
   let tree: ReactElement;
@@ -1290,7 +1292,16 @@ async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments:
     textarea: () => findElement(tree, (node) => node.type === "textarea").props,
     tray: () => findElement(tree, (node) => node.type === ImageAttachmentTray).props,
     submit: () => findElement(tree, (node) => node.props["aria-label"] === "Start").props,
-    retry: () => findElement(tray, (node) => node.type === "button" && node.props.children === "Retry"),
+    retry: () => findElement(tray, (node) => node.type === "button" && ["Retry", "再試行"].includes(node.props.children)),
+    repeatUnknown() {
+      if (!repeatUnknown) throw new Error("no received unknown capability packet to replay");
+      repeatUnknown();
+    },
+    async barrier() {
+      const cursor = frames.all.length;
+      act(() => state.checkCwd(h.root));
+      await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "cwd-check");
+    },
     stop: client.stop,
   };
 }
@@ -1298,6 +1309,103 @@ async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments:
 const stagedNegotiationImage = {
   id: "negotiation-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3,
 };
+
+for (const [initial, replacement, locale] of [
+  ["supported", "supported", "en"],
+  ["supported", "unsupported", "en"],
+  ["unsupported", "supported", "en"],
+  ["unsupported", "unsupported", "en"],
+  ["supported", "supported", "ja-JP"],
+] as const) test(`prepared Boss peer exit recovers ${initial} to ${replacement} twice in ${locale}`, async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, facts: snapshot() });
+  const ui = await rootComposer(h, [stagedNegotiationImage], locale);
+  const connecting = locale === "ja-JP" ? "Boss に接続しています。" : "Connecting to Boss.";
+  const lost = locale === "ja-JP" ? "Boss との接続が失われました。" : "The Boss connection was lost.";
+  let expectedImages = initial === "supported" ? [stagedNegotiationImage] : [];
+  try {
+    const first = await h.peers.next((entry) => entry.message.method === "initialize");
+    expect(ui.state().imageCapability).toBe("unknown");
+    expect(ui.state().bossPreparationError).toBe("");
+    expect(ui.html()).toContain(connecting);
+    expect(ui.retry()).toBeNull();
+    expect(ui.submit().disabled).toBe(true);
+    first.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: initial === "supported" } } });
+    await ui.renders.next((value) => value.imageCapability === initial);
+    await ui.barrier();
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      const peer = (await h.processes()).filter((child) => child.role === "acp").at(-1)!;
+      expect(peer.ppid).toBe(h.pid);
+      expect(Number.isSafeInteger(peer.pid) && peer.pid > 1).toBe(true);
+      expect(processExists(peer.pid)).toBe(true);
+      const frameCursor = ui.frames.all.length;
+      process.kill(peer.pid, "SIGTERM");
+      expect(await remainingProcesses([peer.pid])).toEqual([]);
+      await ui.frames.next((message) => ui.frames.all.indexOf(message) >= frameCursor
+        && message.kind === "boss-capabilities" && message.image === "unknown");
+      expect(ui.state().imageCapability).toBe("unknown");
+      expect(ui.html()).toContain(lost);
+      expect(ui.html()).not.toContain(connecting);
+      expect(ui.retry()).not.toBeNull();
+      expect(ui.retry().props.type).toBe("button");
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+
+      const draft = `Keep the draft after peer exit ${cycle + 1}.`;
+      act(() => {
+        ui.textarea().onChange({ target: { value: draft } });
+        ui.submit().onClick();
+        ui.textarea().onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+      });
+      ui.repeatUnknown();
+      await ui.barrier();
+      expect(ui.html()).toContain(lost);
+      expect(ui.textarea().value).toBe(draft);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      expect(ui.sent.all.filter((message) => message.op === "start")).toHaveLength(0);
+      expect(ui.sent.all.filter((message) => message.op === "warm-boss")).toHaveLength(cycle + 1);
+
+      const peerCursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      const initialize = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "initialize");
+      expect(ui.state().imageCapability).toBe("unknown");
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).toContain(connecting);
+      expect(ui.retry()).toBeNull();
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      ui.repeatUnknown();
+      await ui.barrier();
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).toContain(connecting);
+      expect(ui.retry()).toBeNull();
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+
+      const renderCursor = ui.renders.all.length;
+      initialize.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: replacement === "supported" } } });
+      await ui.renders.next((value) => ui.renders.all.indexOf(value) >= renderCursor && value.imageCapability === replacement);
+      await ui.barrier();
+      if (replacement === "unsupported") expectedImages = [];
+      expect(ui.textarea().value).toBe(draft);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.retry()).toBeNull();
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).not.toContain(lost);
+      expect(ui.html()).not.toContain(connecting);
+    }
+    expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+    const warmups = ui.sent.all.filter((message) => message.op === "warm-boss");
+    expect(warmups).toHaveLength(3);
+    expect(new Set(warmups.map((message) => message.connection)).size).toBe(1);
+    expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(3);
+    expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+    expect((await h.boss()).pointer).toBeNull();
+    expect(ui.state().session).toBeNull();
+  } finally { await ui.stop(); await h.stop(); }
+});
 
 for (const failure of ["error", "timeout"]) for (const supported of [true, false]) {
   test(`initial negotiation ${failure} retries to ${supported ? "supported" : "unsupported"} on the same websocket`, async () => {
