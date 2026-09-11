@@ -764,8 +764,8 @@ test("initial option failure after session/new cleans the unadmitted REST Boss a
   } finally { await h.stop(); }
 });
 
-for (const withImage of [false, true]) {
-  test(`client timeout after session/new preserves the unadmitted ${withImage ? "image" : "text"} draft without a Boss`, async () => {
+for (const cancellation of ["timeout", "Stop"]) for (const withImage of [false, true]) {
+  test(`client ${cancellation} after session/new preserves the unadmitted ${withImage ? "image" : "text"} draft without a Boss`, async () => {
     const h = await harness({ fresh: true, holdOption: true, facts: snapshot() });
     const frames = new Inbox<any>();
     const renders = new Inbox<SessionState>();
@@ -785,10 +785,12 @@ for (const withImage of [false, true]) {
       const option = await h.peers.next((entry) => entry.message.method === "session/set_mode");
       expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
       expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
-      await client.expireStartTimeout();
+      if (cancellation === "timeout") await client.expireStartTimeout();
+      else act(() => state.stop());
       await h.peers.next((entry) => entry.message.method === "session/cancel");
       option.finish({});
-      const retired = await frames.next((message) => message.kind === "start-retired");
+      const retired = await frames.next((message) => ["start-retired", "session-created"].includes(message.kind));
+      expect(retired.kind).toBe("start-retired");
       expect(retired.sessionId).toBeUndefined();
       expect(state.phase).toBe("composer");
       expect(state.session).toBeNull();
