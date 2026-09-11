@@ -246,6 +246,14 @@ test("real key listeners cycle options, toggle plan and fast mode, close help, a
     await render({ options: [select("model", "missing")] });
     dispatch(key("M", { ctrlKey: true, shiftKey: true }));
     expect(changes.at(-1)).toEqual(["model", "a"]);
+    const incompleteModes: SessionOption[] = JSON.parse('[{"id":"mode","label":"Mode","kind":"select","value":"plan","choices":[{"value":"plan","label":"Plan"},null]}]');
+    await render({ options: incompleteModes });
+    expect(renderToStaticMarkup(<StatusRow provider="demo" providers={[{ id: "demo", label: "Demo" }]} allProviderOptions={{ demo: incompleteModes }} onProviderModelChange={() => {}} cwd="/work" options={incompleteModes} onChange={() => {}} openOptionId={null} setOpenOptionId={() => {}} />)).toContain("Plan");
+    const beforeIncompleteChoice = [...changes];
+    const incompleteChoice = key("Tab", { shiftKey: true });
+    dispatch(incompleteChoice);
+    expect(incompleteChoice.defaultPrevented).toBe(true);
+    expect(changes).toEqual(beforeIncompleteChoice);
   } finally { await client.stop(); }
   const detached = key("Escape");
   target.dispatchEvent(detached);
