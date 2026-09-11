@@ -550,13 +550,13 @@ export function useSession(): SessionState {
     clearPendingStartTimeout();
     pendingStartTimeoutRef.current = window.setTimeout(() => {
       const pending = pendingStartRef.current;
+      failPendingStart("Failed to start agent: request timed out");
       if (pending) {
         const ws = wsRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ op: "cancel-start", requestId: pending.requestId, retire: true }));
         }
       }
-      failPendingStart("Failed to start agent: request timed out");
     }, providerStartTimeoutMs(providersRef.current, provider));
   }, [clearPendingStartTimeout, failPendingStart]);
 
@@ -592,7 +592,7 @@ export function useSession(): SessionState {
           sendRaw({ op: "subscribe", sessionId: sessionIdRef.current });
           sendRaw({ op: "warm-boss" });
         }
-        else if (pending && !pending.failed) {
+        else if (pending && !pending.failed && !retiredStartRequestIdsRef.current.has(pending.requestId)) {
           sendRaw({ op: "start", requestId: pending.requestId, provider: pending.provider, cwd: pending.cwd, prompt: pending.prompt, attachments: pending.attachments, options: pending.options });
           armPendingStartTimeout(pending.provider);
         }
@@ -631,6 +631,7 @@ export function useSession(): SessionState {
               }
               break;
             }
+            if (experienceRef.current && msg.requestId && pendingStartRef.current?.requestId !== msg.requestId) break;
             sessionIdRef.current = msg.session.id;
             history.replaceState(null, "", appPath("/s/" + msg.session.id));
             document.title = msg.session.title || "cmux agent";
@@ -660,6 +661,8 @@ export function useSession(): SessionState {
             setPhase("chat");
             break;
           case "start-retired":
+            if (experienceRef.current && !retiredStartRequestIdsRef.current.has(msg.requestId)) break;
+            if (experienceRef.current && pendingStartRef.current && pendingStartRef.current.requestId !== msg.requestId) break;
             if (experienceRef.current && !msg.sessionId && pendingStartRef.current?.requestId === msg.requestId) {
               failPendingStart("");
             }
@@ -866,7 +869,7 @@ export function useSession(): SessionState {
       opts.options ?? {},
     ]);
     const current = pendingStartRef.current;
-    if (current && !current.failed && current.key === key) return false;
+    if (current && !current.failed && (current.key === key || retiredStartRequestIdsRef.current.has(current.requestId))) return false;
     const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     if (!sendRaw({ op: "start", requestId, ...opts })) return false;
     pendingStartRef.current = { requestId, key, queuedReplies: [], ...opts };
@@ -959,8 +962,14 @@ export function useSession(): SessionState {
       return;
     }
     const pending = pendingStartRef.current;
-    if (pending && !pending.failed) sendRaw({ op: "cancel-start", requestId: pending.requestId });
-  }, [sendRaw]);
+    if (pending && !pending.failed) {
+      if (experienceRef.current) {
+        rememberRetiredId(retiredStartRequestIdsRef.current, pending.requestId);
+        clearPendingStartTimeout();
+      }
+      sendRaw({ op: "cancel-start", requestId: pending.requestId, ...(experienceRef.current ? { retire: true } : {}) });
+    }
+  }, [clearPendingStartTimeout, sendRaw]);
   const setOption = useCallback((id: string, value: OptionValue) => {
     if (sessionIdRef.current) sendRaw({ op: "set-option", sessionId: sessionIdRef.current, id, value });
   }, [sendRaw]);
