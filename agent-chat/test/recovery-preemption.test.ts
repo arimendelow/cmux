@@ -96,6 +96,8 @@ function processExists(pid: number): boolean {
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    // A denied null signal is not proof that the process or group has disappeared.
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
     throw error;
   }
 }
@@ -245,6 +247,8 @@ async function harness(options: {
       "server.ts",
     ], {
       cwd: join(import.meta.dir, ".."),
+      // The fixture owns this group, including peers that outlive the sidecar.
+      detached: true,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -280,7 +284,27 @@ async function harness(options: {
       if (line.startsWith("test-clock:")) ticks.push(Number(line.slice(11)));
       if (line === "test-startup-timeout") ticks.push({ startup: true });
     }, () => address.reject(new Error(errors.join("\n"))));
-    return { child, url: await address.promise };
+    let stopping: Promise<void> | undefined;
+    return {
+      child,
+      url: await address.promise,
+      stop() {
+        return stopping ??= (async () => {
+          const group = -child.pid;
+          const exited = child.exited;
+          const signal = (value: "SIGTERM" | "SIGKILL") => {
+            try { process.kill(group, value); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+          };
+          signal("SIGTERM");
+          if ((await remainingProcesses([group])).length) signal("SIGKILL");
+          await exited;
+          const remaining = await remainingProcesses([group]);
+          console.log("recovery fixture group exit", JSON.stringify({ leader: child.pid, remaining }));
+          if (remaining.length) throw new Error(`fixture process group ${child.pid} did not exit`);
+        })();
+      },
+    };
   }
   let server = await launch();
   const url = server.url;
@@ -337,8 +361,7 @@ async function harness(options: {
     async boss() { return (await fetch(`${url}/api/boss`)).json() as Promise<any>; },
     async restart() {
       socket.close();
-      server.child.kill();
-      await server.child.exited;
+      await server.stop();
       server = await launch(Number(new URL(url).port));
       socket = await connect();
     },
@@ -352,8 +375,7 @@ async function harness(options: {
       nativeReady.resolve();
       for (const entry of peers.all) entry.finish({ stopReason: "cancelled" });
       socket.close();
-      server.child.kill();
-      await server.child.exited;
+      await server.stop();
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
