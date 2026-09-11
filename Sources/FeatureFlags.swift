@@ -331,6 +331,8 @@ enum OuroWorkbenchProduct {
             ?? homeURL.appendingPathComponent("Library/Application Support")
         var environment = [
             "CMUX_AGENT_CHAT_PRODUCT": "ouro-workbench-v1",
+            "CMUX_AGENT_CHAT_APP_SUPPORT_ROOT": appSupport
+                .appendingPathComponent("Ouro Workbench v1", isDirectory: true).path,
             "CMUX_AGENT_CHAT_CONTEXT_LABEL": "Desk / v1-copilot-vertical-slice",
             "CMUX_AGENT_CHAT_DEFAULT_PROVIDER": "ouro-boss",
             "CMUX_AGENT_UI_CWD": workspaceRoot.path,

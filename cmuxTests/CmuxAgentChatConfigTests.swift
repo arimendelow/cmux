@@ -1416,6 +1416,42 @@ struct CmuxAgentChatConfigTests {
         ))
     }
 
+    @Test func workbenchExternalAuthorityRootFollowsNativeApplicationSupport() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("workbench-external-presentation-\(UUID().uuidString)", isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = root.appendingPathComponent("Application Support", isDirectory: true)
+        let defaultsName = "CmuxAgentChatConfigTests.externalPresentation.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+
+        for support in [appSupport, nil] {
+            let environment = OuroWorkbenchProduct.agentChatEnvironment(
+                bundleIdentifier: "com.ourostack.workbench.v1.debug",
+                homeURL: home,
+                applicationSupportURL: support,
+                defaults: defaults,
+                environment: ["CMUX_AGENT_CHAT_APP_SUPPORT_ROOT": "/unrelated/profile"],
+                fileManager: fileManager
+            )
+            let expectedRoot = (support ?? home.appendingPathComponent("Library/Application Support"))
+                .appendingPathComponent("Ouro Workbench v1", isDirectory: true)
+            #expect(environment["CMUX_AGENT_CHAT_APP_SUPPORT_ROOT"] == expectedRoot.path)
+            #expect(environment["CMUX_AGENT_CHAT_BOSS_POINTER_DIR"] == expectedRoot
+                .appendingPathComponent("Agent Chat/Sessions").path)
+        }
+        #expect(OuroWorkbenchProduct.agentChatEnvironment(
+            bundleIdentifier: "com.example.terminal",
+            homeURL: home,
+            applicationSupportURL: appSupport,
+            defaults: defaults,
+            environment: [:],
+            fileManager: fileManager
+        ).isEmpty)
+        #expect(!fileManager.fileExists(atPath: root.path))
+    }
+
     @Test func workbenchWorkspaceRootFallsBackToHomeWithoutHostConfiguration() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory

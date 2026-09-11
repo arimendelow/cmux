@@ -175,13 +175,7 @@ export type ExternalAuthorityStatus =
   | "unavailable"
   | "unknown";
 
-/**
- * External control authority is host-supplied. Public Workbench knows only this
- * generic shape: a display label, an optional open URL, and a status value. The
- * host injects the real product vocabulary through the environment; the default
- * stays neutral so removing that configuration degrades to "Controlled
- * elsewhere / status unknown" rather than to a local inference.
- */
+/** Host-supplied presentation only: an optional installed integration or legacy environment config supplies the label, URL, and status. None of these values proves session ownership. */
 export interface ExternalAuthority {
   label: string;
   openUrl?: string;
@@ -296,8 +290,26 @@ export function workbenchExperienceForTest(productId: string, contextLabel = "")
 export function externalAuthorityStatusFromOutputForTest(
   output: string,
   exitCode: number,
+  json = false,
 ): ExternalAuthorityStatus {
   if (exitCode !== 0) return "unavailable";
+  if (json) {
+    try {
+      const value = JSON.parse(output);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || (value.schemaVersion !== undefined && value.schemaVersion !== 1)
+        || (value.label !== undefined && typeof value.label !== "string")
+        || (value.detail !== undefined && typeof value.detail !== "string")
+        || (value.checkedAt !== undefined
+          && (typeof value.checkedAt !== "string" || !Number.isFinite(Date.parse(value.checkedAt))))) {
+        return "unavailable";
+      }
+      if (value.state === "active") return "connected";
+      if (value.state === "inactive") return "disconnected";
+      if (value.state === "unknown") return "unknown";
+    } catch {}
+    return "unavailable";
+  }
   const match = /^\s*status:\s*(\S+)\s*$/im.exec(output);
   const value = match?.[1]?.toLowerCase();
   if (value === "connected" || value === "disconnected" || value === "stopped") return value;
@@ -310,8 +322,12 @@ export function externalAuthorityStatusFromOutputForTest(
  */
 async function externalAuthorityStatus(
   command: string[],
-  timeoutMs = 3_000,
-  killGraceMs = 250,
+  {
+    timeoutMs = 3_000,
+    killGraceMs = 250,
+    maxOutputBytes = 8_192,
+    json = false,
+  }: { timeoutMs?: number; killGraceMs?: number; maxOutputBytes?: number; json?: boolean } = {},
 ): Promise<ExternalAuthorityStatus> {
   if (!command.length) return "unknown";
   try {
@@ -320,33 +336,19 @@ async function externalAuthorityStatus(
       stderr: "ignore",
       detached: true,
     });
-    const reader = child.stdout.getReader();
-    const output = (async () => {
-      const decoder = new TextDecoder();
-      let text = "";
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) return text + decoder.decode();
-        text += decoder.decode(chunk.value, { stream: true });
-      }
-    })();
-    const completed = Promise.all([output, child.exited])
-      .then(([text, exitCode]) => ({ text, exitCode }))
-      .catch(() => null);
+    const completed = (async () => {
+      const output = await readStreamCapped(child.stdout, maxOutputBytes, json);
+      if (output.truncated) return null;
+      return { text: output.text, exitCode: await child.exited };
+    })().catch(() => null);
     const result = await Promise.race([
       completed,
       Bun.sleep(timeoutMs).then(() => undefined),
     ]);
     if (result !== undefined && result !== null) {
-      return externalAuthorityStatusFromOutputForTest(result.text, result.exitCode);
+      return externalAuthorityStatusFromOutputForTest(result.text, result.exitCode, json);
     }
-    await Promise.race([reader.cancel().catch(() => {}), Bun.sleep(killGraceMs)]);
-    try {
-      globalThis.process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill();
-    }
-    await Bun.sleep(killGraceMs);
+    // The deadline and output cap stop the whole helper group, including descendants holding stdout open.
     try {
       globalThis.process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -364,7 +366,7 @@ export function externalAuthorityStatusForTest(
   timeoutMs: number,
   killGraceMs: number,
 ): Promise<ExternalAuthorityStatus> {
-  return externalAuthorityStatus(command, timeoutMs, killGraceMs);
+  return externalAuthorityStatus(command, { timeoutMs, killGraceMs });
 }
 
 function externalAuthorityStatusCommand(raw: string | undefined): string[] {
@@ -375,6 +377,63 @@ function externalAuthorityStatusCommand(raw: string | undefined): string[] {
     if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string" && entry)) return parsed;
   } catch {}
   return value.split(/\s+/).filter(Boolean);
+}
+
+async function installedExternalAuthority(root: string): Promise<ExternalAuthority | undefined> {
+  if (!root) return undefined;
+  try {
+    if (!isAbsolute(root)) throw new Error("invalid integration root");
+    const path = join(root, "integrations", "external-authority.json");
+    const maxConfigBytes = 65_536;
+    const info = await stat(path);
+    if (!info.isFile() || info.size > maxConfigBytes) throw new Error("invalid integration file");
+    const bytes = await Bun.file(path).slice(0, maxConfigBytes + 1).arrayBuffer();
+    if (bytes.byteLength > maxConfigBytes) throw new Error("oversized integration file");
+    const config = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!config || typeof config !== "object" || Array.isArray(config)
+      || Object.keys(config).some((key) => ![
+        "schemaVersion", "owner", "pluginVersion", "displayLabel", "openUrl", "statusCommand",
+      ].includes(key))
+      || config.schemaVersion !== 1
+      || typeof config.owner !== "string" || !config.owner.trim()
+      || (config.pluginVersion !== undefined
+        && (typeof config.pluginVersion !== "string" || !config.pluginVersion.trim()))
+      || typeof config.displayLabel !== "string" || !config.displayLabel.trim()
+      || config.displayLabel.length > 64 || /[\u0000-\u001f\u007f]/.test(config.displayLabel)
+      || typeof config.openUrl !== "string" || !config.openUrl.startsWith("https://")
+      || /[\u0000-\u0020\u007f]/.test(config.openUrl)) {
+      throw new Error("invalid integration config");
+    }
+    const url = new URL(config.openUrl);
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+      throw new Error("invalid integration URL");
+    }
+    const command = config.statusCommand;
+    if (!command || typeof command !== "object" || Array.isArray(command)
+      || Object.keys(command).some((key) => !["argv", "timeoutMs", "maxOutputBytes"].includes(key))
+      || !Array.isArray(command.argv) || !command.argv.length
+      || !command.argv.every((entry: unknown) => typeof entry === "string"
+        && isAbsolute(entry) && !entry.includes("\0"))
+      || !Number.isInteger(command.timeoutMs) || command.timeoutMs < 100 || command.timeoutMs > 5_000
+      || (command.maxOutputBytes !== undefined
+        && (!Number.isInteger(command.maxOutputBytes) || command.maxOutputBytes < 256 || command.maxOutputBytes > 8_192))) {
+      throw new Error("invalid integration command");
+    }
+    // The app-wide header has no attested worker target; never substitute Boss identity or infer authority.
+    const status = await externalAuthorityStatus(
+      [...command.argv, "--session-id", "", "--authority", "unknown"],
+      { timeoutMs: command.timeoutMs, maxOutputBytes: command.maxOutputBytes, json: true },
+    );
+    if (status === "unavailable") {
+      console.warn("[external-authority] Status helper unavailable; using neutral presentation");
+      return externalAuthority({ status });
+    }
+    return externalAuthority({ label: config.displayLabel, url: config.openUrl, status });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    console.warn("[external-authority] Invalid or unreadable integration config; using neutral presentation");
+    return externalAuthority({ status: "unavailable" });
+  }
 }
 
 const CONFIGURED_EXTERNAL_AUTHORITY = {
@@ -391,12 +450,13 @@ let WORKBENCH_EXPERIENCE = workbenchExperience(
 if (import.meta.main && WORKBENCH_EXPERIENCE) {
   WORKBENCH_EXPERIENCE = {
     ...WORKBENCH_EXPERIENCE,
-    externalAuthority: externalAuthority({
-      ...CONFIGURED_EXTERNAL_AUTHORITY,
-      status: await externalAuthorityStatus(
-        externalAuthorityStatusCommand(process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_STATUS_COMMAND),
-      ),
-    }),
+    externalAuthority: await installedExternalAuthority(process.env.CMUX_AGENT_CHAT_APP_SUPPORT_ROOT?.trim() ?? "")
+      ?? externalAuthority({
+        ...CONFIGURED_EXTERNAL_AUTHORITY,
+        status: await externalAuthorityStatus(
+          externalAuthorityStatusCommand(process.env.CMUX_AGENT_CHAT_EXTERNAL_AUTHORITY_STATUS_COMMAND),
+        ),
+      }),
   };
 }
 
@@ -1980,7 +2040,7 @@ async function drainStream(stream: ReadableStream<Uint8Array>) {
   }
 }
 
-async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, fatalUTF8 = false): Promise<{ text: string; truncated: boolean }> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -2011,7 +2071,7 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: nu
     out.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const text = new TextDecoder().decode(out);
+  const text = new TextDecoder("utf-8", { fatal: fatalUTF8 }).decode(out);
   return { text, truncated };
 }
 
