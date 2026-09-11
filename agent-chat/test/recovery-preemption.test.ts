@@ -602,3 +602,80 @@ for (const imageSupport of [true, false]) {
     } finally { await client.stop(); await h.stop(); }
   });
 }
+
+test("a Boss startup reservation survives initialize until admission or retirement", async () => {
+  const h = await harness({ fresh: true, holdInitialize: true });
+  try {
+    h.send({ op: "start", requestId: "first", provider: "ouro-boss", cwd: h.root, prompt: "First request." });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    h.send({ op: "start", requestId: "second", provider: "ouro-boss", cwd: h.root, prompt: "Must not replace it." });
+    const rejected = await h.messages.next((message) => message.kind === "error" && message.requestId === "second");
+    expect(rejected.message).toContain("Boss already exists");
+    expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(1);
+    h.send({ op: "cancel-start", requestId: "first", retire: true });
+    await h.messages.next((message) => message.kind === "start-retired");
+    expect((await h.boss()).boss.status).toBe("none");
+  } finally { await h.stop(); }
+});
+
+test("a failed unadmitted REST Boss start still releases its temporary session", async () => {
+  const h = await harness({ fresh: true, holdInitialize: true });
+  try {
+    const failed = fetch(`${h.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "ouro-boss", cwd: h.root, prompt: "First request." }),
+    });
+    const initialize = await h.peers.next((entry) => entry.message.method === "initialize");
+    initialize.finish({}, "synthetic initialize failure");
+    h.releaseInitialize();
+    expect((await failed).status).toBe(400);
+    expect(await (await fetch(`${h.url}/api/sessions`)).json()).toEqual([]);
+    expect((await h.boss()).boss.status).toBe("none");
+  } finally { await h.stop(); }
+});
+
+test("fresh root negotiation failure stays visible and a text start can retry", async () => {
+  const h = await harness({ fresh: true, holdInitialize: true });
+  const renders = new Inbox<SessionState>();
+  const client = await clientFixture(h.url);
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    const initialize = await h.peers.next((entry) => entry.message.method === "initialize");
+    initialize.finish({}, "synthetic initialize failure");
+    h.releaseInitialize();
+    await renders.next((value) => Boolean(value.lastError));
+    expect(state.phase).toBe("composer");
+    expect(state.imageCapability).toBe("unknown");
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(0);
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt: "Retry with text." })).toBe(true); });
+    const user = await h.prompt();
+    await renders.next((value) => value.boss?.status === "canonical");
+    expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(2);
+    await h.assertSameBoss(user.message.params.sessionId, user.message.params.sessionId);
+    user.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
+
+test("duplicate fresh-root warmups and input during initialize share one Boss peer", async () => {
+  const h = await harness({ fresh: true, holdInitialize: true });
+  const renders = new Inbox<SessionState>();
+  const client = await clientFixture(h.url);
+  let state: SessionState;
+  function Root() { state = useSession(); renders.push(state); return null; }
+  try {
+    await client.render(createElement(Root));
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    h.send({ op: "warm-boss" });
+    h.send({ op: "warm-boss" });
+    act(() => { expect(state.start({ provider: "ouro-boss", cwd: h.root, prompt: "Start while connecting." })).toBe(true); });
+    h.releaseInitialize();
+    const user = await h.prompt();
+    await renders.next((value) => value.boss?.status === "canonical");
+    expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(1);
+    await h.assertSameBoss(user.message.params.sessionId, user.message.params.sessionId);
+    user.finish();
+  } finally { await client.stop(); await h.stop(); }
+});
