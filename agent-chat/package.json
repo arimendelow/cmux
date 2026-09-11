@@ -5,7 +5,8 @@
   "scripts": {
     "start": "bun server.ts",
     "build": "bun run build.ts",
-    "check": "bun x tsc --noEmit && bun test/claude-environment.test.ts && bun test/model-label.test.ts && bun test/activity.test.ts && bun test/keymap.test.ts && bun test/options-store.test.ts && bun test/options-ui.test.ts && bun test/turns.test.ts && bun test/selection-css.test.ts && bun test/highlight.test.ts"
+    "check": "bun x tsc --noEmit && bun test/claude-environment.test.ts && bun test/model-label.test.ts && bun test/activity.test.ts && bun test/keymap.test.ts && bun test/options-store.test.ts && bun test/options-ui.test.ts && bun test/turns.test.ts && bun test/selection-css.test.ts && bun test/highlight.test.ts && bun --no-env-file --no-install run test:client",
+    "test:client": "bun --no-env-file --no-install test --isolate ./test/chat-client.test.tsx ./test/client-controls.test.tsx ./test/composer-capability.test.tsx ./test/gallery-client.test.tsx ./test/image-client.test.tsx ./test/session-client.test.tsx ./test/session-route-client.test.tsx ./test/session-unprefixed-route.test.tsx ./test/session-bare-base-route.test.tsx ./test/session-outside-base-route.test.tsx"
   },
   "dependencies": {
     "@base-ui-components/react": "^1.0.0-rc.0",
