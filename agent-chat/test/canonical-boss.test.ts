@@ -8,6 +8,7 @@ import {
   listBossCandidatesInPartition,
   parseCanonicalBossPointer,
   readCanonicalBossPointer,
+  removeCanonicalBossPointer,
   repointCanonicalBoss,
   resolveCanonicalBoss,
   writeCanonicalBossPointer,
@@ -493,6 +494,82 @@ test("an atomic pointer write cleans up after a failed rename", async () => {
       sessionId: "boss-1",
     })).rejects.toThrow();
     expect(await readdir(root)).toEqual(["canonical-boss.json"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pointer removal only removes the expected agent and session", async () => {
+  const root = await tempRoot("pointer-remove-");
+  const pointer: CanonicalBossPointer = { version: 1, agent: "slugger", sessionId: "boss-1" };
+  try {
+    expect(await removeCanonicalBossPointer(root, pointer)).toBe(false);
+    await writeCanonicalBossPointer(root, pointer);
+    for (const expected of [{ ...pointer, agent: "other" }, { ...pointer, sessionId: "boss-2" }]) {
+      expect(await removeCanonicalBossPointer(root, expected)).toBe(false);
+      expect(await readCanonicalBossPointer(root)).toEqual({ pointer, error: null });
+    }
+    expect(await removeCanonicalBossPointer(root, pointer)).toBe(true);
+    expect(await readCanonicalBossPointer(root)).toEqual({ pointer: null, error: null });
+    expect(await readdir(root)).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pointer parsing validates field types as well as safe names", () => {
+  for (const value of [1, "pointer", true]) {
+    expect(() => parseCanonicalBossPointer(value)).toThrow("pointer must be an object");
+  }
+  for (const agent of [undefined, 1, "", " ", "a".repeat(129)]) {
+    expect(() => parseCanonicalBossPointer({ version: 1, agent, sessionId: "boss-1" })).toThrow("agent");
+  }
+  for (const sessionId of [undefined, false, "", "a/b", "a".repeat(129)]) {
+    expect(() => parseCanonicalBossPointer({ version: 1, agent: "slugger", sessionId })).toThrow("sessionId");
+  }
+  expect(parseCanonicalBossPointer({ version: 1, agent: "a.b_c-d", sessionId: "b.1", ignored: true }))
+    .toEqual({ version: 1, agent: "a.b_c-d", sessionId: "b.1" });
+  expect(resolveCanonicalBoss({ pointer: null, configuredAgent: "", routedSessionId: null, candidates: [] }))
+    .toEqual({ status: "none", skipped: [] });
+});
+
+test("candidate discovery ignores non-records but preserves and explains invalid record fields", async () => {
+  const root = await tempRoot("candidate-shape-");
+  const partition = join(root, "slugger");
+  try {
+    await mkdir(partition);
+    await mkdir(join(root, ".hidden"));
+    await writeFile(join(root, "ignored.json"), "{}");
+    await writeFile(join(root, "not-a-partition"), "not a directory");
+    await writeFile(join(partition, ".hidden.json"), "null");
+    await writeFile(join(partition, "ignored.tmp"), "null");
+    const valid = {
+      id: "valid", provider: "ouro-boss", providerSessionId: "provider-1",
+      cwd: root, title: "Boss", autoApprove: true, createdAt: 0, startRequestId: "request-1",
+    };
+    await writeFile(join(partition, "valid.json"), JSON.stringify(valid));
+    for (const key of ["id", "provider", "providerSessionId", "cwd", "title"]) {
+      await writeFile(join(partition, `${key}-empty.json`), JSON.stringify({ ...valid, [key]: "" }));
+      await writeFile(join(partition, `${key}-type.json`), JSON.stringify({ ...valid, [key]: 0 }));
+    }
+    await writeFile(join(partition, "null.json"), "null");
+    await writeFile(join(partition, "number.json"), "42");
+    await writeFile(join(partition, "infinite-date.json"), JSON.stringify(valid).replace('"createdAt":0', '"createdAt":1e999'));
+    const before = (await readdir(partition)).sort();
+    const entries = await listBossCandidates(root);
+    expect(entries).toHaveLength(14);
+    const healthy = entries.find((entry) => entry.id === "valid");
+    expect(healthy).toEqual({ ...valid, agent: "slugger", startOptions: {}, loadError: null, cwdAvailable: true });
+    for (const key of ["id", "provider", "providerSessionId", "cwd", "title"]) {
+      for (const suffix of ["empty", "type"]) {
+        expect(entries.find((entry) => entry.id === `${key}-${suffix}`)?.loadError).toContain(`${key} must be a non-empty string`);
+      }
+    }
+    expect(entries.find((entry) => entry.id === "infinite-date")?.loadError).toContain("createdAt must be finite");
+    expect(entries.find((entry) => entry.id === "null")?.loadError).toContain("session record must be an object");
+    expect(entries.find((entry) => entry.id === "number")?.loadError).toContain("session record must be an object");
+    expect((await readdir(partition)).sort()).toEqual(before);
+    await expect(listBossCandidates(join(root, "not-a-partition"))).rejects.toThrow();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -21,6 +21,8 @@ const promptLog = process.env.FAKE_ACP_PROMPT_LOG;
 const imageSupport = !Bun.argv.includes("--no-image-support")
   && process.env.FAKE_ACP_IMAGE_SUPPORT !== "0";
 const pidFile = process.env.FAKE_ACP_PID_FILE;
+const processLog = process.env.FAKE_ACP_PROCESS_LOG;
+if (processLog) await appendFile(processLog, `${JSON.stringify({ pid: process.pid, ppid: process.ppid, argv: Bun.argv.slice(2) })}\n`);
 if (log) await appendFile(log, `${model}\n`);
 if (pidFile) await writeFile(pidFile, `${process.pid}\n`);
 

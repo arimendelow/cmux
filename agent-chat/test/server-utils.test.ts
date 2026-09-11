@@ -12,6 +12,7 @@ import {
   filterChangedFilesSinceBaseline,
   filesChangedEventsForTest,
   gitFilesFromOutput,
+  gitFiles,
   gitOutputWithCodes,
   gitOutputWithCodesResult,
   insertDeferredTurnEvents,
@@ -47,6 +48,7 @@ import { applyManagedThemeOverrideForTest, pickAccentColor, resolveThemeNameForT
 import type { Adapter, AgentEvent, SessionCtx, SessionStatus } from "../types";
 import { mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { throws } from "node:assert/strict";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -384,7 +386,7 @@ const root = join(import.meta.dir, "..", "scratch", "git-output-cap-test");
 await rm(root, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
 async function run(cmd: string[], cwd = root) {
-  const p = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+  const p = Bun.spawn([cmd[0], "-C", cwd, ...cmd.slice(1)], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env } });
   const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
   if (code !== 0) throw new Error(`${cmd.join(" ")} failed: ${err}`);
 }
@@ -655,5 +657,77 @@ const forkedSession = {
 };
 rebuildFileDiffAllowlistForTest(forkedSession);
 assert(fileDiffAllowedForTest(forkedSession, "copied.txt"), "forked sessions should allow diffs from copied files-changed history");
+
+for (const [value, message] of [
+  [null, "at most 4 images"],
+  [Array(5).fill(parsedAttachment), "at most 4 images"],
+  [[null], "must be an object"],
+  [[[]], "must be an object"],
+  [[1], "must be an object"],
+  [[{ ...parsedAttachment, id: 0 }], "id is invalid"],
+  [[{ ...parsedAttachment, id: "" }], "id is invalid"],
+  [[{ ...parsedAttachment, id: "x".repeat(129) }], "id is invalid"],
+  [[{ ...parsedAttachment, id: "bad/id" }], "id is invalid"],
+  [[{ ...parsedAttachment, name: null }], "name is invalid"],
+  [[{ ...parsedAttachment, name: "" }], "name is invalid"],
+  [[{ ...parsedAttachment, name: "x".repeat(256) }], "name is invalid"],
+  [[{ ...parsedAttachment, mimeType: 3 }], "MIME type is unsupported"],
+  [[{ ...parsedAttachment, data: null }], "data must be valid base64"],
+  [[{ ...parsedAttachment, data: "" }], "data must be valid base64"],
+] as const) throws(() => parsePromptAttachmentsForTest(value), new RegExp(message));
+assert(parsePromptAttachmentsForTest(undefined).length === 0, "absent attachments preserve text-only input");
+for (const [data, bytes] of [["Zg==", 1], ["Zm8=", 2]] as const) {
+  assert(parsePromptAttachmentsForTest([{ ...parsedAttachment, data }])[0].byteCount === bytes, "base64 padding must determine the actual decoded byte count");
+}
+
+for (const [value, message] of [
+  [null, "must be an object"], [[], "must be an object"], [false, "must be an object"],
+  [{ ...postTheme, source: undefined }, "source must be cmux"],
+  [{ source: "cmux" }, "missing required keys"],
+  [{ ...postTheme, source: "cmux", palette: null }, "palette must contain 16 colors"],
+  [{ ...postTheme, source: "cmux", palette: Array(16).fill("not-a-color") }, "palette must contain 16 colors"],
+  ...["13", 0, Infinity].map((fontSize) => [{ ...postTheme, source: "cmux", fontSize }, "fontSize must be positive or null"]),
+  ...["1", -1, 2, Infinity].map((opacity) => [{ ...postTheme, source: "cmux", opacity }, "opacity must be 0-1"]),
+  ...["1", -1, Infinity].map((blur) => [{ ...postTheme, source: "cmux", blur }, "blur must be non-negative"]),
+  [{ ...postTheme, source: "cmux", isLight: 1 }, "isLight must be boolean"],
+  [{ ...postTheme, source: "cmux", fontFamily: 1 }, "fontFamily must be string or null"],
+  ...["background", "foreground", "selectionBackground", "cursorColor", "accent"].map((key) => [
+    { ...postTheme, source: "cmux", [key]: "bad" }, "invalid theme color",
+  ]),
+] as Array<[unknown, string]>) throws(() => validateCmuxThemePayload(value), new RegExp(message));
+assert(cssFontFamily(null, fallback) === fallback, "missing font family uses the fallback");
+assert(cssFontFamily(" ;{}<> ", fallback) === fallback, "a stripped font family uses the fallback");
+assert(themeVarMap(fakeTheme, { transparent: true, opacity: 0 })["--bg-body"] === "rgba(17, 34, 51, 0)", "explicit transparent opacity zero must remain zero");
+assert(themeMtimesChangedForTest(new Map(), new Map([["new", 1]])), "a new theme source must trigger refresh");
+assert((themeSourceMtimes([statePath]).get(statePath) ?? 0) > 0, "an owned existing theme source must retain its actual mtime");
+assert(resolveAllowedRootsForTest("~:~/child", allowedRoot).join("|") === `${allowedRoot}|${allowedRoot}/child`, "home expansion must stay within the supplied synthetic home");
+throws(() => resolveAllowedRootsForTest("relative"), /allowed root must be absolute/);
+assert((await validateWorkingDirectoryForTest(statePath, [])).ok === false, "a regular file is not a working directory");
+assert((await validateWorkingDirectoryForTest(join(allowedRoot, "absent"), [])).ok === false, "a missing working directory is rejected");
+assert((await canonicalizeAllowedRootsForTest([statePath, allowedRoot])).join("|") === await realpath(allowedRoot), "non-directory roots are skipped without dropping valid roots");
+assert((await gitFiles(root)).includes("big.txt"), "file discovery consumes the owned Git index");
+assert(insertDeferredTurnEvents([], [], 1, []).insertedAt === 0, "empty finalization does not insert an event");
+assert(filterChangedFilesSinceBaseline([{ path: "gone", adds: 0, dels: 1, status: "deleted" }], new Map(), new Map()).length === 0, "absent end-state paths are not attributed");
+assert(filterChangedFilesSinceBaseline(
+  [{ path: "changed", adds: 1, dels: 0, status: "modified" }],
+  new Map([["changed", { status: "added", signature: "same" }]]),
+  new Map([["changed", { status: "modified", signature: "same" }]]),
+).length === 1, "a status transition is attributed even when bytes match");
+const boundedSession = { ...sequentialSession, id: "bounded-replay", events: [], internal: {} };
+for (let index = 0; index < 5_002; index++) {
+  emitSessionEventForTest(boundedSession as any, { kind: "delta", text: String(index) });
+}
+assert(boundedSession.events.length === 5_001, "replay retains the bounded transcript and one truncation notice");
+assert(boundedSession.events[0].kind === "status", "truncated replay starts with an explicit notice");
+assert(boundedSession.events.at(-1)?.text === "5001", "truncation preserves the newest event");
+const boundedPaths = { cwd: allowedRoot, internal: {} };
+recordFilesChangedForTest(boundedPaths, [
+  { path: "../escape", adds: 0, dels: 0, status: "modified" },
+  ...Array.from({ length: 5_001 }, (_, index) => ({ path: `file-${index}`, adds: 1, dels: 0, status: "modified" })),
+  { path: "file-5000", adds: 1, dels: 0, status: "modified" },
+]);
+assert(!fileDiffAllowedForTest(boundedPaths, "file-0"), "the oldest reported diff path expires at the cap");
+assert(fileDiffAllowedForTest(boundedPaths, "file-5000"), "the newest reported diff path remains allowed");
+assert(!fileDiffAllowedForTest(boundedPaths, "../escape"), "escaping paths never enter the allowlist");
 
 console.log("server utility assertions passed");
