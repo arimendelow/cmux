@@ -1,12 +1,13 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type ClipboardEvent,
   type DragEvent,
 } from "react";
-import type { PromptAttachment } from "../session";
+import type { ImagePromptCapability, PromptAttachment } from "../session";
 
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
@@ -16,6 +17,19 @@ const SUPPORTED_IMAGE_TYPES = new Set([
   "image/png",
   "image/webp",
 ]);
+
+const capabilityMessages = {
+  en: {
+    image: "+ Image",
+    unknown: "Connecting to Boss. Checking image support…",
+    unsupported: "This runtime did not advertise image support. You can still send text.",
+  },
+  ja: {
+    image: "+ 画像",
+    unknown: "Boss に接続しています。画像への対応を確認しています。",
+    unsupported: "このランタイムは画像への対応を通知していません。テキストは送信できます。",
+  },
+};
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -279,6 +293,7 @@ export function useImageAttachments(
 export function ImageAttachmentTray({
   attachments,
   enabled,
+  capability,
   error,
   onAdd,
   onRemove,
@@ -287,6 +302,7 @@ export function ImageAttachmentTray({
 }: {
   attachments: PromptAttachment[];
   enabled: boolean;
+  capability?: ImagePromptCapability;
   error: string;
   onAdd(files: FileList): void;
   onRemove(id: string): void;
@@ -294,7 +310,11 @@ export function ImageAttachmentTray({
   loading?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  if (!enabled && attachments.length === 0 && !loading) {
+  const capabilityId = useId();
+  const locale = typeof navigator === "undefined" ? "en" : navigator.language ?? "en";
+  const text = capabilityMessages[locale.toLowerCase().startsWith("ja") ? "ja" : "en"];
+  const explanation = capability && capability !== "supported" ? text[capability] : "";
+  if (!enabled && !explanation && attachments.length === 0 && !loading) {
     return error
       ? <div className="image-attachment-controls"><span className="image-attachment-error" role="alert">{error}</span></div>
       : null;
@@ -323,15 +343,17 @@ export function ImageAttachmentTray({
         </div>
       ) : null}
       <div className="image-attachment-controls">
-        {enabled ? (
+        {enabled || explanation ? (
           <>
             <button
               type="button"
               className="attach-image"
-              disabled={locked}
+              disabled={!enabled || locked}
+              title={explanation || undefined}
+              aria-describedby={explanation ? capabilityId : undefined}
               onClick={() => inputRef.current?.click()}
             >
-              + Image
+              {capability ? text.image : "+ Image"}
             </button>
             <input
               ref={inputRef}
@@ -339,7 +361,7 @@ export function ImageAttachmentTray({
               accept="image/png,image/jpeg,image/webp,image/gif"
               multiple
               hidden
-              disabled={locked}
+              disabled={!enabled || locked}
               onChange={(event) => {
                 if (event.target.files) onAdd(event.target.files);
                 event.target.value = "";
@@ -347,6 +369,7 @@ export function ImageAttachmentTray({
             />
           </>
         ) : null}
+        {explanation ? <span id={capabilityId} className="image-attachment-loading" role="status">{explanation}</span> : null}
         {loading ? <span className="image-attachment-loading" role="status">Loading image…</span> : null}
         {error ? <span className="image-attachment-error" role="alert">{error}</span> : null}
       </div>
