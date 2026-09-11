@@ -23,11 +23,15 @@ const capabilityMessages = {
     image: "+ Image",
     unknown: "Connecting to Boss. Checking image support…",
     unsupported: "This runtime did not advertise image support. You can still send text.",
+    failed: "Could not check image support.",
+    retry: "Retry",
   },
   ja: {
     image: "+ 画像",
     unknown: "Boss に接続しています。画像への対応を確認しています。",
     unsupported: "このランタイムは画像への対応を通知していません。テキストは送信できます。",
+    failed: "画像への対応を確認できませんでした。",
+    retry: "再試行",
   },
 };
 
@@ -294,6 +298,8 @@ export function ImageAttachmentTray({
   attachments,
   enabled,
   capability,
+  capabilityError,
+  onRetry,
   error,
   onAdd,
   onRemove,
@@ -303,6 +309,8 @@ export function ImageAttachmentTray({
   attachments: PromptAttachment[];
   enabled: boolean;
   capability?: ImagePromptCapability;
+  capabilityError?: string;
+  onRetry?(): void;
   error: string;
   onAdd(files: FileList): void;
   onRemove(id: string): void;
@@ -313,7 +321,9 @@ export function ImageAttachmentTray({
   const capabilityId = useId();
   const locale = typeof navigator === "undefined" ? "en" : navigator.language ?? "en";
   const text = capabilityMessages[locale.toLowerCase().startsWith("ja") ? "ja" : "en"];
-  const explanation = capability && capability !== "supported" ? text[capability] : "";
+  const failed = capability === "unknown" && Boolean(capabilityError);
+  const explanation = failed ? `${text.failed} ${capabilityError}`
+    : capability && capability !== "supported" ? text[capability] : "";
   if (!enabled && !explanation && attachments.length === 0 && !loading) {
     return error
       ? <div className="image-attachment-controls"><span className="image-attachment-error" role="alert">{error}</span></div>
@@ -369,7 +379,8 @@ export function ImageAttachmentTray({
             />
           </>
         ) : null}
-        {explanation ? <span id={capabilityId} className="image-attachment-loading" role="status">{explanation}</span> : null}
+        {explanation ? <span id={capabilityId} className={failed ? "image-attachment-error" : "image-attachment-loading"} role={failed ? "alert" : "status"}>{explanation}</span> : null}
+        {failed && onRetry ? <button type="button" className="attach-image" onClick={onRetry}>{text.retry}</button> : null}
         {loading ? <span className="image-attachment-loading" role="status">Loading image…</span> : null}
         {error ? <span className="image-attachment-error" role="alert">{error}</span> : null}
       </div>

@@ -276,6 +276,7 @@ export interface SessionState {
   boss: BossState | null;
   continuity: AppContinuity | null;
   imageCapability: ImagePromptCapability;
+  bossPreparationError: string;
   actionsAllowed: WorkbenchActionAvailability;
   connection: ConnectionState | null;
   recovery: RecoveryState | null;
@@ -313,6 +314,7 @@ export interface SessionState {
   requestFileDiff(sessionId: string, path: string): void;
   checkCwd(cwd: string): void;
   clearError(): void;
+  retryBossPreparation(): void;
 }
 
 declare global {
@@ -471,6 +473,7 @@ export function useSession(): SessionState {
   const [boss, setBoss] = useState<BossState | null>(null);
   const [continuity, setContinuity] = useState<AppContinuity | null>(null);
   const [imageCapability, setImageCapability] = useState<ImagePromptCapability>("unknown");
+  const [bossPreparationError, setBossPreparationError] = useState("");
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [restore, setRestore] = useState<WorkbenchRestoreReceipt | null>(null);
@@ -569,6 +572,15 @@ export function useSession(): SessionState {
     return false;
   }, []);
 
+  const retryBossPreparation = useCallback(() => {
+    if (!experienceRef.current || sessionIdRef.current || pendingStartRef.current) return;
+    if (sendRaw({ op: "warm-boss" })) {
+      setImageCapability("unknown");
+      setBossPreparationError("");
+      setLastError("");
+    }
+  }, [sendRaw]);
+
   useEffect(() => {
     if (!experience) return;
     return observeBossUserInput(window, () => {
@@ -613,7 +625,10 @@ export function useSession(): SessionState {
             setBoss(bossRef.current);
             setContinuity(h.continuity ?? null);
             if (h.boss?.status === "blocked") setLastError(bossBlockedMessage(h.boss));
-            else if (h.experience) sendRaw({ op: "warm-boss" });
+            else if (h.experience) {
+              if (!sessionIdRef.current && !pendingStartRef.current) retryBossPreparation();
+              else sendRaw({ op: "warm-boss" });
+            }
             setCtrlJ(h.keys?.ctrlJ === "menu" ? "menu" : "newline");
             setReady(true);
             setConnectionEpoch((n) => n + 1);
@@ -723,7 +738,11 @@ export function useSession(): SessionState {
             if (bossRef.current?.status === "blocked") setLastError(bossBlockedMessage(bossRef.current));
             break;
           case "boss-capabilities":
-            if (experienceRef.current && !sessionIdRef.current) setImageCapability(msg.image);
+            if (experienceRef.current && !sessionIdRef.current) {
+              setImageCapability(msg.image);
+              setBossPreparationError("");
+              setLastError("");
+            }
             break;
           case "sessions": {
             if (initialSessionListHandledRef.current) break;
@@ -811,7 +830,14 @@ export function useSession(): SessionState {
             }
             break;
           case "error":
-            if (msg.op === "warm-boss") setLastError(String(msg.message ?? ""));
+            if (msg.op === "warm-boss") {
+              const message = String(msg.message ?? "");
+              setLastError(message);
+              if (experienceRef.current && !sessionIdRef.current) {
+                setImageCapability("unknown");
+                setBossPreparationError(message);
+              }
+            }
             if (msg.op === "start") {
               if (
                 typeof msg.requestId === "string"
@@ -858,7 +884,7 @@ export function useSession(): SessionState {
       pendingRepliesRef.current.clear();
       wsRef.current?.close();
     };
-  }, [armPendingStartTimeout, clearPendingStartTimeout, failPendingStart, sendRaw]);
+  }, [armPendingStartTimeout, clearPendingStartTimeout, failPendingStart, retryBossPreparation, sendRaw]);
 
   const start = useCallback((opts: { provider: string; cwd: string; prompt: string; attachments?: PromptAttachment[]; options?: Record<string, OptionValue> }) => {
     const key = JSON.stringify([
@@ -1024,6 +1050,7 @@ export function useSession(): SessionState {
     boss,
     continuity,
     imageCapability,
+    bossPreparationError,
     actionsAllowed: workbenchActionsAllowed(experience),
     connection,
     recovery,
@@ -1057,6 +1084,7 @@ export function useSession(): SessionState {
     requestFileDiff,
     checkCwd,
     clearError,
+    retryBossPreparation,
   };
 }
 

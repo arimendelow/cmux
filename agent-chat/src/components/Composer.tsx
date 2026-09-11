@@ -48,6 +48,8 @@ export function Composer() {
     defaultProvider,
     experience,
     imageCapability,
+    bossPreparationError,
+    retryBossPreparation,
     providerOptions,
     providerCommands,
     filesByCwd,
@@ -186,6 +188,8 @@ export function Composer() {
           attachments={imageAttachments.attachments}
           enabled={imagesAllowed}
           capability={experience ? imageCapability : undefined}
+          capabilityError={experience ? bossPreparationError : undefined}
+          onRetry={experience ? retryBossPreparation : undefined}
           error={imageAttachments.error}
           loading={imageAttachments.loading}
           onAdd={(files) => { void imageAttachments.addFiles(files); }}
@@ -240,7 +244,7 @@ export function Composer() {
           )}
         />
       </div>
-      {lastError ? <div className="composer-error">{lastError}</div> : null}
+      {lastError && (!experience || lastError !== bossPreparationError) ? <div className="composer-error">{lastError}</div> : null}
       <div id="composer-hint">Enter to start · Shift+Enter for newline · Ctrl+/ for shortcuts</div>
       {helpOpen ? <ShortcutOverlay provider={provider} options={options} running={false} ctrlJ={ctrlJ} onClose={() => setHelpOpen(false)} /> : null}
     </section>
