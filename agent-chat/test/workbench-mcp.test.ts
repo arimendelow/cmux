@@ -450,12 +450,16 @@ test("Workbench tools reject malformed values before invoking the native boundar
     jsonrpc: "2.0", id: null,
     result: { content: [{ type: "text", text: '{"status":"completed"}' }], isError: false },
   });
-  await handleWorkbenchMCPRequest({
+  const listResponse = await handleWorkbenchMCPRequest({
     jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workbench_list", arguments: {} },
   }, async (method, params) => {
-    expect(method).toBe("workbench.list");
-    expect(params).toEqual({});
+    calls.push({ method, params });
     return {};
+  });
+  expect(calls).toEqual([{ method: "workbench.list", params: {} }]);
+  expect(listResponse).toEqual({
+    jsonrpc: "2.0", id: 1,
+    result: { content: [{ type: "text", text: "{}" }], isError: false },
   });
 });
 
