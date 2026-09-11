@@ -1216,6 +1216,80 @@ final class AppDelegateIssue2907RoutingTests: XCTestCase {
         )
     }
 
+    func testSurfaceRestoreRecordPreservesLauncherOwnedShellCommand() throws {
+        _ = NSApplication.shared
+        let previousAppDelegate = AppDelegate.shared
+        let app = AppDelegate()
+        let windowId = UUID()
+        let window = makeMainWindow(id: windowId)
+        defer {
+            TerminalController.shared.setActiveTabManager(nil)
+            app.unregisterMainWindowContextForTesting(windowId: windowId)
+            window.orderOut(nil)
+            AppDelegate.shared = previousAppDelegate
+        }
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        app.registerMainWindow(
+            window,
+            windowId: windowId,
+            tabManager: manager,
+            sidebarState: SidebarState(),
+            sidebarSelectionState: SidebarSelectionState(),
+            fileExplorerState: FileExplorerState()
+        )
+        TerminalController.shared.setActiveTabManager(manager)
+        let workspace = try XCTUnwrap(manager.selectedWorkspace)
+        let panelID = try XCTUnwrap(workspace.focusedPanelId)
+        let sessionID = UUID().uuidString.lowercased()
+        let command = "printf '%s' ready && /opt/example/launcher --resume=\(sessionID)"
+        XCTAssertTrue(workspace.setSurfaceResumeBinding(
+            SurfaceResumeBindingSnapshot(
+                kind: "copilot",
+                command: command,
+                cwd: "/tmp",
+                checkpointId: sessionID,
+                source: "launcher-hook",
+                environment: ["EXAMPLE_PROFILE": "shell"],
+                autoResume: true,
+                workbenchAuthority: .controlledHere,
+                workbenchAuthorityEvidence: .launcherOwned
+            ),
+            panelId: panelID
+        ))
+
+        let staleLaunch = AgentLaunchCommandSnapshot(
+            executablePath: "/opt/example/copilot",
+            arguments: ["/opt/example/copilot", "--resume", sessionID],
+            workingDirectory: "/tmp"
+        )
+        for launch in [nil, staleLaunch] {
+            workspace.restoredAgentSnapshotsByPanelId[panelID] =
+                SessionRestorableAgentSnapshot(
+                    kind: .copilot,
+                    sessionId: sessionID,
+                    workingDirectory: "/tmp",
+                    launchCommand: launch,
+                    workbenchAuthority: .controlledHere
+                )
+            let result = try v2Result(
+                method: "surface.resume.get",
+                params: [
+                    "window_id": windowId.uuidString,
+                    "workspace_id": workspace.id.uuidString,
+                    "surface_id": panelID.uuidString,
+                ]
+            )
+            let record = try XCTUnwrap(result["restore_record"] as? [String: Any])
+            XCTAssertEqual(record["mode"] as? String, "direct")
+            XCTAssertNil(record["launch_command"] as? [String: Any])
+            XCTAssertNil(record["prepared_arguments"] as? [String])
+            XCTAssertNil(record["prepared_arguments_working_directory"] as? String)
+            XCTAssertEqual(record["legacy_command"] as? String, command)
+            let environment = try XCTUnwrap(record["environment"] as? [String: String])
+            XCTAssertEqual(environment["EXAMPLE_PROFILE"], "shell")
+        }
+    }
+
     func testSurfaceRestoreRecordAppliesBindingEnvironmentAndRestoreTimeCwd() throws {
         _ = NSApplication.shared
         let previousAppDelegate = AppDelegate.shared

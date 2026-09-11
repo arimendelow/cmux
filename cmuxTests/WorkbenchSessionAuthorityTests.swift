@@ -333,6 +333,65 @@ struct WorkbenchSessionAuthorityTests {
     }
 
     @MainActor
+    @Test func VerifiedLauncherRepublishReplacesManagedExecution() throws {
+        let manager = TabManager(autoWelcomeIfNeeded: false)
+        let workspace = try #require(manager.selectedWorkspace)
+        let panelID = try #require(workspace.focusedPanelId)
+        let dock = DockSplitStore(workspaceId: UUID(), baseDirectoryProvider: { nil })
+        defer { dock.closeAllPanels() }
+        let terminal = TerminalPanel(workspaceId: dock.workspaceId)
+        dock.panels[terminal.id] = terminal
+        let sessionID = UUID().uuidString.lowercased()
+        let original = SurfaceResumeBindingSnapshot(
+            kind: "copilot",
+            command: "/opt/example/launcher --profile original",
+            cwd: "/tmp/original",
+            checkpointId: sessionID,
+            source: "launcher-hook",
+            environment: ["EXAMPLE_PROFILE": "original"],
+            launchCommand: AgentLaunchCommandSnapshot(
+                executablePath: "/opt/example/launcher",
+                arguments: ["/opt/example/launcher", "--profile", "original"],
+                workingDirectory: "/tmp/original"
+            ),
+            autoResume: true,
+            approvalPolicy: .auto,
+            approvalRecordId: "original-approval",
+            workbenchAuthority: .controlledHere,
+            workbenchAuthorityEvidence: .launcherOwned
+        )
+        var replacement = original
+        replacement.command = "/opt/example/launcher --profile updated"
+        replacement.cwd = "/tmp/updated"
+        replacement.environment = ["EXAMPLE_PROFILE": "updated"]
+        replacement.launchCommand?.arguments = ["/opt/example/launcher", "--profile", "updated"]
+        replacement.launchCommand?.workingDirectory = "/tmp/updated"
+        replacement.autoResume = false
+        replacement.approvalPolicy = .manual
+        replacement.approvalRecordId = nil
+
+        for target in [
+            ControlSurfaceResumeTarget.workspace(tabManager: manager, workspace: workspace, surfaceID: panelID),
+            .dock(tabManager: manager, dock: dock, surfaceID: terminal.id),
+        ] {
+            #expect(target.setBinding(original))
+            #expect(target.setBinding(replacement))
+            #expect(target.binding == replacement)
+            #expect(target.managedBinding == replacement)
+            #expect(target.protectedRestoreBinding(selectedBinding: replacement) == replacement)
+            #expect(target.setBinding(replacement))
+            #expect(target.managedBinding == replacement)
+
+            var lowerTrust = replacement
+            lowerTrust.source = "agent-hook"
+            lowerTrust.workbenchAuthorityEvidence = .inferred
+            lowerTrust.command = "copilot --resume \(sessionID)"
+            #expect(!target.setBinding(lowerTrust))
+            #expect(target.managedBinding == replacement)
+        }
+    }
+
+    @MainActor
     @Test func SurfaceResumeSetAppliesVerifiedLauncherOwnershipAndAuthorityOnlyUpdates() throws {
         let manager = TabManager(autoWelcomeIfNeeded: false)
         defer { TerminalController.shared.setActiveTabManager(nil) }
