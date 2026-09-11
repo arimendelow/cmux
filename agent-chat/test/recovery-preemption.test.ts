@@ -301,10 +301,10 @@ async function harness(options: {
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
-    async assertSameBoss(id = bossId, providerSession = peerSessionId) {
+    async assertSameBoss(id = bossId, providerSession = peerSessionId, allocations = options.fresh ? 1 : 0) {
       const pointer = JSON.parse(await readFile(join(root, "sessions/canonical-boss.json"), "utf8"));
       expect(pointer).toEqual({ version: 1, agent: "example-boss", sessionId: id });
-      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(options.fresh ? 1 : 0);
+      expect(peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(allocations);
       expect(peers.all.filter((entry) => entry.message.method === "session/load")
         .every((entry) => entry.message.params.sessionId === providerSession)).toBe(true);
     },
@@ -944,14 +944,14 @@ for (const withImage of [false, true]) test(`lost Stop acknowledgment never rest
   const renders = new Inbox<SessionState>();
   const delayed: Array<() => void> = [];
   let holdRetirement = true;
-  const client = await clientFixture(h.url, (message, deliver) => {
-    frames.push(message);
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
+    frames.push({ ...message, connection });
     if (message.kind === "start-retired" && holdRetirement) {
       delayed.push(deliver);
       return true;
     }
     return false;
-  }, "en", (message) => sent.push(message));
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
   const prompt = "Keep this stopped draft.";
   const attachments = withImage
     ? [{ id: "stopped-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3 }]
@@ -977,8 +977,10 @@ for (const withImage of [false, true]) test(`lost Stop acknowledgment never rest
       await h.restart();
       const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
         && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
-      expect(replay).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
-      const result = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "start-retired");
+      const { connection, ...request } = replay;
+      expect(request).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const result = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.connection === connection && message.kind === "start-retired");
       expect(result.sessionId).toBeUndefined();
       expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(1);
       expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
@@ -999,7 +1001,7 @@ for (const withImage of [false, true]) test(`lost Stop acknowledgment never rest
     const later = await h.prompt();
     await renders.next((value) => value.session?.id === later.message.params.sessionId);
     await h.messages.next((message) => message.kind === "boss-state" && message.boss.sessionId === later.message.params.sessionId);
-    await h.assertSameBoss(later.message.params.sessionId, later.message.params.sessionId);
+    await h.assertSameBoss(later.message.params.sessionId, later.message.params.sessionId, 2);
     expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
     later.finish();
   } finally { await client.stop(); await h.stop(); }
@@ -1016,13 +1018,13 @@ test("lost Stop acknowledgment retains an admitted Boss and ignores settled repl
   const delayedRetired: Array<() => void> = [];
   let holdCreation = true;
   let holdRetirement = true;
-  const client = await clientFixture(h.url, (message, deliver) => {
-    frames.push(message);
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
+    frames.push({ ...message, connection });
     if (holdCreation && message.kind === "session-created") { delayedCreated.push(deliver); return true; }
     if (holdCreation && message.kind === "history") { delayedHistory.push(deliver); return true; }
     if (holdRetirement && message.kind === "start-retired") { delayedRetired.push(deliver); return true; }
     return false;
-  }, "en", (message) => sent.push(message));
+  }, "en", (message, connection) => sent.push({ ...message, connection }));
   let state: SessionState;
   function Root() { state = useSession(); renders.push(state); return null; }
   try {
@@ -1048,8 +1050,10 @@ test("lost Stop acknowledgment retains an admitted Boss and ignores settled repl
       await h.restart();
       const replay = await sent.next((message) => sent.all.indexOf(message) >= outgoingCursor
         && message.requestId === start.requestId && ["start", "cancel-start"].includes(message.op));
-      expect(replay).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
-      const retained = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "start-retired");
+      const { connection, ...request } = replay;
+      expect(request).toEqual({ op: "cancel-start", requestId: start.requestId, retire: true });
+      const retained = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.connection === connection && message.kind === "start-retired");
       expect(retained.sessionId).toBe(id);
       await h.assertSameBoss(id, id);
     }
