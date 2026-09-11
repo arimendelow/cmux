@@ -90,6 +90,38 @@ interface PeerRequest {
   finish(result?: unknown, error?: string): void;
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    // A denied null signal is not proof that the process or group has disappeared.
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function remainingProcesses(pids: Iterable<number>): Promise<number[]> {
+  const recorded = [...pids];
+  const deadline = performance.now() + 2_000;
+  while (recorded.some(processExists) && performance.now() < deadline) await Bun.sleep(20);
+  return recorded.filter(processExists);
+}
+
+// A failed lifecycle assertion must not itself strand the deliberately stubborn test peer.
+async function reapRecordedTestProcesses(pids: Iterable<number>) {
+  const recorded = [...pids];
+  if (recorded.some((pid) => !Number.isSafeInteger(pid) || pid <= 1)) throw new Error("invalid recorded fixture PID");
+  for (const pid of recorded) {
+    try { process.kill(pid, "SIGKILL"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  }
+  const remaining = await remainingProcesses(recorded);
+  console.log("recovery fixture cleanup", JSON.stringify({ recorded, remaining }));
+  expect(remaining).toEqual([]);
+}
+
 async function harness(options: {
   facts?: ReturnType<typeof snapshot>;
   holdNative?: boolean;
@@ -106,6 +138,7 @@ async function harness(options: {
   optionFailure?: boolean;
   holdOption?: boolean;
   holdPromptInput?: boolean;
+  peerLifetime?: "until-sigterm" | "until-sigkill";
   replayPrompt?: string;
   clock?: boolean;
 } = {}) {
@@ -214,6 +247,8 @@ async function harness(options: {
       "server.ts",
     ], {
       cwd: join(import.meta.dir, ".."),
+      // The fixture owns this group, including peers that outlive the sidecar.
+      detached: true,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -222,6 +257,8 @@ async function harness(options: {
         HOME: root,
         RECOVERY_TEST_URL: `http://127.0.0.1:${control.port}`,
         RECOVERY_TEST_HOLD_PROMPT_INPUT: options.holdPromptInput ? "1" : "",
+        RECOVERY_TEST_PROCESS_LOG: join(root, "processes.jsonl"),
+        RECOVERY_TEST_PEER_LIFETIME: options.peerLifetime ?? "",
         CMUX_AGENT_CHAT_OURO_COMMAND: peer,
         CMUX_BUNDLED_CLI_PATH: peer,
         CMUX_SOCKET_PATH: join(root, "native.sock"),
@@ -247,7 +284,27 @@ async function harness(options: {
       if (line.startsWith("test-clock:")) ticks.push(Number(line.slice(11)));
       if (line === "test-startup-timeout") ticks.push({ startup: true });
     }, () => address.reject(new Error(errors.join("\n"))));
-    return { child, url: await address.promise };
+    let stopping: Promise<void> | undefined;
+    return {
+      child,
+      url: await address.promise,
+      stop() {
+        return stopping ??= (async () => {
+          const group = -child.pid;
+          const exited = child.exited;
+          const signal = (value: "SIGTERM" | "SIGKILL") => {
+            try { process.kill(group, value); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+          };
+          signal("SIGTERM");
+          if ((await remainingProcesses([group])).length) signal("SIGKILL");
+          await exited;
+          const remaining = await remainingProcesses([group]);
+          console.log("recovery fixture group exit", JSON.stringify({ leader: child.pid, remaining }));
+          if (remaining.length) throw new Error(`fixture process group ${child.pid} did not exit`);
+        })();
+      },
+    };
   }
   let server = await launch();
   const url = server.url;
@@ -268,6 +325,10 @@ async function harness(options: {
   return {
     url,
     root,
+    get pid() { return server.child.pid; },
+    async processes(): Promise<Array<{ pid: number; ppid: number; role: string }>> {
+      return (await readFile(join(root, "processes.jsonl"), "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    },
     peers,
     native,
     async expireStartup() {
@@ -300,8 +361,7 @@ async function harness(options: {
     async boss() { return (await fetch(`${url}/api/boss`)).json() as Promise<any>; },
     async restart() {
       socket.close();
-      server.child.kill();
-      await server.child.exited;
+      await server.stop();
       server = await launch(Number(new URL(url).port));
       socket = await connect();
     },
@@ -315,8 +375,7 @@ async function harness(options: {
       nativeReady.resolve();
       for (const entry of peers.all) entry.finish({ stopReason: "cancelled" });
       socket.close();
-      server.child.kill();
-      await server.child.exited;
+      await server.stop();
       control.stop(true);
       await rm(root, { recursive: true, force: true });
     },
@@ -329,6 +388,111 @@ async function harness(options: {
     },
   };
 }
+
+for (const phase of ["initializing", "allocated", "idle"]) test(`recovery fixture teardown reaps ${phase} descendants that ignore SIGTERM`, async () => {
+  const h = await harness({
+    fresh: true, manualInitialize: phase === "initializing", holdOption: phase === "allocated",
+    peerLifetime: "until-sigkill", facts: snapshot(),
+  });
+  const recorded = new Set([h.pid]);
+  let stopped = false;
+  try {
+    h.send(phase === "idle" ? { op: "warm-boss" } : {
+      op: "start", requestId: "teardown-start", provider: "ouro-boss", cwd: h.root,
+      prompt: "Synthetic startup request.", options: phase === "allocated" ? { mode: "plan" } : {},
+    });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    if (phase === "allocated") await h.peers.next((entry) => entry.message.method === "session/set_mode");
+    if (phase === "idle") await h.messages.next((message) => message.kind === "boss-capabilities");
+    const children = await h.processes();
+    expect(children.filter((child) => child.role === "acp")).toHaveLength(1);
+    for (const child of children) {
+      expect(child.ppid).toBe(h.pid);
+      expect(processExists(child.pid)).toBe(true);
+      recorded.add(child.pid);
+    }
+    await h.stop();
+    stopped = true;
+    expect(await remainingProcesses(recorded)).toEqual([]);
+    recorded.clear();
+  } finally {
+    try { if (!stopped) await h.stop(); }
+    finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
+
+test("recovery fixture teardown reaps a responsive peer after its sidecar has exited", async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, peerLifetime: "until-sigterm", facts: snapshot() });
+  const recorded = new Set([h.pid]);
+  let stopped = false;
+  try {
+    h.send({ op: "start", requestId: "orphaned-start", provider: "ouro-boss", cwd: h.root, prompt: "Synthetic startup request." });
+    await h.peers.next((entry) => entry.message.method === "initialize");
+    const children = await h.processes();
+    expect(children.filter((child) => child.role === "acp")).toHaveLength(1);
+    for (const child of children) {
+      expect(child.ppid).toBe(h.pid);
+      recorded.add(child.pid);
+    }
+    process.kill(h.pid, "SIGKILL");
+    expect(await remainingProcesses([h.pid])).toEqual([]);
+    expect(children.every((child) => processExists(child.pid))).toBe(true);
+    await h.stop();
+    stopped = true;
+    expect(await remainingProcesses(recorded)).toEqual([]);
+    recorded.clear();
+  } finally {
+    try {
+      if (!stopped) await h.stop();
+      for (const pid of recorded) {
+        try { process.kill(pid, "SIGTERM"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+      const remaining = await remainingProcesses(recorded);
+      console.log("recovery fixture SIGTERM cleanup", JSON.stringify({ recorded: [...recorded], remaining }));
+      expect(remaining).toEqual([]);
+      recorded.clear();
+    } finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
+
+test("recovery fixture restarts twice and stops without leaving any recorded descendants", async () => {
+  const h = await harness({ peerLifetime: "until-sigkill", facts: snapshot("resuming", "restoring") });
+  const recorded = new Set<number>();
+  let stopped = false;
+  let peerCursor = 0;
+  let nativeCursor = 0;
+  try {
+    for (const action of ["restart", "restart", "stop"] as const) {
+      h.send({ op: "subscribe", sessionId: bossId });
+      h.send({ op: "warm-boss" });
+      await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "session/load");
+      await h.native.next((request) => h.native.all.indexOf(request) >= nativeCursor && Array.isArray(request.stream));
+      const children = (await h.processes()).filter((child) => child.ppid === h.pid);
+      expect(children.some((child) => child.role === "acp" && processExists(child.pid))).toBe(true);
+      expect(children.some((child) => child.role === "events" && processExists(child.pid))).toBe(true);
+      const generation = [h.pid, ...children.map((child) => child.pid)];
+      for (const pid of generation) recorded.add(pid);
+      peerCursor = h.peers.all.length;
+      nativeCursor = h.native.all.length;
+      await h[action]();
+      stopped = action === "stop";
+      expect(await remainingProcesses(generation)).toEqual([]);
+      for (const pid of generation) recorded.delete(pid);
+    }
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/new")).toHaveLength(0);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(0);
+    expect(await remainingProcesses(recorded)).toEqual([]);
+  } finally {
+    try {
+      if (!stopped) {
+        recorded.add(h.pid);
+        for (const child of await h.processes()) if (child.ppid === h.pid) recorded.add(child.pid);
+        await h.stop();
+      }
+    } finally { await reapRecordedTestProcesses(recorded); }
+  }
+});
 
 test("clean native restore emits a factual receipt without a speculative model turn", async () => {
   const facts = snapshot();
@@ -1095,14 +1259,16 @@ test("lost Stop acknowledgment retains an admitted Boss and ignores settled repl
   } finally { await client.stop(); await h.stop(); }
 });
 
-async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = []) {
+async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments: SessionState["composerAttachments"] = [], locale = "en") {
   const frames = new Inbox<any>();
   const sent = new Inbox<any>();
   const renders = new Inbox<SessionState>();
-  const client = await clientFixture(h.url, (message, _deliver, connection) => {
+  let repeatUnknown: (() => void) | undefined;
+  const client = await clientFixture(h.url, (message, deliver, connection) => {
     frames.push({ ...message, connection });
+    if (message.kind === "boss-capabilities" && message.image === "unknown") repeatUnknown = deliver;
     return false;
-  }, "en", (message, connection) => sent.push({ ...message, connection }));
+  }, locale, (message, connection) => sent.push({ ...message, connection }));
   sessionStorage.setItem(composerDraftKey, "Keep this negotiation draft.");
   let state: SessionState;
   let tree: ReactElement;
@@ -1126,7 +1292,16 @@ async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments:
     textarea: () => findElement(tree, (node) => node.type === "textarea").props,
     tray: () => findElement(tree, (node) => node.type === ImageAttachmentTray).props,
     submit: () => findElement(tree, (node) => node.props["aria-label"] === "Start").props,
-    retry: () => findElement(tray, (node) => node.type === "button" && node.props.children === "Retry"),
+    retry: () => findElement(tray, (node) => node.type === "button" && ["Retry", "\u518d\u8a66\u884c"].includes(node.props.children)),
+    repeatUnknown() {
+      if (!repeatUnknown) throw new Error("no received unknown capability packet to replay");
+      repeatUnknown();
+    },
+    async barrier() {
+      const cursor = frames.all.length;
+      act(() => state.checkCwd(h.root));
+      await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "cwd-check");
+    },
     stop: client.stop,
   };
 }
@@ -1134,6 +1309,103 @@ async function rootComposer(h: Awaited<ReturnType<typeof harness>>, attachments:
 const stagedNegotiationImage = {
   id: "negotiation-image", name: "example.png", mimeType: "image/png", data: "cG5n", byteCount: 3,
 };
+
+for (const [initial, replacement, locale] of [
+  ["supported", "supported", "en"],
+  ["supported", "unsupported", "en"],
+  ["unsupported", "supported", "en"],
+  ["unsupported", "unsupported", "en"],
+  ["supported", "supported", "ja-JP"],
+] as const) test(`prepared Boss peer exit recovers ${initial} to ${replacement} twice in ${locale}`, async () => {
+  const h = await harness({ fresh: true, manualInitialize: true, facts: snapshot() });
+  const ui = await rootComposer(h, [stagedNegotiationImage], locale);
+  const connecting = locale === "ja-JP" ? "Boss \u306b\u63a5\u7d9a\u3057\u3066\u3044\u307e\u3059\u3002" : "Connecting to Boss.";
+  const lost = locale === "ja-JP" ? "Boss \u3068\u306e\u63a5\u7d9a\u304c\u5931\u308f\u308c\u307e\u3057\u305f\u3002" : "The Boss connection was lost.";
+  let expectedImages = initial === "supported" ? [stagedNegotiationImage] : [];
+  try {
+    const first = await h.peers.next((entry) => entry.message.method === "initialize");
+    expect(ui.state().imageCapability).toBe("unknown");
+    expect(ui.state().bossPreparationError).toBe("");
+    expect(ui.html()).toContain(connecting);
+    expect(ui.retry()).toBeNull();
+    expect(ui.submit().disabled).toBe(true);
+    first.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: initial === "supported" } } });
+    await ui.renders.next((value) => value.imageCapability === initial);
+    await ui.barrier();
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      const peer = (await h.processes()).filter((child) => child.role === "acp").at(-1)!;
+      expect(peer.ppid).toBe(h.pid);
+      expect(Number.isSafeInteger(peer.pid) && peer.pid > 1).toBe(true);
+      expect(processExists(peer.pid)).toBe(true);
+      const frameCursor = ui.frames.all.length;
+      process.kill(peer.pid, "SIGTERM");
+      expect(await remainingProcesses([peer.pid])).toEqual([]);
+      await ui.frames.next((message) => ui.frames.all.indexOf(message) >= frameCursor
+        && message.kind === "boss-capabilities" && message.image === "unknown");
+      expect(ui.state().imageCapability).toBe("unknown");
+      expect(ui.html()).toContain(lost);
+      expect(ui.html()).not.toContain(connecting);
+      expect(ui.retry()).not.toBeNull();
+      expect(ui.retry().props.type).toBe("button");
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+
+      const draft = `Keep the draft after peer exit ${cycle + 1}.`;
+      act(() => {
+        ui.textarea().onChange({ target: { value: draft } });
+        ui.submit().onClick();
+        ui.textarea().onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+      });
+      ui.repeatUnknown();
+      await ui.barrier();
+      expect(ui.html()).toContain(lost);
+      expect(ui.textarea().value).toBe(draft);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      expect(ui.sent.all.filter((message) => message.op === "start")).toHaveLength(0);
+      expect(ui.sent.all.filter((message) => message.op === "warm-boss")).toHaveLength(cycle + 1);
+
+      const peerCursor = h.peers.all.length;
+      act(() => ui.retry().props.onClick());
+      const initialize = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "initialize");
+      expect(ui.state().imageCapability).toBe("unknown");
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).toContain(connecting);
+      expect(ui.retry()).toBeNull();
+      expect(ui.submit().disabled).toBe(true);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      ui.repeatUnknown();
+      await ui.barrier();
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).toContain(connecting);
+      expect(ui.retry()).toBeNull();
+      expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+
+      const renderCursor = ui.renders.all.length;
+      initialize.finish({ protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: replacement === "supported" } } });
+      await ui.renders.next((value) => ui.renders.all.indexOf(value) >= renderCursor && value.imageCapability === replacement);
+      await ui.barrier();
+      if (replacement === "unsupported") expectedImages = [];
+      expect(ui.textarea().value).toBe(draft);
+      expect(ui.tray().attachments).toEqual(expectedImages);
+      expect(ui.submit().disabled).toBe(false);
+      expect(ui.retry()).toBeNull();
+      expect(ui.state().bossPreparationError).toBe("");
+      expect(ui.html()).not.toContain(lost);
+      expect(ui.html()).not.toContain(connecting);
+    }
+    expect(ui.frames.all.filter((message) => message.kind === "hello")).toHaveLength(1);
+    const warmups = ui.sent.all.filter((message) => message.op === "warm-boss");
+    expect(warmups).toHaveLength(3);
+    expect(new Set(warmups.map((message) => message.connection)).size).toBe(1);
+    expect(h.peers.all.filter((entry) => entry.message.method === "initialize")).toHaveLength(3);
+    expect(h.peers.all.filter((entry) => ["session/new", "session/prompt"].includes(entry.message.method))).toHaveLength(0);
+    expect((await h.boss()).pointer).toBeNull();
+    expect(ui.state().session).toBeNull();
+  } finally { await ui.stop(); await h.stop(); }
+});
 
 for (const failure of ["error", "timeout"]) for (const supported of [true, false]) {
   test(`initial negotiation ${failure} retries to ${supported ? "supported" : "unsupported"} on the same websocket`, async () => {
