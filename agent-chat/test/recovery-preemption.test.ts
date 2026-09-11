@@ -829,22 +829,36 @@ test("an unacknowledged client start replays after sidecar restart into the same
     first.finish();
     await frames.next((message) => message.kind === "session-status" && message.status === "idle");
     await h.assertSameBoss(id, id);
-    const cursor = frames.all.length;
-    holdAcknowledgment = false;
-    await h.restart();
-    const load = await h.peers.next((entry) => entry.message.method === "session/load");
-    expect(load.message.params.sessionId).toBe(id);
-    expect(frames.all.slice(cursor).some((message) => message.kind === "history")).toBe(false);
-    load.finish({});
-    const replayed = await frames.next((message) => frames.all.indexOf(message) >= cursor
-      && message.requestId === created.requestId && ["session-created", "error"].includes(message.kind));
-    expect(replayed.kind).toBe("session-created");
-    expect(replayed.session.id).toBe(id);
-    const history = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "history");
-    expect(history.events).toContainEqual({ kind: "user", text: prompt });
-    await renders.next((value) => value.session?.id === id && value.blocks.some((block) => block.kind === "user" && block.text === prompt));
-    expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
-    await h.assertSameBoss(id, id);
+    for (const acknowledge of [false, true]) {
+      const cursor = frames.all.length;
+      const peerCursor = h.peers.all.length;
+      holdAcknowledgment = !acknowledge;
+      await h.restart();
+      const load = await h.peers.next((entry) => h.peers.all.indexOf(entry) >= peerCursor && entry.message.method === "session/load");
+      expect(load.message.params.sessionId).toBe(id);
+      expect(frames.all.slice(cursor).some((message) => message.kind === "history")).toBe(false);
+      load.finish({});
+      const replayed = await frames.next((message) => frames.all.indexOf(message) >= cursor
+        && message.requestId === created.requestId && ["session-created", "error"].includes(message.kind));
+      expect(replayed.kind).toBe("session-created");
+      expect(replayed.session.id).toBe(id);
+      const history = await frames.next((message) => frames.all.indexOf(message) >= cursor && message.kind === "history");
+      expect(history.events.filter((event: any) => event.kind === "user")).toEqual([{ kind: "user", text: prompt }]);
+      if (acknowledge) {
+        await renders.next((value) => value.session?.id === id && value.blocks.some((block) => block.kind === "user" && block.text === prompt));
+      } else {
+        expect(state.session?.id).not.toBe(id);
+      }
+      // An idle retirement receipt also waits for the restored record's pending write.
+      const retirementCursor = h.messages.all.length;
+      h.send({ op: "cancel-start", requestId: created.requestId, retire: true });
+      const retained = await h.messages.next((message) => h.messages.all.indexOf(message) >= retirementCursor && message.kind === "start-retired");
+      expect(retained.sessionId).toBe(id);
+      expect(h.peers.all.filter((entry) => entry.message.method === "session/prompt")).toHaveLength(1);
+      await h.assertSameBoss(id, id);
+    }
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/load")).toHaveLength(2);
+    expect(h.peers.all.filter((entry) => entry.message.method === "session/cancel")).toHaveLength(0);
   } finally { await client.stop(); await h.stop(); }
 });
 
@@ -885,7 +899,7 @@ test("start replay crosses the 60s cache expiry without replacing Boss or interr
   } finally { await h.stop(); }
 });
 
-test("retirement preserves a first prompt whose blocked pipe write admits during cancellation", async () => {
+for (const duplicate of [false, true]) test(`retirement preserves a first prompt whose blocked pipe write admits during cancellation${duplicate ? " with a duplicate retirement" : ""}`, async () => {
   const h = await harness({ fresh: true, holdPromptInput: true, facts: snapshot() });
   const start = {
     op: "start", requestId: "writing-start", provider: "ouro-boss", cwd: h.root,
@@ -901,7 +915,15 @@ test("retirement preserves a first prompt whose blocked pipe write admits during
     await h.messages.next((message) => message.kind === "cwd-check");
     blocked.finish();
     const first = await h.prompt();
-    await h.peers.next((entry) => entry.message.method === "session/cancel");
+    const cancelling = await h.peers.next((entry) => entry.message.method === "session/cancel");
+    if (duplicate) {
+      // createStart also cancels after admission; its write proves admission happened.
+      await h.peers.next((entry) => entry.message.method === "session/cancel" && h.peers.all.indexOf(entry) > h.peers.all.indexOf(cancelling));
+      const cursor = h.messages.all.length;
+      h.send({ op: "cancel-start", requestId: start.requestId, retire: true });
+      h.send({ op: "check-cwd", cwd: h.root });
+      await h.messages.next((message) => h.messages.all.indexOf(message) >= cursor && message.kind === "cwd-check");
+    }
     first.finish({ stopReason: "cancelled" });
     const retired = await h.messages.next((message) => message.kind === "start-retired");
     expect(retired.sessionId).toBe(first.message.params.sessionId);
