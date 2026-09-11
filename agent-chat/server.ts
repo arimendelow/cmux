@@ -1196,7 +1196,6 @@ function hasBossRelationship(sess: Session): boolean {
   return isCanonicalBossSession(sess) && (
     sess.internal.admissionPending !== true
     || Number(sess.internal.turnGeneration ?? 0) > 0
-    || Boolean(sess.internal.persistedProviderSessionId || sess.internal.acpResumeSessionId)
   );
 }
 
@@ -3454,9 +3453,13 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       const provider = headless ? "ouro-boss" : String(msg.provider);
       pruneStartRequests();
       const existing = !headless && requestId ? startRequests.get(requestId) : undefined;
+      const canonical = sessions.get(canonicalBossSessionId() ?? "");
+      const replayed = !headless && requestId && canonical?.internal.startRequestId === requestId
+        ? canonical
+        : undefined;
       // A replayed request id is the same start, not a second Boss: a client
       // that reconnects mid-start must re-attach instead of being refused.
-      const bossStartToken = headless || existing ? null : assertBossStartAllowed(provider);
+      const bossStartToken = headless || existing || replayed ? null : assertBossStartAllowed(provider);
       const start = resolveSessionStart(provider, headless ? false : msg.autoApprove);
       const adapter = adapters.get(provider);
       if (!adapter) throw new Error(`provider not found: ${provider}`);
@@ -3509,6 +3512,8 @@ async function handleMessage(ws: Bun.ServerWebSocket<WsData>, msg: any) {
       let startPromise: Promise<Session>;
       if (existing) {
         startPromise = existing.promise;
+      } else if (replayed) {
+        startPromise = Promise.resolve(replayed.adapter.warmup?.(replayed)).then(() => replayed);
       } else if (!headless && requestId) {
         const entry: StartRequest = {
           createdAt: Date.now(),
