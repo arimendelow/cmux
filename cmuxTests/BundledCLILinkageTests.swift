@@ -1,6 +1,11 @@
 import XCTest
 
 enum BundledCLITestSupport {
+    static func cliFixtureEnvironment(_ environment: [String: String]) -> [String: String] {
+        // Preserve the pre-fix launch behavior until the containment regressions establish red.
+        environment
+    }
+
     static func bundledCLIPath(
         for bundleClass: AnyClass,
         file: StaticString = #filePath,

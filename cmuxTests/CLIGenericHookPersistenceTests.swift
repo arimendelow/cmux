@@ -339,6 +339,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "antigravity", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -3205,6 +3206,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", scenario.agent, scenario.subcommand],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(scenario.sessionId)","cwd":"\#(workspace.path)","hook_event_name":"SessionStart"}"#,
             timeout: 5
         )
