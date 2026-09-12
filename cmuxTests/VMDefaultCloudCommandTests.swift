@@ -131,7 +131,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -140,6 +140,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "new"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -210,16 +211,16 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: homeURL)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
-        environment["HOME"] = homeURL.path
 
         let result = runProcess(
             executablePath: cliPath,
             arguments: ["vm", "new", "--provider", "freestyle", "--detach"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -388,7 +389,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -397,6 +398,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "new"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -547,7 +549,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -556,6 +558,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "new"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -648,7 +651,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceID
         environment["CMUX_SURFACE_ID"] = surfaceID
@@ -662,6 +665,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -763,7 +767,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -776,6 +780,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -849,7 +854,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -862,6 +867,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 15
         )
 
@@ -910,7 +916,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -921,6 +927,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -980,7 +987,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -993,6 +1000,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -1049,7 +1057,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -1064,6 +1072,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -1120,7 +1129,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
@@ -1133,6 +1142,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh-attach", "--id", vmID, "--default-freestyle-sshd"],
             environment: environment,
+            cliFixture: true,
             timeout: 1
         )
 

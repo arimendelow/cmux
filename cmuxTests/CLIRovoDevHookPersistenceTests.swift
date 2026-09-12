@@ -41,7 +41,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             return self.v2Response(id: id, ok: false, error: ["code": "unrecognized_method", "message": "unexpected method: \(method)"])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -65,6 +65,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "rovodev", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"cwd":"\#(workspace.path)","hook_event_name":"on_tool_permission"}"#,
             timeout: 5
         )
@@ -166,6 +167,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 ]),
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"cwd":"\#(workspace.path)","hook_event_name":"on_tool_permission"}"#,
             timeout: 5
         )
@@ -264,6 +266,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "rovodev", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"cwd":"\#(workspace.path)","hook_event_name":"on_tool_permission"}"#,
             timeout: 5
         )
@@ -334,6 +337,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "rovodev", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"hook_event_name":"on_tool_permission"}"#,
             timeout: 5
         )
@@ -372,6 +376,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -402,6 +407,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "\(binDir.path):/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -433,6 +439,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -456,6 +463,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 

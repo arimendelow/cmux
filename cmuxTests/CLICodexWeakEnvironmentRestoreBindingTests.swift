@@ -43,8 +43,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["PWD"] = workspace.path
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
@@ -63,6 +62,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(workspace.path)","hook_event_name":"UserPromptSubmit","prompt":"review this"}"#,
             timeout: 5
         )
@@ -181,8 +181,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["PWD"] = worktree.path
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
@@ -208,6 +207,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(worktree.path)","hook_event_name":"UserPromptSubmit","prompt":"review this"}"#,
             timeout: 5
         )
@@ -296,8 +296,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["PWD"] = repo.path
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
@@ -313,6 +312,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(repo.path)","hook_event_name":"UserPromptSubmit","prompt":"review this"}"#,
             timeout: 5
         )

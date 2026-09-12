@@ -101,8 +101,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 }
             }
 
-            var environment = ProcessInfo.processInfo.environment
-            environment["HOME"] = root.path
+            var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
             environment["CMUX_SOCKET_PATH"] = socketPath
             environment["CMUX_WORKSPACE_ID"] = workspaceId
             environment["CMUX_SURFACE_ID"] = surfaceId
@@ -119,6 +118,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "codex", "prompt-submit"],
                 environment: environment,
+                cliFixture: true,
                 standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","transcript_path":"\#(transcriptURL.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
                 timeout: 5
             )

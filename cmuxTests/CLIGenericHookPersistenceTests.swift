@@ -591,6 +591,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "hermes-agent", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -756,6 +757,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "hermes-agent", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -867,6 +869,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_BUNDLED_CLI_PATH": root.path,
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -948,6 +951,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -1039,6 +1043,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_KIRO_NOTIFICATION_LEVEL": "standard",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"hook_event_name":"preToolUse","session_id":"kiro-session-123","cwd":"\#(root.path)","tool_name":"fs_write","tool_input":{"operations":[{"mode":"Line","path":"\#(root.appendingPathComponent("README.md").path)"}]}}"#,
             timeout: 5
         )
@@ -1108,6 +1113,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "CMUX_KIRO_NOTIFICATION_LEVEL": "standard",
                     "CMUX_CLI_SENTRY_DISABLED": "1",
                 ],
+                cliFixture: true,
                 standardInput: #"{"hook_event_name":"preToolUse","session_id":"kiro-session-mode","cwd":"\#(root.path)","tool_name":"fs_write","tool_input":{"operations":[{"mode":"Line","path":"\#(root.appendingPathComponent("README.md").path)"}]}}"#,
                 timeout: 5
             )
@@ -1167,6 +1173,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "CMUX_KIRO_NOTIFICATION_LEVEL": "standard",
                     "CMUX_CLI_SENTRY_DISABLED": "1",
                 ],
+                cliFixture: true,
                 standardInput: #"{"hook_event_name":"postToolUse","session_id":"kiro-suppress","cwd":"\#(root.path)","tool_name":"\#(tool)"}"#,
                 timeout: 5
             )
@@ -1228,6 +1235,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_GEMINI_PID": "626262",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"hook_event_name":"PreToolUse","session_id":"gemini-session-123","cwd":"\#(root.path)","tool_name":"write","tool_input":{"path":"\#(root.appendingPathComponent("README.md").path)"}}"#,
             timeout: 5
         )
@@ -1298,6 +1306,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "feed", "--source", "antigravity", "--event", "PreToolUse"],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -1380,6 +1389,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -1972,6 +1982,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -2133,6 +2144,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -2235,6 +2247,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -2339,6 +2352,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -2530,6 +2544,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 executablePath: cliPath,
                 arguments: ["hooks", "grok", subcommand],
                 environment: environment,
+                cliFixture: true,
                 standardInput: input,
                 timeout: 5
             )
@@ -2681,6 +2696,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "grok", "notification"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"sessionId":"\#(completingSessionId)","cwd":"\#(root.path)","hookEventName":"Notification","message":"Turn complete in 1.0s."}"#,
             timeout: 5
         )
@@ -2793,6 +2809,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -2872,6 +2889,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_SOCKET_PATH": socketPath,
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -2955,6 +2973,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3016,6 +3035,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3072,6 +3092,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3129,6 +3150,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "CMUX_CLI_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3335,8 +3357,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -3352,6 +3373,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -3450,8 +3472,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = leakedSurfaceId
@@ -3467,6 +3488,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -3538,8 +3560,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = staleSurfaceId
@@ -3555,6 +3576,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -3626,8 +3648,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = root.path
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -3645,6 +3666,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )

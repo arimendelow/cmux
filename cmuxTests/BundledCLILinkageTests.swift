@@ -1,9 +1,45 @@
 import XCTest
 
 enum BundledCLITestSupport {
-    static func cliFixtureEnvironment(_ environment: [String: String]) -> [String: String] {
-        // Preserve the pre-fix launch behavior until the containment regressions establish red.
-        environment
+    static let fixtureSocketPassword = "cmux-native-test-fixture-password"
+
+    static func cliFixtureEnvironment(_ environment: [String: String]) throws -> [String: String] {
+        guard let home = environment["HOME"], home.hasPrefix("/") else {
+            throw NSError(domain: "cmux.tests", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "A CLI fixture must supply its own absolute HOME.",
+            ])
+        }
+        var result = environment
+        result["CFFIXED_USER_HOME"] = home
+        result["CMUX_SOCKET_PASSWORD"] = fixtureSocketPassword
+        return result
+    }
+
+    static func fixtureEnvironment(home: URL) -> [String: String] {
+        [
+            "HOME": home.path,
+            "TMPDIR": home.path,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "CMUX_CLI_SENTRY_DISABLED": "1",
+            "CMUX_CLAUDE_HOOK_SENTRY_DISABLED": "1",
+        ]
+    }
+
+    static func makeFixtureHome() throws -> URL {
+        guard let temporaryDirectory = ProcessInfo.processInfo.environment["TMPDIR"],
+              temporaryDirectory.hasPrefix("/") else {
+            throw NSError(domain: "cmux.tests", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "CLI fixtures require an explicitly supplied test TMPDIR.",
+            ])
+        }
+        let home = URL(fileURLWithPath: temporaryDirectory, isDirectory: true)
+            .appendingPathComponent("cmux-cli-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: home,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return home
     }
 
     static func bundledCLIPath(

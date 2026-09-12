@@ -83,6 +83,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_CLI_SENTRY_DISABLED": "1",
                 "CMUX_CLAUDE_HOOK_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","hook_event_name":"Notification","message":"Claude needs your input"}"#,
             timeout: 5
         )
@@ -185,6 +186,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_CLI_SENTRY_DISABLED": "1",
                 "CMUX_CLAUDE_HOOK_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"session_id":"orphan-ambiguous","hook_event_name":"Notification","message":"Claude needs your input"}"#,
             timeout: 5
         )
@@ -283,6 +285,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_CLI_SENTRY_DISABLED": "1",
                 "CMUX_CLAUDE_HOOK_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"session_id":"explicit-ref","hook_event_name":"Notification","message":"Claude needs your input"}"#,
             timeout: 5
         )
@@ -389,6 +392,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_CLI_SENTRY_DISABLED": "1",
                 "CMUX_CLAUDE_HOOK_SENTRY_DISABLED": "1",
             ],
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","hook_event_name":"Notification","message":"Claude needs your input"}"#,
             timeout: 5
         )

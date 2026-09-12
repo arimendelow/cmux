@@ -60,7 +60,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
             let bridgeHandled = startBridgeReadyThenCloseServer(listenerFD: bridge.fd)
 
-            var environment = ProcessInfo.processInfo.environment
+            var environment = try makeCLIFixtureEnvironment()
             environment["CMUX_SOCKET_PATH"] = socketPath
             environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
             environment["CMUX_SSH_PTY_ATTACH_WRAPPER_CAN_RETRY"] = "1"
@@ -73,6 +73,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     "--attachment-id", surfaceID,
                 ],
                 environment: environment,
+                cliFixture: true,
                 timeout: 5
             )
 
@@ -147,7 +148,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             capture: bridgeInput
         )
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -170,6 +171,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             standardInput: queuedProbeReplies + forwardedInput,
             timeout: 5
         )

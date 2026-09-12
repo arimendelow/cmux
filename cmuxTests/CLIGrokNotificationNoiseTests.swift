@@ -193,6 +193,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: context.cliPath,
             arguments: ["hooks", context.agent, subcommand],
             environment: context.environment,
+            cliFixture: true,
             standardInput: payload,
             timeout: 5
         )

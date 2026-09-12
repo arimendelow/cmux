@@ -368,6 +368,14 @@ extension CLINotifyProcessIntegrationRegressionTests {
         return data.base64EncodedString()
     }
 
+    func makeCLIFixtureEnvironment() throws -> [String: String] {
+        let home = try BundledCLITestSupport.makeFixtureHome()
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: home)
+        }
+        return BundledCLITestSupport.fixtureEnvironment(home: home)
+    }
+
     func runProcess(
         executablePath: String,
         arguments: [String],
@@ -382,12 +390,16 @@ extension CLINotifyProcessIntegrationRegressionTests {
         let stdinPipe = standardInput == nil ? nil : Pipe()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.environment = cliFixture ? BundledCLITestSupport.cliFixtureEnvironment(environment) : environment
         process.standardInput = stdinPipe ?? FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
         do {
+            if cliFixture {
+                process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
+            } else {
+                process.environment = environment
+            }
             try process.run()
         } catch {
             return ProcessRunResult(status: -1, stdout: "", stderr: String(describing: error), timedOut: false)
