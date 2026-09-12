@@ -32,7 +32,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             return self.v2Response(id: id, ok: false, error: ["code": "unrecognized_method", "message": "unexpected method: \(method)"])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -48,6 +48,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["codex-hook", "session-start"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -69,7 +70,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
 
     func testLegacyFeedHookAliasReturnsJSONWithoutHelpOutsideCmuxTerminal() throws {
         let cliPath = try bundledCLIPath()
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = makeSocketPath("legacy-feed")
         environment.removeValue(forKey: "CMUX_WORKSPACE_ID")
         environment.removeValue(forKey: "CMUX_SURFACE_ID")
@@ -79,6 +80,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["feed-hook", "--source", "codex"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"hook_event_name":"UserPromptSubmit","session_id":"legacy-feed"}"#,
             timeout: 5
         )

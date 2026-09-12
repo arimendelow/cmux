@@ -80,7 +80,7 @@ struct SSHConfiguredRemoteCommandHostTests {
             }
         }
 
-        var captureEnvironment = ProcessInfo.processInfo.environment
+        var captureEnvironment = BundledCLITestSupport.fixtureEnvironment(home: harness.root)
         captureEnvironment["CMUX_SOCKET_PATH"] = socketPath
         captureEnvironment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         captureEnvironment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -95,6 +95,7 @@ struct SSHConfiguredRemoteCommandHostTests {
                 "cmux-remotecommand-host",
             ],
             environment: captureEnvironment,
+            cliFixture: true,
             timeout: 20
         )
         processSupport.wait(for: [captureHandled], timeout: 5)
@@ -218,8 +219,10 @@ struct SSHConfiguredRemoteCommandHostTests {
         let listenerFD = try processSupport.bindUnixSocket(at: socketPath)
         let workspaceID = "11111111-1111-1111-1111-111111111111"
         let surfaceID = "22222222-2222-2222-2222-222222222222"
+        let home = try BundledCLITestSupport.makeFixtureHome()
 
         defer {
+            try? FileManager.default.removeItem(at: home)
             Darwin.close(listenerFD)
             unlink(socketPath)
         }
@@ -252,7 +255,7 @@ struct SSHConfiguredRemoteCommandHostTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: home)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -273,6 +276,7 @@ struct SSHConfiguredRemoteCommandHostTests {
             executablePath: cliPath,
             arguments: arguments,
             environment: environment,
+            cliFixture: true,
             timeout: 20
         )
         processSupport.wait(for: [handled], timeout: 5)
@@ -355,7 +359,7 @@ struct SSHConfiguredRemoteCommandHostTests {
             }
         }
 
-        var captureEnvironment = ProcessInfo.processInfo.environment
+        var captureEnvironment = BundledCLITestSupport.fixtureEnvironment(home: harness.root)
         captureEnvironment["CMUX_SOCKET_PATH"] = socketPath
         captureEnvironment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         captureEnvironment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -374,6 +378,7 @@ struct SSHConfiguredRemoteCommandHostTests {
                 "cmux-remotecommand-host",
             ],
             environment: captureEnvironment,
+            cliFixture: true,
             timeout: 20
         )
         processSupport.wait(for: [captureHandled], timeout: 5)
@@ -515,9 +520,29 @@ struct SSHConfiguredRemoteCommandHostTests {
             return environment
         }
 
-        func startupCommandUsingFakeSSH(_ startupCommand: String) throws -> String {
+        func startupCommandUsingFakeSSH(
+            _ startupCommand: String,
+            authenticationLock: (generated: String, fixture: String)? = nil
+        ) throws -> String {
             let systemSSHPath = "/usr/bin/ssh"
             let fakeSSHPath = binDirectory.appendingPathComponent("ssh").path
+            func fixtureScript(_ script: String) throws -> String {
+                var result = script.replacingOccurrences(of: systemSSHPath, with: fakeSSHPath)
+                if let authenticationLock {
+                    guard result.contains(authenticationLock.generated + ".inflight") else {
+                        throw NSError(
+                            domain: "SSHConfiguredRemoteCommandHostTests",
+                            code: 3,
+                            userInfo: [NSLocalizedDescriptionKey: "Generated startup script did not contain the expected authentication marker"]
+                        )
+                    }
+                    result = result.replacingOccurrences(
+                        of: authenticationLock.generated,
+                        with: authenticationLock.fixture
+                    )
+                }
+                return result
+            }
             let trimmedCommand = startupCommand.trimmingCharacters(in: .whitespacesAndNewlines)
             let commandURL = URL(fileURLWithPath: trimmedCommand)
                 .standardizedFileURL
@@ -535,8 +560,7 @@ struct SSHConfiguredRemoteCommandHostTests {
                     )
                 }
                 let rewrittenURL = root.appendingPathComponent("startup-with-fake-ssh.sh")
-                try contents
-                    .replacingOccurrences(of: systemSSHPath, with: fakeSSHPath)
+                try fixtureScript(contents)
                     .write(to: rewrittenURL, atomically: true, encoding: .utf8)
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o700],
@@ -558,16 +582,11 @@ struct SSHConfiguredRemoteCommandHostTests {
                     if let scriptData = Data(base64Encoded: encodedScript),
                        let script = String(data: scriptData, encoding: .utf8),
                        script.contains(systemSSHPath) {
-                        let rewrittenScript = script.replacingOccurrences(
-                            of: systemSSHPath,
-                            with: fakeSSHPath
-                        )
-                        var rewrittenCommand = startupCommand
-                        rewrittenCommand.replaceSubrange(
-                            encodedRange,
+                        let rewrittenScript = try fixtureScript(script)
+                        return startupCommand.replacingOccurrences(
+                            of: encodedScript,
                             with: Data(rewrittenScript.utf8).base64EncodedString()
                         )
-                        return rewrittenCommand
                     }
                 }
                 throw NSError(
@@ -576,7 +595,7 @@ struct SSHConfiguredRemoteCommandHostTests {
                     userInfo: [NSLocalizedDescriptionKey: "Generated startup command did not pin \(systemSSHPath)"]
                 )
             }
-            return startupCommand.replacingOccurrences(of: systemSSHPath, with: fakeSSHPath)
+            return try fixtureScript(startupCommand)
         }
 
         func recordedSSHEvents() -> [String] {

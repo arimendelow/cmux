@@ -1263,7 +1263,6 @@ struct RemoteResumeBindingTests {
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.environment = cliFixture ? BundledCLITestSupport.cliFixtureEnvironment(environment) : environment
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -1316,3 +1315,8 @@ struct RemoteResumeBindingTests {
         return window
     }
 }
+            if cliFixture {
+                process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
+            } else {
+                process.environment = environment
+            }

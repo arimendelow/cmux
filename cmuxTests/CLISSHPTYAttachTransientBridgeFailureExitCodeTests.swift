@@ -53,7 +53,11 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "ssh-pty-attach",
                 "--bogus-flag",
             ],
-            environment: sshPTYAttachTestEnvironment(socketPath: makeSocketPath("sshptybogus")),
+            environment: sshPTYAttachTestEnvironment(
+                socketPath: makeSocketPath("sshptybogus"),
+                baseEnvironment: try makeCLIFixtureEnvironment()
+            ),
+            cliFixture: true,
             timeout: 5
         )
 
@@ -114,7 +118,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = sshPTYAttachTestEnvironment(socketPath: socketPath)
+        var environment = sshPTYAttachTestEnvironment(
+            socketPath: socketPath,
+            baseEnvironment: try makeCLIFixtureEnvironment()
+        )
         if wrapperRetryPending {
             environment["CMUX_SSH_PTY_ATTACH_WRAPPER_CAN_RETRY"] = "1"
         } else {
@@ -132,6 +139,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -364,7 +372,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
         }
         let bridgeHandled = startSilentBridgeServer(listenerFD: bridge.fd)
 
-        var environment = sshPTYAttachTestEnvironment(socketPath: socketPath)
+        var environment = sshPTYAttachTestEnvironment(
+            socketPath: socketPath,
+            baseEnvironment: try makeCLIFixtureEnvironment()
+        )
         environment["CMUX_SSH_PTY_BRIDGE_READY_TIMEOUT_SECONDS"] = "1"
         environment["CMUX_SSH_PTY_ATTACH_WRAPPER_CAN_RETRY"] = "1"
 
@@ -378,6 +389,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 10
         )
 
@@ -424,8 +436,11 @@ extension CLINotifyProcessIntegrationRegressionTests {
         return handled
     }
 
-    private func sshPTYAttachTestEnvironment(socketPath: String) -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+    private func sshPTYAttachTestEnvironment(
+        socketPath: String,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var environment = baseEnvironment
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         return environment

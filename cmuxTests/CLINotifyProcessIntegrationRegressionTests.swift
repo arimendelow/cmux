@@ -778,6 +778,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: context.cliPath,
             arguments: arguments,
             environment: environment,
+            cliFixture: true,
             standardInput: standardInput,
             timeout: 5
         )
@@ -837,6 +838,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: context.cliPath,
             arguments: arguments,
             environment: environment,
+            cliFixture: true,
             standardInput: standardInput,
             timeout: 5
         )
@@ -3418,7 +3420,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 return item.response
             }
 
-            var environment = ProcessInfo.processInfo.environment
+            var environment = try makeCLIFixtureEnvironment()
             environment["CMUX_SOCKET_PATH"] = socketPath
             environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -3426,6 +3428,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 executablePath: cliPath,
                 arguments: item.arguments,
                 environment: environment,
+                cliFixture: true,
                 timeout: 5
             )
 
@@ -3441,7 +3444,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
     func testRightSidebarInvalidCommandValidatesBeforeTargetResolution() throws {
         let cliPath = try bundledCLIPath()
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -3449,6 +3452,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["right-sidebar", "unknown", "--workspace", "workspace:2"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3462,7 +3466,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
     func testRightSidebarInvalidSetModeValidatesBeforeTargetResolution() throws {
         let cliPath = try bundledCLIPath()
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -3470,6 +3474,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["right-sidebar", "set", "unknown", "--workspace", "workspace:2"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -3905,7 +3910,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             message: "remote PTY start failed"
         )
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -3918,6 +3923,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -4029,7 +4035,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         }
         let bridgeHandled = startBridgeReadyThenCloseServer(listenerFD: bridge.fd)
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
@@ -4047,6 +4053,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -4165,7 +4172,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         }
         let bridgeHandled = startBridgeReadyThenCloseServer(listenerFD: bridge.fd)
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
@@ -4179,6 +4186,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -4273,7 +4281,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         }
         let bridgeHandled = startBridgeReadyThenCloseServer(listenerFD: bridge.fd)
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment.removeValue(forKey: "CMUX_SURFACE_ID")
@@ -4286,6 +4294,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--session-id", sessionId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -4386,7 +4395,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         }
         let bridgeHandled = startBridgeReadyThenResetAfterClientEOFServer(listenerFD: bridge.fd)
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
@@ -4400,6 +4409,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -4588,11 +4598,11 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             "--session-id", sessionId,
             "--attachment-id", surfaceId,
         ]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
-        process.environment = environment
+        process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = slaveHandle
         process.standardError = stderrPipe
@@ -4784,12 +4794,12 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             "--session-id", sessionId,
             "--attachment-id", surfaceId,
         ]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
         environment["CMUX_SSH_ATTEMPT_ID"] = "44444444-4444-4444-4444-444444444444"
-        process.environment = environment
+        process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -4988,12 +4998,12 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             "--session-id", sessionId,
             "--attachment-id", surfaceId,
         ]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_TERMINAL_LIFECYCLE_ID"] = surfaceId
         environment["CMUX_SSH_ATTEMPT_ID"] = "44444444-4444-4444-4444-444444444444"
-        process.environment = environment
+        process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -5086,7 +5096,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5098,6 +5108,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--session-id", sessionId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5173,7 +5184,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         }
         let bridgeHandled = startBridgeErrorServer(listenerFD: bridge.fd, message: "missing session")
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5188,6 +5199,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5257,7 +5269,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5272,6 +5284,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--attachment-id", surfaceId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 3
         )
 
@@ -5320,7 +5333,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5331,6 +5344,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--all-workspaces",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5408,7 +5422,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5420,6 +5434,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--all",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5488,7 +5503,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5500,6 +5515,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--all",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5562,7 +5578,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5574,6 +5590,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--all",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5636,7 +5653,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5648,6 +5665,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--session-id", sessionId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5703,7 +5721,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5715,6 +5733,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--session-id", sessionId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5780,7 +5799,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5792,6 +5811,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--session-id", sessionId,
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5868,7 +5888,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return "OK"
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5876,6 +5896,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["right-sidebar", "set", "find", "--window", "window:3", "--workspace", "workspace:2"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5920,7 +5941,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -5928,6 +5949,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["right-sidebar", "show", "--workspace", "workspace:99"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -5988,7 +6010,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return "ERROR: Unexpected command \(line)"
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = callerWorkspace
         environment["CMUX_SURFACE_ID"] = callerSurface
@@ -5999,6 +6021,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["notify", "--surface", callerSurface, "--title", "UUID", "--body", "Body"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6031,7 +6054,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             unlink(socketPath)
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6045,6 +6068,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 executablePath: cliPath,
                 arguments: ["--socket", socketPath] + arguments,
                 environment: environment,
+                cliFixture: true,
                 timeout: 5
             )
             wait(for: [serverHandled], timeout: 5)
@@ -6238,7 +6262,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return "0:\(notificationId)|\(workspaceId)|none|unread|Legacy|Pipe|alpha|beta|gamma"
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6247,6 +6271,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["--socket", socketPath, "list-notifications", "--json", "--id-format", "uuids"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6338,7 +6363,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = currentWorkspaceId
         environment["CMUX_SURFACE_ID"] = currentSurfaceId
@@ -6351,6 +6376,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -6428,7 +6454,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6437,6 +6463,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["new-pane", "--window", windowId, "--workspace", "0", "--direction", "right"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6510,7 +6537,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6519,6 +6546,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["focus-pane", "--window", targetWindowId, "--pane", otherPaneId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6592,7 +6620,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6601,6 +6629,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["reorder-surface", "--window", targetWindowId, "--surface", otherSurfaceId, "--index", "0"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6653,7 +6682,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6662,6 +6691,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["send", "--window", "window:2", "--", "should-not-send"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6700,7 +6730,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["windows": []])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6709,6 +6739,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["vm", "new", "--window", missingWindowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6772,7 +6803,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6781,6 +6812,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["vm", "new", "--window", requestedWindowId, "--detach"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6853,7 +6885,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6862,6 +6894,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["pipe-pane", "--window", "window:2", "cat"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -6949,7 +6982,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -6958,6 +6991,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["pipe-pane", "--window", "window:2", "--workspace", "workspace:2", "cat"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7031,7 +7065,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7040,6 +7074,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["respawn-pane", "--window", "window:2", "echo", "fresh"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7109,7 +7144,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7118,6 +7153,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["move-surface", "--surface", "0", "--workspace", targetWorkspaceId, "--window", targetWindowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7167,7 +7203,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7176,6 +7212,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["move-surface", "--surface", sourceSurfaceRef, "--window", targetWindowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7220,7 +7257,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return "OK"
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7229,6 +7266,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["set-status", "build", "running", "--window", windowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7268,7 +7306,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return "OK"
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7277,6 +7315,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["log", "--window", windowId, "--", "--window", "target"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7313,7 +7352,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: [:])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7322,6 +7361,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["set-status", "build", "running", "--window", windowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7376,7 +7416,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7385,6 +7425,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["notify", "--window", windowId, "--title", "Window Notify"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7499,7 +7540,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7508,6 +7549,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["notify", "--window", "window:2", "--surface", "surface:3", "--title", "Window Surface Notify"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7582,7 +7624,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7591,6 +7633,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["notify", "--window", "window:2", "--surface", "0", "--title", "Window Indexed Notify"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7642,7 +7685,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7651,6 +7694,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["workspace-action", "--window", windowId, "--action", "pin"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7690,7 +7734,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: [:])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7699,6 +7743,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["clear-notifications", "--window", windowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7748,7 +7793,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7757,6 +7802,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["tree", "--json", "--window", windowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7872,7 +7918,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -7881,6 +7927,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["--id-format", "uuids", "tree", "--json", "--window", windowId],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -7933,7 +7980,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = foreignWorkspaceId
         environment["CMUX_SURFACE_ID"] = foreignSurfaceId
@@ -7945,6 +7992,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"codex-foreign-env","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -8019,7 +8067,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = foreignWorkspaceId
         environment["CMUX_SURFACE_ID"] = foreignSurfaceId
@@ -8031,6 +8079,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -8086,7 +8135,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = foreignSurfaceId
@@ -8098,6 +8147,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"codex-invalid-surface","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -8170,7 +8220,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_AGENT_HOOK_STATE_DIR"] = root.path
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
@@ -8182,6 +8232,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -8286,7 +8337,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -8314,6 +8365,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit","prompt":"continue"}"#,
             timeout: 5
         )
@@ -8423,6 +8475,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "claude", "prompt-submit"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"UserPromptSubmit"}"#,
             timeout: 5
         )
@@ -8496,7 +8549,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_WORKSPACE_ID"] = workspaceId
         environment["CMUX_SURFACE_ID"] = surfaceId
@@ -8507,6 +8560,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["hooks", "codex", "session-end"],
             environment: environment,
+            cliFixture: true,
             standardInput: #"{"session_id":"\#(sessionId)","cwd":"\#(root.path)","hook_event_name":"SessionEnd"}"#,
             timeout: 5
         )
@@ -8550,7 +8604,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["cleared": false])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8565,6 +8619,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--source", "agent-hook",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8609,7 +8664,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["resume_binding": [:]])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8623,6 +8678,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--shell", "tmux attach -t work",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8667,7 +8723,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["resume_binding": NSNull()])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8681,6 +8737,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--source", "private-launcher",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8725,7 +8782,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["resume_binding": [:]])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8743,6 +8800,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--resume", "session-123",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8793,7 +8851,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["resume_binding": [:]])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8811,6 +8869,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--surface", "not-a-target",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8859,7 +8918,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["resume_binding": [:]])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_WORKSPACE_ID"] = staleWorkspaceId
@@ -8873,6 +8932,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--shell", "tmux attach -t moved",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8896,7 +8956,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         let cliPath = try bundledCLIPath()
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8912,6 +8972,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "work",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8924,7 +8985,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
     func testSurfaceResumeSetCLIRejectsPreTerminatorCommandTokens() throws {
         let cliPath = try bundledCLIPath()
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -8939,6 +9000,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--flag",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -8953,7 +9015,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         let workspaceId = "11111111-1111-1111-1111-111111111111"
         let surfaceId = "22222222-2222-2222-2222-222222222222"
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9048,6 +9110,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 executablePath: cliPath,
                 arguments: item.arguments,
                 environment: environment,
+                cliFixture: true,
                 timeout: 5
             )
 
@@ -9063,7 +9126,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         let cliPath = try bundledCLIPath()
         let missingSocketPath = "/tmp/cmux-test-missing-\(UUID().uuidString).sock"
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = missingSocketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9076,6 +9139,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "--checkpoint",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9128,7 +9192,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9136,6 +9200,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["--window", "0", "surface", "resume", "clear", "--surface", "0"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9203,7 +9268,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9211,6 +9276,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["surface", "resume", "clear", "--window", "0", "--surface", "0"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9328,6 +9394,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: context.cliPath,
             arguments: ["hooks", agent, subcommand],
             environment: environment,
+            cliFixture: true,
             standardInput: standardInput,
             timeout: 5
         )
@@ -9470,6 +9537,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
 
     private func readClaudeHookSession(_ sessionId: String, context: ClaudeHookContext) throws -> [String: Any] {
         let stateURL = context.root.appendingPathComponent("claude-hook-sessions.json")
+            cliFixture: true,
         let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any])
         let sessions = try XCTUnwrap(state["sessions"] as? [String: Any])
         return try XCTUnwrap(sessions[sessionId] as? [String: Any])
@@ -9531,7 +9599,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CODEX_THREAD_ID"] = "codex-thread-browser-import"
@@ -9561,6 +9629,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
 
         let stdoutJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+            cliFixture: true,
         XCTAssertEqual(stdoutJSON["browser"] as? String, "Chrome")
         XCTAssertEqual(stdoutJSON["imported_cookies"] as? Int, 3)
         XCTAssertEqual(stdoutJSON["skipped_cookies"] as? Int, 1)
@@ -9601,7 +9670,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["opened": true])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment.removeValue(forKey: "CMUX_AGENT_LAUNCH_KIND")
@@ -9631,6 +9700,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(result.stdout, "OK\n")
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
         XCTAssertTrue(
+            cliFixture: true,
             state.commands.contains { $0.contains(#""method":"browser.import.dialog""#) },
             "Expected human import to open the interactive dialog, saw \(state.commands)"
         )
@@ -9667,7 +9737,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             return self.v2Response(id: id, ok: true, result: ["opened": true])
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CODEX_THREAD_ID"] = "codex-thread-browser-import"
@@ -9685,6 +9755,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(result.stdout, "OK\n")
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
         XCTAssertTrue(
+            cliFixture: true,
             state.commands.contains { $0.contains(#""method":"browser.import.dialog""#) },
             "Expected --interactive to force the dialog in coding-agent env, saw \(state.commands)"
         )
@@ -9725,7 +9796,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             )
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9742,6 +9813,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("default\tDefault\t52B43C05-4A1D-45D3-8FD5-9EF94952E445"), result.stdout)
         XCTAssertTrue(
             state.commands.contains { $0.contains(#""method":"browser.profiles.list""#) },
+            cliFixture: true,
             "Expected browser profiles list to call browser.profiles.list, saw \(state.commands)"
         )
     }
@@ -9821,7 +9893,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 return self.v2Response(id: id, ok: true, result: testCase.responseResult)
             }
 
-            var environment = ProcessInfo.processInfo.environment
+            var environment = try makeCLIFixtureEnvironment()
             environment["CMUX_SOCKET_PATH"] = socketPath
             environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
 
@@ -9838,6 +9910,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             XCTAssertTrue(
                 state.commands.contains { $0.contains(#""method":"\#(testCase.expectedMethod)""#) },
                 "Expected \(testCase.expectedMethod), saw \(state.commands)"
+                cliFixture: true,
             )
         }
     }
@@ -9922,13 +9995,12 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: homeURL)
         for key in Array(environment.keys) where key.hasPrefix("CMUX_") {
             environment.removeValue(forKey: key)
         }
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
-        environment["HOME"] = homeURL.path
         for (key, value) in environmentOverrides {
             environment[key] = value
         }
@@ -9949,6 +10021,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(sawConfigureRequest, "Expected workspace.remote.configure, saw \(state.snapshot())", file: file, line: line)
         XCTAssertFalse(result.timedOut, result.stderr, file: file, line: line)
         XCTAssertEqual(result.status, 0, result.stderr, file: file, line: line)
+            cliFixture: true,
         XCTAssertTrue(result.stderr.isEmpty, result.stderr, file: file, line: line)
 
         let requests = state.snapshot().compactMap { jsonObject($0) }
@@ -10112,7 +10185,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "CMUX_TAB_ID": staleTab,
                 "CMUX_PANE_ID": stalePane,
                 "HOME": tmpDir.path,
-                "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin",
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             ],
             timeout: 30
         )
@@ -10123,6 +10196,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             ["surface.list"],
             "a complete launch identity must resolve without consulting mutable global focus"
         )
+            cliFixture: true,
 
         XCTAssertTrue(
             result.stdout.contains("CMUX_SURFACE_ID=\(launchSurface)"),

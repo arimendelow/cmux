@@ -6,13 +6,17 @@ import Testing
 private func sshAuthInflightFixturePaths(
     root: URL
 ) -> (controlPath: String, sshOptions: [String], lockPath: String?) {
-    let controlPath = "/tmp/cmux-ssh-\(getuid())-0123456789abcdef0123456789abcdef01234567"
+    let controlIdentity = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() + "01234567"
+    let controlPath = "/tmp/cmux-ssh-\(getuid())-\(controlIdentity)"
     let sshOptions = [
         "ControlMaster=auto",
         "ControlPersist=600",
         "ControlPath=\(controlPath)",
     ]
-    let lockPath = SSHConnectionSharingOptions().foregroundAuthenticationLockPath(
+    let lockPath = SSHConnectionSharingOptions(
+        userID: Int(getuid()),
+        authenticationLockDirectoryPath: root.path
+    ).foregroundAuthenticationLockPath(
         destination: "cmux-macmini",
         port: 2222,
         options: sshOptions
@@ -894,13 +898,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
         let sshOptions = paths.sshOptions
         let lockPath = try XCTUnwrap(paths.lockPath)
         let inFlightPath = lockPath + ".inflight"
+        let observedInFlight = root.appendingPathComponent("observed-inflight-pid")
 
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        defer {
-            try? fileManager.removeItem(at: root)
-            unlink(lockPath)
-            unlink(inFlightPath)
-        }
+        defer { try? fileManager.removeItem(at: root) }
 
         try writeShellFile(at: fakeCLI, lines: ["#!/bin/sh", "exit 0"])
         try writeShellFile(at: fakeSSH, lines: [
@@ -911,19 +912,41 @@ extension CLINotifyProcessIntegrationRegressionTests {
             "  if [ \"$previous_arg\" = '-O' ] && [ \"$arg\" = 'check' ]; then exit 255; fi",
             "  previous_arg=\"$arg\"",
             "done",
+            "test -s \"${CMUX_TEST_AUTH_INFLIGHT:?}\" || exit 91",
+            "/bin/cat \"${CMUX_TEST_AUTH_INFLIGHT:?}\" > \"${CMUX_TEST_OBSERVED_INFLIGHT:?}\" || exit 92",
             "exit 0",
         ])
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeCLI.path)
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeSSH.path)
 
-        let startupCommand = try generatedSSHStartupCommand(sshOptions: sshOptions)
-        var environment = ProcessInfo.processInfo.environment
+        let generatedCommand = try generatedSSHStartupCommand(sshOptions: sshOptions, fixtureHome: root)
+        let generatedLockPath = try XCTUnwrap(SSHConnectionSharingOptions().foregroundAuthenticationLockPath(
+            destination: "cmux-macmini",
+            port: 2222,
+            options: sshOptions
+        ))
+        let harness = SSHConfiguredRemoteCommandHostTests.RemoteCommandHostHarness(
+            root: root,
+            binDirectory: root,
+            eventsFile: observedInFlight,
+            fakeCLILog: root.appendingPathComponent("cmux.log")
+        )
+        // The CLI embeds Foundation's native temp path; TMPDIR does not relocate it on macOS.
+        // Relocate only this fixture's lock/marker literals, retaining the emitted cleanup and ownership checks.
+        let startupCommand = try harness.startupCommandUsingFakeSSH(
+            generatedCommand,
+            authenticationLock: (generated: generatedLockPath, fixture: lockPath)
+        )
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: root)
+        environment["CFFIXED_USER_HOME"] = root.path
         environment["PATH"] = "\(root.path):\(environment["PATH"] ?? "/usr/bin:/bin")"
         environment["CMUX_BUNDLED_CLI_PATH"] = fakeCLI.path
         environment["CMUX_SOCKET_PATH"] = "/tmp/cmux-debug-test.sock"
         environment["CMUX_WORKSPACE_ID"] = "11111111-1111-1111-1111-111111111111"
         environment["CMUX_SURFACE_ID"] = "22222222-2222-2222-2222-222222222222"
         environment["CMUX_TEST_CONTROL_PATH"] = controlPath
+        environment["CMUX_TEST_AUTH_INFLIGHT"] = inFlightPath
+        environment["CMUX_TEST_OBSERVED_INFLIGHT"] = observedInFlight.path
         environment["CMUX_SSH_RECONNECT_DELAY_SECONDS"] = "0"
 
         let result = runProcess(
@@ -935,6 +958,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
 
         XCTAssertFalse(result.timedOut, result.stderr)
         XCTAssertEqual(result.status, 0, result.stderr)
+        let observedPID = try String(contentsOf: observedInFlight, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotNil(Int32(observedPID), "Fake SSH must observe the emitted marker before successful cleanup")
+        XCTAssertTrue(fileManager.fileExists(atPath: lockPath), "Authentication must create the owned lock")
         XCTAssertFalse(
             fileManager.fileExists(atPath: inFlightPath),
             "Successful foreground authentication must remove its owned in-flight marker before releasing the lock"
@@ -1275,7 +1302,8 @@ extension CLINotifyProcessIntegrationRegressionTests {
             "ControlPath /tmp/cmux-ssh-%C",
         ],
         additionalArguments: [String] = [],
-        remoteCommandArguments: [String] = []
+        remoteCommandArguments: [String] = [],
+        fixtureHome: URL? = nil
     ) throws -> String {
         let cliPath = try bundledCLIPath()
         let socketPath = makeSocketPath("ssh-pane-close")
@@ -1333,7 +1361,8 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try fixtureHome.map(BundledCLITestSupport.fixtureEnvironment(home:))
+            ?? makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
@@ -1451,7 +1480,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             }
         }
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = try makeCLIFixtureEnvironment()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
         environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
