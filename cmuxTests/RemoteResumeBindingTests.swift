@@ -139,6 +139,110 @@ struct RemoteResumeBindingTests {
         let commands: [String]
     }
 
+    @Test(arguments: ["shared", "remote"], [false, true])
+    func fixtureLaunchersContainChildEnvironment(
+        launcher: String,
+        includesSyntheticAmbientCredentials: Bool
+    ) throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent(".fixture-environment-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let probeURL = root.appendingPathComponent("child-environment")
+        var environment = [
+            "HOME": root.path,
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": root.path,
+            "CMUX_SOCKET_PATH": root.appendingPathComponent("unused.sock").path,
+            "CMUX_FIXTURE_SENTINEL": "preserved",
+        ]
+        if includesSyntheticAmbientCredentials {
+            environment["CFFIXED_USER_HOME"] = root.appendingPathComponent("synthetic-ambient-home").path
+            environment["CMUX_SOCKET_PASSWORD"] = "synthetic-ambient-password-not-for-fixtures"
+        }
+        let arguments = [
+            "-c",
+            #"printf '%s\n' "$HOME" "${CFFIXED_USER_HOME-}" "${CMUX_SOCKET_PASSWORD-}" "$TMPDIR" "$CMUX_FIXTURE_SENTINEL" > "$1""#,
+            "fixture-environment-probe",
+            probeURL.path,
+        ]
+        let result: (status: Int32, stderr: String, timedOut: Bool)
+        if launcher == "shared" {
+            let support = CLINotifyProcessIntegrationRegressionTests(invocation: nil)
+            let sharedResult = support.runProcess(
+                executablePath: "/bin/sh",
+                arguments: arguments,
+                environment: environment,
+                cliFixture: true,
+                timeout: 5
+            )
+            result = (sharedResult.status, sharedResult.stderr, sharedResult.timedOut)
+        } else {
+            result = runHookProcess(
+                executablePath: "/bin/sh",
+                arguments: arguments,
+                environment: environment,
+                cliFixture: true,
+                standardInput: "",
+                timeout: 5
+            )
+        }
+
+        #expect(!result.timedOut, Comment(rawValue: result.stderr))
+        try #require(result.status == 0, Comment(rawValue: result.stderr))
+        let observed = try String(contentsOf: probeURL, encoding: .utf8)
+            .components(separatedBy: "\n")
+        #expect(observed == [
+            root.path,
+            root.path,
+            "cmux-native-test-fixture-password",
+            root.path,
+            "preserved",
+            "",
+        ])
+    }
+
+    @Test(arguments: ["absent", "empty", "populated"])
+    func nonCLIShellLaunchPreservesProvidedEnvironment(credentialState: String) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".non-cli-environment-\(UUID().uuidString)", isDirectory: true)
+        var environment = [
+            "HOME": root.path,
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": root.path,
+            "CMUX_SOCKET_PATH": root.appendingPathComponent("unused.sock").path,
+            "CMUX_FIXTURE_SENTINEL": "preserved",
+        ]
+        if credentialState != "absent" {
+            environment["CFFIXED_USER_HOME"] = root.appendingPathComponent("synthetic-shell-home").path
+            environment["CMUX_SOCKET_PASSWORD"] = credentialState == "empty" ? "" : "synthetic-shell-password"
+        }
+
+        let support = CLINotifyProcessIntegrationRegressionTests(invocation: nil)
+        let result = support.runProcess(
+            executablePath: "/bin/sh",
+            arguments: [
+                "-c",
+                #"printf '%s\n' "$HOME" "${CFFIXED_USER_HOME-unset}" "${CMUX_SOCKET_PASSWORD-unset}" "$TMPDIR" "$CMUX_FIXTURE_SENTINEL""#,
+            ],
+            environment: environment,
+            timeout: 5
+        )
+
+        #expect(!result.timedOut, Comment(rawValue: result.stderr))
+        try #require(result.status == 0, Comment(rawValue: result.stderr))
+        #expect(result.stdout.components(separatedBy: "\n") == [
+            root.path,
+            environment["CFFIXED_USER_HOME"] ?? "unset",
+            environment["CMUX_SOCKET_PASSWORD"] ?? "unset",
+            root.path,
+            "preserved",
+            "",
+        ])
+    }
+
     @Test
     func emptyPersistentSessionIDsNeverMatch() {
         let workspaceID = UUID()
@@ -1083,6 +1187,7 @@ struct RemoteResumeBindingTests {
             executablePath: cliPath,
             arguments: ["hooks", "kiro", "session-start"],
             environment: environment,
+            cliFixture: true,
             standardInput: input,
             timeout: 5
         )
@@ -1148,6 +1253,7 @@ struct RemoteResumeBindingTests {
         executablePath: String,
         arguments: [String],
         environment: [String: String],
+        cliFixture: Bool = false,
         standardInput: String,
         timeout: TimeInterval
     ) -> (status: Int32, stderr: String, timedOut: Bool) {
@@ -1157,7 +1263,7 @@ struct RemoteResumeBindingTests {
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.environment = environment
+        process.environment = cliFixture ? BundledCLITestSupport.cliFixtureEnvironment(environment) : environment
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe

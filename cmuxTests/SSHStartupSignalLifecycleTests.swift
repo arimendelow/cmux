@@ -1,6 +1,64 @@
 import XCTest
 import CmuxFoundation
 import Darwin
+import Testing
+
+private func sshAuthInflightFixturePaths(
+    root: URL
+) -> (controlPath: String, sshOptions: [String], lockPath: String?) {
+    let controlPath = "/tmp/cmux-ssh-\(getuid())-0123456789abcdef0123456789abcdef01234567"
+    let sshOptions = [
+        "ControlMaster=auto",
+        "ControlPersist=600",
+        "ControlPath=\(controlPath)",
+    ]
+    let lockPath = SSHConnectionSharingOptions().foregroundAuthenticationLockPath(
+        destination: "cmux-macmini",
+        port: 2222,
+        options: sshOptions
+    )
+    return (controlPath, sshOptions, lockPath)
+}
+
+@Suite
+struct SSHAuthInflightFixtureContainmentTests {
+    @Test
+    func plannedAuthenticationFilesStayInsideTheirFixtureRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".ssh-auth-\(UUID().uuidString)", isDirectory: true)
+        let paths = sshAuthInflightFixturePaths(root: root)
+        let lockPath = try #require(paths.lockPath)
+
+        for path in [lockPath, lockPath + ".inflight"] {
+            #expect(
+                URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL
+                    == root.standardizedFileURL
+            )
+        }
+    }
+
+    @Test
+    func independentFixtureRunsHaveDistinctControlIdentities() throws {
+        let parent = FileManager.default.temporaryDirectory
+        let first = sshAuthInflightFixturePaths(
+            root: parent.appendingPathComponent(".ssh-auth-\(UUID().uuidString)", isDirectory: true)
+        )
+        let second = sshAuthInflightFixturePaths(
+            root: parent.appendingPathComponent(".ssh-auth-\(UUID().uuidString)", isDirectory: true)
+        )
+
+        #expect(first.controlPath != second.controlPath)
+        let firstLockPath = try #require(first.lockPath)
+        let secondLockPath = try #require(second.lockPath)
+        #expect(firstLockPath != secondLockPath)
+        for controlPath in [first.controlPath, second.controlPath] {
+            #expect(controlPath.range(
+                of: #"^/tmp/cmux-ssh-\#(getuid())-[0-9a-f]{40}$"#,
+                options: .regularExpression
+            ) != nil)
+        }
+    }
+}
 
 extension CLINotifyProcessIntegrationRegressionTests {
     func testSSHPaneCloseSignalDoesNotReportSessionEndToSharedTransport() throws {
@@ -831,17 +889,10 @@ extension CLINotifyProcessIntegrationRegressionTests {
             .appendingPathComponent("cmux-ssh-auth-inflight-\(UUID().uuidString)", isDirectory: true)
         let fakeCLI = root.appendingPathComponent("cmux")
         let fakeSSH = root.appendingPathComponent("ssh")
-        let controlPath = "/tmp/cmux-ssh-\(getuid())-0123456789abcdef0123456789abcdef01234567"
-        let sshOptions = [
-            "ControlMaster=auto",
-            "ControlPersist=600",
-            "ControlPath=\(controlPath)",
-        ]
-        let lockPath = try XCTUnwrap(SSHConnectionSharingOptions().foregroundAuthenticationLockPath(
-            destination: "cmux-macmini",
-            port: 2222,
-            options: sshOptions
-        ))
+        let paths = sshAuthInflightFixturePaths(root: root)
+        let controlPath = paths.controlPath
+        let sshOptions = paths.sshOptions
+        let lockPath = try XCTUnwrap(paths.lockPath)
         let inFlightPath = lockPath + ".inflight"
 
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1306,6 +1357,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: arguments,
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -1408,6 +1460,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
             executablePath: cliPath,
             arguments: ["vm", "ssh", vmID],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 

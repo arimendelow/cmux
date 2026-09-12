@@ -372,6 +372,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
         executablePath: String,
         arguments: [String],
         environment: [String: String],
+        cliFixture: Bool = false,
         standardInput: String? = nil,
         timeout: TimeInterval
     ) -> ProcessRunResult {
@@ -381,7 +382,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
         let stdinPipe = standardInput == nil ? nil : Pipe()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
-        process.environment = environment
+        process.environment = cliFixture ? BundledCLITestSupport.cliFixtureEnvironment(environment) : environment
         process.standardInput = stdinPipe ?? FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
