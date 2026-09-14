@@ -180,14 +180,18 @@ extension CLINotifyProcessIntegrationRegressionTests {
         return handled
     }
 
+    @discardableResult
     func startDetachedMockServer(
         listenerFD: Int32,
         state: MockSocketServerState,
         connectionCount: Int = 1,
         handler: @escaping @Sendable (String) -> String
-    ) {
+    ) -> DispatchGroup {
+        let finished = DispatchGroup()
         for _ in 0..<max(1, connectionCount) {
+            finished.enter()
             DispatchQueue.global(qos: .userInitiated).async {
+                defer { finished.leave() }
                 var clientAddr = sockaddr_un()
                 var clientAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
                 let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
@@ -226,6 +230,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 }
             }
         }
+        return finished
     }
 
     func startAgentHookMockServer(

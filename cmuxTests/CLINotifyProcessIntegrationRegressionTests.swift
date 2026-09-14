@@ -9303,7 +9303,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(request["surface_id"] as? String, surfaceId)
     }
 
-    private struct ClaudeHookContext {
+    struct ClaudeHookContext {
         let cliPath: String
         let socketPath: String
         let listenerFD: Int32
@@ -9400,11 +9400,15 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         )
     }
 
-    private func startAgentHookMockServerAccepting(
+    @discardableResult
+    func startAgentHookMockServerAccepting(
         context: ClaudeHookContext,
         connectionLimit: Int
-    ) {
+    ) -> DispatchGroup {
+        let finished = DispatchGroup()
+        finished.enter()
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { finished.leave() }
             var accepted = 0
             while accepted < connectionLimit {
                 var clientAddr = sockaddr_un()
@@ -9420,8 +9424,12 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 }
                 accepted += 1
 
+                finished.enter()
                 DispatchQueue.global(qos: .userInitiated).async {
-                    defer { Darwin.close(clientFD) }
+                    defer {
+                        Darwin.close(clientFD)
+                        finished.leave()
+                    }
                     var pending = Data()
                     var buffer = [UInt8](repeating: 0, count: 4096)
                     while true {
@@ -9446,6 +9454,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 }
             }
         }
+        return finished
     }
 
     private func agentHookMockResponse(line: String, context: ClaudeHookContext) -> String {
@@ -9528,6 +9537,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: context.cliPath,
             arguments: arguments,
             environment: environment,
+            cliFixture: true,
             standardInput: standardInput,
             timeout: 5
         )
@@ -9537,7 +9547,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
 
     private func readClaudeHookSession(_ sessionId: String, context: ClaudeHookContext) throws -> [String: Any] {
         let stateURL = context.root.appendingPathComponent("claude-hook-sessions.json")
-            cliFixture: true,
         let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any])
         let sessions = try XCTUnwrap(state["sessions"] as? [String: Any])
         return try XCTUnwrap(sessions[sessionId] as? [String: Any])
@@ -9620,6 +9629,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 "Dev",
             ],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9629,7 +9639,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
 
         let stdoutJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
-            cliFixture: true,
         XCTAssertEqual(stdoutJSON["browser"] as? String, "Chrome")
         XCTAssertEqual(stdoutJSON["imported_cookies"] as? Int, 3)
         XCTAssertEqual(stdoutJSON["skipped_cookies"] as? Int, 1)
@@ -9691,6 +9700,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["browser", "import"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9700,7 +9710,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(result.stdout, "OK\n")
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
         XCTAssertTrue(
-            cliFixture: true,
             state.commands.contains { $0.contains(#""method":"browser.import.dialog""#) },
             "Expected human import to open the interactive dialog, saw \(state.commands)"
         )
@@ -9746,6 +9755,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["browser", "import", "--interactive"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9755,7 +9765,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertEqual(result.stdout, "OK\n")
         XCTAssertTrue(result.stderr.isEmpty, result.stderr)
         XCTAssertTrue(
-            cliFixture: true,
             state.commands.contains { $0.contains(#""method":"browser.import.dialog""#) },
             "Expected --interactive to force the dialog in coding-agent env, saw \(state.commands)"
         )
@@ -9804,6 +9813,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: ["browser", "profiles", "list"],
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -9813,7 +9823,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("default\tDefault\t52B43C05-4A1D-45D3-8FD5-9EF94952E445"), result.stdout)
         XCTAssertTrue(
             state.commands.contains { $0.contains(#""method":"browser.profiles.list""#) },
-            cliFixture: true,
             "Expected browser profiles list to call browser.profiles.list, saw \(state.commands)"
         )
     }
@@ -9901,6 +9910,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                 executablePath: cliPath,
                 arguments: testCase.arguments,
                 environment: environment,
+                cliFixture: true,
                 timeout: 5
             )
 
@@ -9910,7 +9920,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             XCTAssertTrue(
                 state.commands.contains { $0.contains(#""method":"\#(testCase.expectedMethod)""#) },
                 "Expected \(testCase.expectedMethod), saw \(state.commands)"
-                cliFixture: true,
             )
         }
     }
@@ -10012,6 +10021,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
             executablePath: cliPath,
             arguments: commandArguments,
             environment: environment,
+            cliFixture: true,
             timeout: 5
         )
 
@@ -10021,7 +10031,6 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
         XCTAssertTrue(sawConfigureRequest, "Expected workspace.remote.configure, saw \(state.snapshot())", file: file, line: line)
         XCTAssertFalse(result.timedOut, result.stderr, file: file, line: line)
         XCTAssertEqual(result.status, 0, result.stderr, file: file, line: line)
-            cliFixture: true,
         XCTAssertTrue(result.stderr.isEmpty, result.stderr, file: file, line: line)
 
         let requests = state.snapshot().compactMap { jsonObject($0) }
@@ -10187,6 +10196,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                 "HOME": tmpDir.path,
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             ],
+            cliFixture: true,
             timeout: 30
         )
         wait(for: [handled], timeout: 30)
@@ -10196,7 +10206,6 @@ extension CLINotifyProcessIntegrationRegressionTests {
             ["surface.list"],
             "a complete launch identity must resolve without consulting mutable global focus"
         )
-            cliFixture: true,
 
         XCTAssertTrue(
             result.stdout.contains("CMUX_SURFACE_ID=\(launchSurface)"),

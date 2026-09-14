@@ -243,6 +243,107 @@ struct RemoteResumeBindingTests {
         ])
     }
 
+    @Test(arguments: ["shared", "detached", "accepting", "remote"], [false, true])
+    func fixtureMockServersRequireValidCLIAuthentication(
+        server: String,
+        usesInvalidPassword: Bool
+    ) throws {
+        let support = CLINotifyProcessIntegrationRegressionTests(invocation: nil)
+        let cliPath = try support.bundledCLIPath()
+        let home = try BundledCLITestSupport.makeFixtureHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let socketPath = home.deletingLastPathComponent()
+            .appendingPathComponent("cmux-auth-\(UUID().uuidString).sock").path
+        let listenerFD = try bindHookSocket(at: socketPath)
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+        let surfaceID = UUID()
+        let sharedCapture = CLINotifyProcessIntegrationRegressionTests.MockSocketServerState()
+        let handlerCapture = CLINotifyProcessIntegrationRegressionTests.MockSocketServerState()
+        let remoteCapture = RemoteResumeHookCapture()
+        let handler: @Sendable (String) -> String = { line in
+            handlerCapture.append(line)
+            guard let request = support.jsonObject(line),
+                  let id = request["id"] as? String,
+                  request["method"] as? String == "surface.list" else {
+                return support.malformedRequestResponse(raw: line)
+            }
+            return support.surfaceListResponse(id: id, surfaceId: surfaceID.uuidString)
+        }
+        let waitForServer: () -> Void
+        switch server {
+        case "shared":
+            let finished = support.startMockServer(
+                listenerFD: listenerFD,
+                state: sharedCapture,
+                handler: handler
+            )
+            waitForServer = { support.wait(for: [finished], timeout: 5) }
+        case "detached":
+            let finished = support.startDetachedMockServer(
+                listenerFD: listenerFD,
+                state: sharedCapture,
+                handler: handler
+            )
+            waitForServer = { #expect(finished.wait(timeout: .now() + 5) == .success) }
+        case "remote":
+            let finished = RemoteResumeHookSocketServer.start(
+                listenerFD: listenerFD,
+                capture: remoteCapture,
+                surfaceID: surfaceID
+            )
+            waitForServer = { #expect(finished.wait(timeout: .now() + 5) == .success) }
+        case "accepting":
+            let context = CLINotifyProcessIntegrationRegressionTests.ClaudeHookContext(
+                cliPath: cliPath,
+                socketPath: socketPath,
+                listenerFD: listenerFD,
+                state: sharedCapture,
+                root: home,
+                workspaceId: UUID().uuidString,
+                surfaceId: surfaceID.uuidString
+            )
+            let finished = support.startAgentHookMockServerAccepting(context: context, connectionLimit: 1)
+            waitForServer = { #expect(finished.wait(timeout: .now() + 5) == .success) }
+        default:
+            Issue.record("Unknown fixture server: \(server)")
+            return
+        }
+
+        var environment = BundledCLITestSupport.fixtureEnvironment(home: home)
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        let passwordArguments = usesInvalidPassword ? ["--password", "incorrect-fixture-password"] : []
+        let result = support.runProcess(
+            executablePath: cliPath,
+            arguments: passwordArguments + ["rpc", "surface.list", "{}"],
+            environment: environment,
+            cliFixture: true,
+            timeout: 5
+        )
+        Darwin.shutdown(listenerFD, SHUT_RDWR)
+        waitForServer()
+
+        #expect(!result.timedOut, Comment(rawValue: result.stderr))
+        let commands = server == "remote" ? remoteCapture.snapshot() : sharedCapture.snapshot()
+        #expect(!commands.contains { $0.hasPrefix("auth ") }, "Authentication must not enter application-command capture")
+        if usesInvalidPassword {
+            #expect(result.status != 0)
+            #expect(result.stderr.contains("Invalid password"), Comment(rawValue: result.stderr))
+            #expect(commands.isEmpty)
+            #expect(handlerCapture.snapshot().isEmpty)
+        } else {
+            #expect(result.status == 0, Comment(rawValue: result.stderr))
+            #expect(result.stdout.contains(surfaceID.uuidString), Comment(rawValue: result.stdout))
+            #expect(commands.count == 1)
+            #expect(commands.compactMap(support.jsonObject).compactMap { $0["method"] as? String } == ["surface.list"])
+            if server == "shared" || server == "detached" {
+                #expect(handlerCapture.snapshot() == commands, "Only the authenticated application command may reach the handler")
+            }
+        }
+    }
+
     @Test
     func emptyPersistentSessionIDsNeverMatch() {
         let workspaceID = UUID()
@@ -1268,6 +1369,11 @@ struct RemoteResumeBindingTests {
         process.standardError = errorPipe
 
         do {
+            if cliFixture {
+                process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
+            } else {
+                process.environment = environment
+            }
             try process.run()
         } catch {
             return (-1, String(describing: error), false)
@@ -1315,8 +1421,3 @@ struct RemoteResumeBindingTests {
         return window
     }
 }
-            if cliFixture {
-                process.environment = try BundledCLITestSupport.cliFixtureEnvironment(environment)
-            } else {
-                process.environment = environment
-            }
