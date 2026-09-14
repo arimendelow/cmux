@@ -9430,6 +9430,7 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                         Darwin.close(clientFD)
                         finished.leave()
                     }
+                    var authentication = CLIFixtureSocketAuthentication()
                     var pending = Data()
                     var buffer = [UInt8](repeating: 0, count: 4096)
                     while true {
@@ -9444,6 +9445,13 @@ final class CLINotifyProcessIntegrationRegressionTests: XCTestCase {
                             let lineData = pending.subdata(in: 0..<newlineRange.lowerBound)
                             pending.removeSubrange(0...newlineRange.lowerBound)
                             guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                            if let responsePayload = authentication.response(for: line) {
+                                let response = responsePayload + "\n"
+                                _ = response.withCString { ptr in
+                                    Darwin.write(clientFD, ptr, strlen(ptr))
+                                }
+                                continue
+                            }
                             context.state.append(line)
                             let response = self.agentHookMockResponse(line: line, context: context) + "\n"
                             _ = response.withCString { ptr in

@@ -1,6 +1,18 @@
 import XCTest
 import Darwin
 
+struct CLIFixtureSocketAuthentication {
+    private var isAuthenticated = false
+
+    mutating func response(for line: String) -> String? {
+        guard line.hasPrefix("auth ") else {
+            return isAuthenticated ? nil : "ERROR: Invalid password"
+        }
+        isAuthenticated = line == "auth \(BundledCLITestSupport.fixtureSocketPassword)"
+        return isAuthenticated ? "OK" : "ERROR: Invalid password"
+    }
+}
+
 extension CMUXOpenCommandTests {
     func openTypedDiffSession(payload: [String: Any], cliPath: String) throws -> String {
         let source = try XCTUnwrap(payload["sessionSource"] as? [String: Any])
@@ -149,6 +161,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     fulfillOnce()
                 }
 
+                var authentication = CLIFixtureSocketAuthentication()
                 var pending = Data()
                 var buffer = [UInt8](repeating: 0, count: 4096)
                 while true {
@@ -164,6 +177,13 @@ extension CLINotifyProcessIntegrationRegressionTests {
                         let lineData = pending.subdata(in: 0..<newlineRange.lowerBound)
                         pending.removeSubrange(0...newlineRange.lowerBound)
                         guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                        if let responsePayload = authentication.response(for: line) {
+                            let response = responsePayload + "\n"
+                            _ = response.withCString { ptr in
+                                Darwin.write(clientFD, ptr, strlen(ptr))
+                            }
+                            continue
+                        }
                         state.append(line)
                         if fulfillWhen?(line) == true {
                             fulfillOnce()
@@ -206,6 +226,7 @@ extension CLINotifyProcessIntegrationRegressionTests {
                     Darwin.close(clientFD)
                 }
 
+                var authentication = CLIFixtureSocketAuthentication()
                 var pending = Data()
                 var buffer = [UInt8](repeating: 0, count: 4096)
                 while true {
@@ -221,6 +242,13 @@ extension CLINotifyProcessIntegrationRegressionTests {
                         let lineData = pending.subdata(in: 0..<newlineRange.lowerBound)
                         pending.removeSubrange(0...newlineRange.lowerBound)
                         guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                        if let responsePayload = authentication.response(for: line) {
+                            let response = responsePayload + "\n"
+                            _ = response.withCString { ptr in
+                                Darwin.write(clientFD, ptr, strlen(ptr))
+                            }
+                            continue
+                        }
                         state.append(line)
                         let response = handler(line) + "\n"
                         _ = response.withCString { ptr in

@@ -884,8 +884,36 @@ struct CmuxAgentChatConfigTests {
             global: nil
         )
 
-        #expect(AgentChatThemeSync.themeURL(for: agentChat).absoluteString == "http://127.0.0.1:43123/theme-token/api/theme")
+        #expect(AgentChatThemeSync.themeURL(for: agentChat)?.absoluteString == "http://127.0.0.1:43123/theme-token/api/theme")
         #expect(session.shutdownURL.absoluteString == "http://127.0.0.1:43123/theme-token/api/shutdown")
+    }
+
+    @MainActor
+    @Test func appOwnedAgentChatThemeURLRequiresOwnedServerSession() {
+        AgentChatActionInFlightGate.clearOwnedServerSession()
+        let agentChat = CmuxAgentChatConfiguration.resolved(
+            local: CmuxAgentChatConfigDefinition(startCommand: "cmux-chat"),
+            global: nil
+        )
+
+        #expect(agentChat.serverMode == .appOwned)
+        #expect(AgentChatThemeSync.themeURL(for: agentChat) == nil)
+    }
+
+    @MainActor
+    @Test func legacyDefaultAgentChatThemeURLPreservesFallback() {
+        AgentChatActionInFlightGate.clearOwnedServerSession()
+        let agentChat = CmuxAgentChatConfiguration.resolved(
+            local: nil,
+            global: nil,
+            localSourcePath: nil,
+            globalSourcePath: nil,
+            productDefaultStartCommand: nil,
+            productDefaultIsAuthoritative: false
+        )
+
+        #expect(agentChat.serverMode == .legacyDefaultURL)
+        #expect(AgentChatThemeSync.themeURL(for: agentChat)?.absoluteString == "http://127.0.0.1:7739/api/theme")
     }
 
     @MainActor
@@ -898,10 +926,15 @@ struct CmuxAgentChatConfigTests {
                 url: "http://127.0.0.1:9000/chat",
                 startCommand: "cmux-chat"
             ),
-            global: nil
+            global: nil,
+            localSourcePath: "/repo/cmux.json",
+            globalSourcePath: nil,
+            productDefaultStartCommand: nil,
+            productDefaultIsAuthoritative: false
         )
 
-        #expect(AgentChatThemeSync.themeURL(for: agentChat).absoluteString == "http://127.0.0.1:9000/api/theme")
+        #expect(agentChat.serverMode == .explicitURL)
+        #expect(AgentChatThemeSync.themeURL(for: agentChat)?.absoluteString == "http://127.0.0.1:9000/api/theme")
     }
 
     @MainActor

@@ -135,8 +135,8 @@ enum AgentChatThemeSync {
     @MainActor
     static func syncNow(agentChat: CmuxAgentChatConfiguration) {
         guard isEnabled else { return }
-        let url = themeURL(for: agentChat)
         Task { @MainActor in
+            guard let url = themeURL(for: agentChat) else { return }
             await postResolvedTheme(to: url)
         }
     }
@@ -156,7 +156,8 @@ enum AgentChatThemeSync {
                 }
                 // Re-check: the flag can flip off during the debounce window.
                 guard isEnabled else { return }
-                await postResolvedTheme(to: currentThemeURL())
+                guard let url = currentThemeURL() else { return }
+                await postResolvedTheme(to: url)
             }
         }
     }
@@ -185,21 +186,21 @@ enum AgentChatThemeSync {
     }
 
     @MainActor
-    static func themeURL(for agentChat: CmuxAgentChatConfiguration) -> URL {
-        if !agentChat.hasExplicitURL,
-           agentChat.startCommand != nil,
-           let session = AgentChatActionInFlightGate.ownedServerSession() {
-            return session.themeURL
+    static func themeURL(for agentChat: CmuxAgentChatConfiguration) -> URL? {
+        switch agentChat.serverMode {
+        case .explicitURL, .legacyDefaultURL:
+            return themeURL(for: agentChat.url)
+        case .appOwned:
+            return AgentChatActionInFlightGate.ownedServerSession()?.themeURL
         }
-        return themeURL(for: agentChat.url)
     }
 
     @MainActor
-    private static func currentThemeURL() -> URL {
+    private static func currentThemeURL() -> URL? {
         if let store = AppDelegate.shared?.mainWindowContexts.values.compactMap(\.cmuxConfigStore).first {
             return themeURL(for: store.agentChat)
         }
-        return themeURL(for: CmuxAgentChatConfiguration.default.url)
+        return themeURL(for: CmuxAgentChatConfiguration.resolved(local: nil, global: nil))
     }
 
     @MainActor

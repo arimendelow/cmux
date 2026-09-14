@@ -46,6 +46,7 @@ private enum RemoteResumeHookSocketServer {
             guard clientFD >= 0 else { return }
             defer { Darwin.close(clientFD) }
 
+            var authentication = CLIFixtureSocketAuthentication()
             var pending = Data()
             var buffer = [UInt8](repeating: 0, count: 4_096)
             while true {
@@ -61,6 +62,10 @@ private enum RemoteResumeHookSocketServer {
                     let lineData = pending.subdata(in: 0..<newline)
                     pending.removeSubrange(0...newline)
                     guard let line = String(data: lineData, encoding: .utf8) else { continue }
+                    if let response = authentication.response(for: line) {
+                        write(response, to: clientFD)
+                        continue
+                    }
                     capture.append(line)
                     write(response(for: line, surfaceID: surfaceID), to: clientFD)
                 }
